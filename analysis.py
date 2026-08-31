@@ -279,7 +279,7 @@ def rank_currencies(strength: dict[str, float]) -> list[tuple[str, float]]:
 
 
 def analyze_tf(tf_key: str, label: str, candles: list[Candle]) -> Optional[TfView]:
-    if len(candles) < 30:
+    if len(candles) < 20:
         return None
     last = candles[-1].close
     pct = cfg.ZIGZAG_PCT.get(tf_key, 0.18)
@@ -322,7 +322,7 @@ def build_stack(
         if view:
             views[tf["key"]] = view
             last = view.last
-    if len(views) < 4:
+    if len(views) < 2:
         return None
     base, quote = split_pair(symbol)
     gap = strength.get(base, 0) - strength.get(quote, 0)

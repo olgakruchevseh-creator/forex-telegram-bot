@@ -63,39 +63,66 @@ def _parse_values(values: list) -> list[Candle]:
     return candles
 
 
-def fetch_tf_batch(tf: dict, api_key: str) -> dict[str, list[Candle]]:
-    """Все 7 пар одним запросом на одном таймфрейме."""
+def _request_series(symbols: str, tf: dict, api_key: str) -> dict:
     r = requests.get(
         TD_URL,
         params={
-            "symbol": ",".join(cfg.PAIRS),
+            "symbol": symbols,
             "interval": tf["api"],
             "outputsize": tf["candles"],
             "apikey": api_key,
             "timezone": "UTC",
-            "order": "ASC",
         },
-        timeout=40,
+        timeout=60,
     )
     r.raise_for_status()
     data = r.json()
-    if data.get("status") == "error" and "values" not in data:
-        raise RuntimeError(f"{tf['key']}: {data.get('message')}")
+    if isinstance(data, dict) and data.get("status") == "error":
+        raise RuntimeError(str(data.get("message") or data))
+    return data
 
+
+def _extract_pairs(data: dict) -> dict[str, list[Candle]]:
     out: dict[str, list[Candle]] = {}
-    # batch: { "EUR/USD": {values, status}, ... }  или одиночный {values}
+    if not isinstance(data, dict):
+        return out
     if "values" in data and isinstance(data.get("values"), list):
-        if len(cfg.PAIRS) == 1:
-            out[cfg.PAIRS[0]] = _parse_values(data["values"])
+        # одиночный ответ без имени пары
         return out
     for symbol in cfg.PAIRS:
-        block = data.get(symbol) or {}
+        block = data.get(symbol)
         if isinstance(block, dict) and block.get("status") == "error":
-            log.warning("%s %s: %s", symbol, tf["key"], block.get("message"))
+            log.warning("%s: %s", symbol, block.get("message"))
             continue
         values = block.get("values") if isinstance(block, dict) else None
         if values:
             out[symbol] = _parse_values(values)
+    return out
+
+
+def fetch_tf_batch(tf: dict, api_key: str) -> dict[str, list[Candle]]:
+    """Сначала пакет из 7 пар, если пусто — по одной."""
+    try:
+        data = _request_series(",".join(cfg.PAIRS), tf, api_key)
+        out = _extract_pairs(data)
+        if out:
+            return out
+    except Exception as e:
+        log.warning("Пакет %s не вышел: %s", tf["key"], e)
+
+    out: dict[str, list[Candle]] = {}
+    for symbol in cfg.PAIRS:
+        try:
+            data = _request_series(symbol, tf, api_key)
+            if isinstance(data, dict) and isinstance(data.get("values"), list):
+                out[symbol] = _parse_values(data["values"])
+            else:
+                part = _extract_pairs(data)
+                if symbol in part:
+                    out[symbol] = part[symbol]
+        except Exception as e:
+            log.warning("%s %s: %s", symbol, tf["key"], e)
+        time.sleep(cfg.REQUEST_PAUSE_SEC)
     return out
 
 
@@ -237,8 +264,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Считаю силу валют по H1…")
-    market = fetch_market(env("TWELVE_DATA_API_KEY"))
-    strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
+    market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
+    h1 = h1_series(market)
+    if not any(len(v) > cfg.STRENGTH_LOOKBACK for v in h1.values()):
+        await update.message.reply_text(
+            "Котировки H1 сейчас не пришли. Повтори /now через минуту."
+        )
+        return
+    strength = currency_strength(h1, cfg.STRENGTH_LOOKBACK)
     rank = rank_currencies(strength)
     await update.message.reply_text(format_strength(rank))
 
@@ -254,11 +287,17 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Доступны: " + ", ".join(cfg.PAIRS))
         return
     await update.message.reply_text(f"Собираю стек по {raw}…")
-    market = fetch_market(env("TWELVE_DATA_API_KEY"))
+    market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
+    got = {k: len(v) for k, v in (market.get(raw) or {}).items()}
     strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
-    stack = build_stack(raw, market[raw], strength)
+    stack = build_stack(raw, market.get(raw) or {}, strength)
     if not stack:
-        await update.message.reply_text("Не хватает данных по таймфреймам.")
+        detail = ", ".join(f"{k}:{n}" for k, n in got.items()) or "пусто"
+        await update.message.reply_text(
+            "Не хватает данных по таймфреймам.\n"
+            f"Пришло свечей: {detail}\n"
+            "Повтори команду через минуту."
+        )
         return
     await update.message.reply_text(format_pair_now(stack))
 
