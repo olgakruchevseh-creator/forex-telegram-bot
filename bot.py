@@ -8,6 +8,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -36,6 +37,8 @@ TD_URL = "https://api.twelvedata.com/time_series"
 
 # cache[(symbol, tf_key)] = {"ts": float, "candles": list[Candle]}
 CACHE: dict[tuple[str, str], dict] = {}
+SENT_H1: set[str] = set()
+LOCAL_TZ = ZoneInfo("Europe/Berlin")
 
 
 def env(name: str) -> str:
@@ -181,10 +184,20 @@ def last_closed_h1_dt(h1: dict[str, list[Candle]]) -> str:
     return max(dts) if dts else ""
 
 
+def format_h1_time(dt_str: str) -> str:
+    raw = (dt_str or "")[:19]
+    try:
+        utc = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        local = utc.astimezone(LOCAL_TZ)
+        return f"{local:%H:%M} по Берлину ({utc:%H:%M} UTC)"
+    except ValueError:
+        return dt_str
+
+
 def format_strength(rank: list[tuple[str, float]], candle_dt: str = "") -> str:
     title = "💱 Сила валют по закрытой часовой свече"
     if candle_dt:
-        title += f"\nСвеча: {candle_dt} UTC"
+        title += f"\nСвеча: {format_h1_time(candle_dt)}"
     lines = [title + "\n"]
     for i, (cur, sc) in enumerate(rank, 1):
         sign = "+" if sc >= 0 else ""
@@ -335,7 +348,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         h1 = h1_series(market)
         closed_dt = last_closed_h1_dt(h1)
         already = state.get("last_strength_h1")
-        if rank and closed_dt and closed_dt != already:
+        if rank and closed_dt and closed_dt not in SENT_H1 and closed_dt != already:
+            SENT_H1.add(closed_dt)
             await send(context.application, int(chat_id), format_strength(rank, closed_dt))
             state["last_rank"] = [c for c, _ in rank]
             state["last_strength_h1"] = closed_dt
