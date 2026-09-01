@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -16,7 +17,15 @@ from analysis import Candle, TF_MINUTES, atr, closed_candles
 
 log = logging.getLogger("fxbot.levels")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
-STATE_PATH = Path(__file__).parent / "levels_state.json"
+DEFAULT_STATE_PATH = Path(__file__).parent / "levels_state.json"
+STATE_PATH = DEFAULT_STATE_PATH
+
+
+def levels_state_path() -> Path:
+    raw = os.getenv("STATE_DIR", "").strip()
+    if raw:
+        return Path(raw) / "levels_state.json"
+    return STATE_PATH
 
 TF_ORDER = ["W1", "D1", "H4", "H1", "M15", "M5"]
 TF_WEIGHT = {"W1": 40, "D1": 30, "H4": 18, "H1": 10, "M15": 4, "M5": 2}
@@ -97,9 +106,17 @@ def digits(symbol: str) -> int:
 
 
 def load_store() -> dict:
-    if STATE_PATH.exists():
+    dest = levels_state_path()
+    src = DEFAULT_STATE_PATH if DEFAULT_STATE_PATH.exists() else STATE_PATH
+    if not dest.exists() and src.exists() and src != dest:
         try:
-            data = json.loads(STATE_PATH.read_text())
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(src.read_text())
+        except Exception:
+            log.exception("Не удалось перенести levels_state.json")
+    if dest.exists():
+        try:
+            data = json.loads(dest.read_text())
             if isinstance(data, dict):
                 data.setdefault("zones", {})
                 data.setdefault("sent", {})
@@ -113,9 +130,11 @@ def load_store() -> dict:
 
 
 def save_store(store: dict) -> None:
-    tmp = STATE_PATH.with_suffix(".tmp")
+    dest = levels_state_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
     tmp.write_text(json.dumps(store, ensure_ascii=False, indent=2))
-    tmp.replace(STATE_PATH)
+    tmp.replace(dest)
 
 
 def acquire(store: dict) -> bool:

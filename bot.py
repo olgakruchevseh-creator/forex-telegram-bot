@@ -28,13 +28,23 @@ from analysis import (
 )
 import briefing
 import news as newsmod
+import levels
+import patterns
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("fxbot")
 
-STATE_FILE = Path(__file__).parent / "state.json"
+DEFAULT_STATE_FILE = Path(__file__).parent / "state.json"
+STATE_FILE = DEFAULT_STATE_FILE
+
+
+def state_file() -> Path:
+    raw = os.getenv("STATE_DIR", "").strip()
+    if raw:
+        return Path(raw) / "state.json"
+    return STATE_FILE
 TD_URL = "https://api.twelvedata.com/time_series"
 
 # cache[(symbol, tf_key)] = {"ts": float, "candles": list[Candle]}
@@ -51,8 +61,19 @@ def env(name: str) -> str:
 
 
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
+    dest = state_file()
+    src = DEFAULT_STATE_FILE
+    if not dest.exists() and src.exists() and src != dest:
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(src.read_text())
+        except Exception:
+            log.exception("Не удалось перенести state.json")
+    if dest.exists():
+        try:
+            return json.loads(dest.read_text())
+        except Exception:
+            log.exception("Повреждён state.json")
     return {
         "chat_id": os.getenv("TELEGRAM_CHAT_ID") or None,
         "last_signals": {},
@@ -62,7 +83,11 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    dest = state_file()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    tmp.replace(dest)
 
 
 def _parse_values(values: list) -> list[Candle]:
@@ -458,6 +483,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             await send(context.application, int(chat_id), format_signal(side, stack, strength))
             state.setdefault("last_signals", {})[f"{symbol}:{side}"] = time.time()
+
+        if getattr(cfg, "LEVELS_ENABLED", True):
+            try:
+                for text in levels.process_market(market):
+                    await _send_parts(context.application, int(chat_id), text)
+            except Exception:
+                log.exception("Ошибка модуля уровней")
+
+        if getattr(cfg, "PATTERNS_ENABLED", True):
+            try:
+                for text in patterns.process_market(market):
+                    await _send_parts(context.application, int(chat_id), text)
+            except Exception:
+                log.exception("Ошибка сканера паттернов")
 
         save_state(state)
         log.info("Скан %s OK top=%s", datetime.now(timezone.utc).strftime("%H:%M"), rank[0][0] if rank else "-")
