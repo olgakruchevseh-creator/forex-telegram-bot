@@ -26,6 +26,8 @@ from analysis import (
     decide_signal,
     rank_currencies,
 )
+import briefing
+import news as newsmod
 
 load_dotenv()
 
@@ -199,11 +201,13 @@ def format_strength(rank: list[tuple[str, float]], candle_dt: str = "") -> str:
     if candle_dt:
         title += f"\nСвеча: {format_h1_time(candle_dt)}"
     lines = [title + "\n"]
-    for i, (cur, sc) in enumerate(rank, 1):
-        sign = "+" if sc >= 0 else ""
-        lines.append(f"{i}. {cur}  {sign}{sc:.2f}  {bars(sc)}")
-    lines.append(f"\nСамая сильная: {rank[0][0]}")
-    lines.append(f"Самая слабая: {rank[-1][0]}")
+    pct = briefing.strength_pct(rank)
+    for i, (cur, sc) in enumerate(pct, 1):
+        lines.append(f"{i}. {cur}  {sc:.0f}%")
+    if pct:
+        lines.append(f"\nСамая сильная: {pct[0][0]} ({pct[0][1]:.0f}%)")
+        lines.append(f"Самая слабая: {pct[-1][0]} ({pct[-1][1]:.0f}%)")
+        lines.append(f"Разница силы: {pct[0][1] - pct[-1][1]:.0f} п.п.")
     return "\n".join(lines)
 
 
@@ -280,9 +284,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Смотрю W1, D1, H4, H1, M15, M5.\n"
         "Пишу только когда старшие и младшие ТФ смотрят в одну сторону "
         "и сила валют это подтверждает.\n"
-        "Силу валют присылаю после закрытия каждой часовой свечи.\n\n"
+        "После закрытия каждой часовой свечи присылаю полный брифинг.\n\n"
         "/now — сила валют сейчас\n"
         "/pair EUR/USD — стек таймфреймов по паре\n"
+        "/briefing — брифинг текущей сессии\n"
         "/status — жив ли я"
     )
 
@@ -290,7 +295,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Работаю. 7 мажоров × W1/D1/H4/H1/M15/M5.\n"
-        "Сила валют — после закрытия каждой H1. LONG/SHORT — только при согласии ТФ."
+        "Полный брифинг — после закрытия каждой H1."
     )
 
 
@@ -334,6 +339,89 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(format_pair_now(stack))
 
 
+async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Собираю брифинг сессии…")
+    api_key = env("TWELVE_DATA_API_KEY")
+    market = fetch_market(api_key, force=True)
+    strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
+    rank = rank_currencies(strength)
+    dxy = briefing.collect_extras(api_key, force=True)
+    events = briefing.session_events(newsmod.load_events())
+    text = briefing.build_briefing_text(market, strength, rank, dxy, events)
+    for part in briefing.split_telegram(text):
+        await update.message.reply_text(part)
+
+
+async def _send_parts(app: Application, chat_id: int, text: str) -> None:
+    for part in briefing.split_telegram(text):
+        await send(app, chat_id, part)
+
+
+async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not cfg.BRIEFING_ENABLED:
+        return
+    state = load_state()
+    chat_id = state.get("chat_id")
+    if not chat_id:
+        return
+    state.setdefault("news_warned", {})
+    state.setdefault("news_actual_sent", {})
+    api_key = env("TWELVE_DATA_API_KEY")
+    try:
+        market = fetch_market(api_key)
+        strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
+        rank = rank_currencies(strength)
+        dxy = briefing.collect_extras(api_key)
+        all_events = newsmod.load_events()
+        now_utc = datetime.now(timezone.utc)
+        bid = briefing.briefing_id()
+        closed_dt = last_closed_h1_dt(h1_series(market))
+        already_h1 = closed_dt and (
+            closed_dt in SENT_H1 or state.get("last_strength_h1") == closed_dt
+        )
+        if (
+            briefing.just_opened(window_min=cfg.BRIEFING_OPEN_WINDOW_MIN)
+            and state.get("last_briefing_id") != bid
+            and not already_h1
+        ):
+            state["last_briefing_id"] = bid
+            if closed_dt:
+                SENT_H1.add(closed_dt)
+                state["last_strength_h1"] = closed_dt
+            save_state(state)
+            dxy = briefing.collect_extras(api_key, force=True, h1_dt=closed_dt or "")
+            text = briefing.build_briefing_text(
+                market, strength, rank, dxy, briefing.session_events(all_events)
+            )
+            await _send_parts(context.application, int(chat_id), text)
+
+        for event in newsmod.high_events(all_events):
+            left = newsmod.minutes_left(event, now_utc)
+            if 50 <= left <= cfg.NEWS_WARN_MINUTES + 8:
+                if event.event_id in state["news_warned"]:
+                    continue
+                fresh_m = fetch_market(api_key, force=True)
+                fresh_s = currency_strength(h1_series(fresh_m), cfg.STRENGTH_LOOKBACK)
+                fresh_r = rank_currencies(fresh_s)
+                fresh_dxy = briefing.collect_extras(api_key)
+                state["news_warned"][event.event_id] = time.time()
+                save_state(state)
+                await _send_parts(
+                    context.application,
+                    int(chat_id),
+                    briefing.format_news_warning(event, fresh_s, fresh_r, fresh_dxy),
+                )
+            if newsmod.has_actual(event) and event.event_id not in state["news_actual_sent"]:
+                verdict = newsmod.interpret_print(event)
+                state["news_actual_sent"][event.event_id] = time.time()
+                save_state(state)
+                msg = briefing.format_actual_update(event, verdict, dxy, strength.get("USD", 0.0))
+                if msg:
+                    await _send_parts(context.application, int(chat_id), msg)
+    except Exception:
+        log.exception("Ошибка брифинга")
+
+
 async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     state = load_state()
     chat_id = state.get("chat_id")
@@ -349,13 +437,17 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         closed_dt = last_closed_h1_dt(h1)
         already = state.get("last_strength_h1")
         if rank and closed_dt and closed_dt not in SENT_H1 and closed_dt != already:
-            # Сначала помечаем свечу отправленной, потом пишем в чат.
             SENT_H1.add(closed_dt)
             state["last_rank"] = [c for c, _ in rank]
             state["last_strength_h1"] = closed_dt
             state["last_strength_ts"] = time.time()
+            state["last_briefing_id"] = briefing.briefing_id()
             save_state(state)
-            await send(context.application, int(chat_id), format_strength(rank, closed_dt))
+            api_key = env("TWELVE_DATA_API_KEY")
+            dxy = briefing.collect_extras(api_key, force=True, h1_dt=closed_dt)
+            events = briefing.session_events(newsmod.load_events())
+            text = briefing.build_briefing_text(market, strength, rank, dxy, events)
+            await _send_parts(context.application, int(chat_id), text)
 
         for symbol, by_tf in market.items():
             stack = build_stack(symbol, by_tf, strength)
@@ -381,7 +473,9 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("now", cmd_now))
     app.add_handler(CommandHandler("pair", cmd_pair))
+    app.add_handler(CommandHandler("briefing", cmd_briefing))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
+    app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)
     log.info("Бот запущен.")
     app.run_polling(drop_pending_updates=True)
 
