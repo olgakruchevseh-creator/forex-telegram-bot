@@ -20,6 +20,7 @@ from analysis import (
     PairStack,
     bias_word,
     build_stack,
+    closed_candles,
     currency_strength,
     decide_signal,
     rank_currencies,
@@ -171,8 +172,20 @@ def bars(score: float) -> str:
     return "█" * n + "░" * (10 - n)
 
 
-def format_strength(rank: list[tuple[str, float]]) -> str:
-    lines = ["💱 Сила валют (H1), раз в час\n"]
+def last_closed_h1_dt(h1: dict[str, list[Candle]]) -> str:
+    dts = []
+    for candles in h1.values():
+        closed = closed_candles(candles)
+        if closed:
+            dts.append(closed[-1].dt)
+    return max(dts) if dts else ""
+
+
+def format_strength(rank: list[tuple[str, float]], candle_dt: str = "") -> str:
+    title = "💱 Сила валют по закрытой часовой свече"
+    if candle_dt:
+        title += f"\nСвеча: {candle_dt} UTC"
+    lines = [title + "\n"]
     for i, (cur, sc) in enumerate(rank, 1):
         sign = "+" if sc >= 0 else ""
         lines.append(f"{i}. {cur}  {sign}{sc:.2f}  {bars(sc)}")
@@ -254,7 +267,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Смотрю W1, D1, H4, H1, M15, M5.\n"
         "Пишу только когда старшие и младшие ТФ смотрят в одну сторону "
         "и сила валют это подтверждает.\n"
-        "Силу валют присылаю сама раз в час.\n\n"
+        "Силу валют присылаю после закрытия каждой часовой свечи.\n\n"
         "/now — сила валют сейчас\n"
         "/pair EUR/USD — стек таймфреймов по паре\n"
         "/status — жив ли я"
@@ -264,7 +277,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Работаю. 7 мажоров × W1/D1/H4/H1/M15/M5.\n"
-        "Сила валют — раз в час. LONG/SHORT — только при согласии ТФ."
+        "Сила валют — после закрытия каждой H1. LONG/SHORT — только при согласии ТФ."
     )
 
 
@@ -272,14 +285,14 @@ async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Считаю силу валют по H1…")
     market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
     h1 = h1_series(market)
-    if not any(len(v) > cfg.STRENGTH_LOOKBACK for v in h1.values()):
+    if not any(len(closed_candles(v)) > cfg.STRENGTH_LOOKBACK for v in h1.values()):
         await update.message.reply_text(
             "Котировки H1 сейчас не пришли. Повтори /now через минуту."
         )
         return
     strength = currency_strength(h1, cfg.STRENGTH_LOOKBACK)
     rank = rank_currencies(strength)
-    await update.message.reply_text(format_strength(rank))
+    await update.message.reply_text(format_strength(rank, last_closed_h1_dt(h1)))
 
 
 async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -319,12 +332,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
 
-        last_strength_ts = float(state.get("last_strength_ts") or 0)
-        hours_since = (time.time() - last_strength_ts) / 3600 if last_strength_ts else 99
-        due = hours_since >= cfg.STRENGTH_REPORT_EVERY_HOURS
-        if due and rank:
-            await send(context.application, int(chat_id), format_strength(rank))
+        h1 = h1_series(market)
+        closed_dt = last_closed_h1_dt(h1)
+        already = state.get("last_strength_h1")
+        if rank and closed_dt and closed_dt != already:
+            await send(context.application, int(chat_id), format_strength(rank, closed_dt))
             state["last_rank"] = [c for c, _ in rank]
+            state["last_strength_h1"] = closed_dt
             state["last_strength_ts"] = time.time()
 
         for symbol, by_tf in market.items():

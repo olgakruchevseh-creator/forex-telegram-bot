@@ -255,14 +255,26 @@ def split_pair(symbol: str) -> tuple[str, str]:
     return base, quote
 
 
+def closed_candles(candles: list[Candle]) -> list[Candle]:
+    """Последняя свеча H1 часто ещё рисуется — для силы берём только закрытые."""
+    if len(candles) >= 2:
+        return candles[:-1]
+    return candles
+
+
 def currency_strength(series: dict[str, list[Candle]], lookback: int) -> dict[str, float]:
     scores = {c: 0.0 for c in cfg.CURRENCIES}
     counts = {c: 0 for c in cfg.CURRENCIES}
     for symbol, candles in series.items():
-        if len(candles) <= lookback:
+        bars = closed_candles(candles)
+        if len(bars) <= lookback:
             continue
         base, quote = split_pair(symbol)
-        pct = (candles[-1].close / candles[-1 - lookback].close - 1) * 100
+        end = bars[-1].close
+        start = bars[-1 - lookback].close
+        if start <= 0:
+            continue
+        pct = (end / start - 1) * 100
         scores[base] += pct
         scores[quote] -= pct
         counts[base] += 1

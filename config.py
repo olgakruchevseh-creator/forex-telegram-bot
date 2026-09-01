@@ -26,9 +26,12 @@ TIMEFRAMES = [
 ]
 
 STRENGTH_TF = "H1"
-STRENGTH_LOOKBACK = 12
+# Сила = движение за последнюю ЗАКРЫТУЮ часовую свечу.
+STRENGTH_LOOKBACK = 1
 STRENGTH_RANK_JUMP = 2
-PAIR_STRENGTH_MIN = 0.35
+# Автосообщение — только когда закрылась новая H1, не чаще раза за эту свечу.
+STRENGTH_REPORT_EVERY_HOURS = 1
+PAIR_STRENGTH_MIN = 0.20
 
 SCAN_EVERY_MINUTES = 5
 # 337 кредитов/мин. Полный скан = 6 batch ≈ 42 кредита. Запас большой.
