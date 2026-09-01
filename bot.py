@@ -47,7 +47,12 @@ def env(name: str) -> str:
 def load_state() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
-    return {"chat_id": os.getenv("TELEGRAM_CHAT_ID") or None, "last_signals": {}, "last_rank": []}
+    return {
+        "chat_id": os.getenv("TELEGRAM_CHAT_ID") or None,
+        "last_signals": {},
+        "last_rank": [],
+        "last_strength_ts": 0,
+    }
 
 
 def save_state(state: dict) -> None:
@@ -167,7 +172,7 @@ def bars(score: float) -> str:
 
 
 def format_strength(rank: list[tuple[str, float]]) -> str:
-    lines = ["💱 Смена силы валют (считается по H1)\n"]
+    lines = ["💱 Сила валют (H1), раз в час\n"]
     for i, (cur, sc) in enumerate(rank, 1):
         sign = "+" if sc >= 0 else ""
         lines.append(f"{i}. {cur}  {sign}{sc:.2f}  {bars(sc)}")
@@ -248,8 +253,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Готово. Я запомнил тебя.\n"
         "Смотрю W1, D1, H4, H1, M15, M5.\n"
         "Пишу только когда старшие и младшие ТФ смотрят в одну сторону "
-        "и сила валют это подтверждает.\n\n"
-        "/now — сила валют\n"
+        "и сила валют это подтверждает.\n"
+        "Силу валют присылаю сама раз в час.\n\n"
+        "/now — сила валют сейчас\n"
         "/pair EUR/USD — стек таймфреймов по паре\n"
         "/status — жив ли я"
     )
@@ -258,7 +264,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Работаю. 7 мажоров × W1/D1/H4/H1/M15/M5.\n"
-        "Сигнал только при согласии старших и младших ТФ."
+        "Сила валют — раз в час. LONG/SHORT — только при согласии ТФ."
     )
 
 
@@ -313,9 +319,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
 
-        if rank_changed(state.get("last_rank") or [], rank):
+        last_strength_ts = float(state.get("last_strength_ts") or 0)
+        hours_since = (time.time() - last_strength_ts) / 3600 if last_strength_ts else 99
+        due = hours_since >= cfg.STRENGTH_REPORT_EVERY_HOURS
+        if due and rank:
             await send(context.application, int(chat_id), format_strength(rank))
             state["last_rank"] = [c for c, _ in rank]
+            state["last_strength_ts"] = time.time()
 
         for symbol, by_tf in market.items():
             stack = build_stack(symbol, by_tf, strength)
