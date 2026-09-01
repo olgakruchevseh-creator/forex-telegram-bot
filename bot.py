@@ -38,7 +38,7 @@ TD_URL = "https://api.twelvedata.com/time_series"
 # cache[(symbol, tf_key)] = {"ts": float, "candles": list[Candle]}
 CACHE: dict[tuple[str, str], dict] = {}
 SENT_H1: set[str] = set()
-LOCAL_TZ = ZoneInfo("Europe/Berlin")
+LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 
 
 def env(name: str) -> str:
@@ -189,7 +189,7 @@ def format_h1_time(dt_str: str) -> str:
     try:
         utc = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         local = utc.astimezone(LOCAL_TZ)
-        return f"{local:%H:%M} по Берлину ({utc:%H:%M} UTC)"
+        return f"{local:%H:%M} по Амстердаму ({utc:%H:%M} UTC)"
     except ValueError:
         return dt_str
 
@@ -349,11 +349,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         closed_dt = last_closed_h1_dt(h1)
         already = state.get("last_strength_h1")
         if rank and closed_dt and closed_dt not in SENT_H1 and closed_dt != already:
+            # Сначала помечаем свечу отправленной, потом пишем в чат.
             SENT_H1.add(closed_dt)
-            await send(context.application, int(chat_id), format_strength(rank, closed_dt))
             state["last_rank"] = [c for c, _ in rank]
             state["last_strength_h1"] = closed_dt
             state["last_strength_ts"] = time.time()
+            save_state(state)
+            await send(context.application, int(chat_id), format_strength(rank, closed_dt))
 
         for symbol, by_tf in market.items():
             stack = build_stack(symbol, by_tf, strength)
