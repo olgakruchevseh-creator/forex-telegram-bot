@@ -13,7 +13,19 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import config as cfg
-from analysis import Candle, TF_MINUTES, atr, closed_candles
+from analysis import Candle, atr, closed_candles
+
+try:
+    from analysis import TF_MINUTES
+except ImportError:
+    TF_MINUTES = {
+        "W1": 7 * 24 * 60,
+        "D1": 24 * 60,
+        "H4": 240,
+        "H1": 60,
+        "M15": 15,
+        "M5": 5,
+    }
 
 log = logging.getLogger("fxbot.levels")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
