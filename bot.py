@@ -29,7 +29,10 @@ from analysis import (
 import briefing
 import news as newsmod
 import levels
-import patterns
+try:
+    import patterns
+except ImportError:
+    patterns = None
 
 load_dotenv()
 
@@ -491,7 +494,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля уровней")
 
-        if getattr(cfg, "PATTERNS_ENABLED", True):
+        if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
                 for text in patterns.process_market(market):
                     await _send_parts(context.application, int(chat_id), text)
