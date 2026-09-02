@@ -405,7 +405,7 @@ def format_strength_block(rank: list[tuple[str, float]]) -> list[str]:
 
 def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
     lines = ["", "🇺🇸 DXY", ""]
-    if not dxy or not dxy.available:
+    if not dxy or not getattr(dxy, "available", False):
         lines.append("нет данных")
         return lines
     lines.append(f"Цена: {dxy.price:.2f} ({dxy.change_pct:+.2f}%)")

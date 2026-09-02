@@ -381,13 +381,22 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "Брифинг не собрался: нет закрытых H1. Напиши /now или повтори через минуту."
             )
             return
+        dxy = None
         try:
             dxy = briefing.collect_extras(api_key)
         except Exception:
             log.exception("DXY для /briefing")
-            dxy = {}
-        events = briefing.session_events(newsmod.load_events())
-        text = briefing.build_briefing_text(market, strength, rank, dxy, events)
+        events = []
+        try:
+            events = briefing.session_events(newsmod.load_events())
+        except Exception:
+            log.exception("Новости для /briefing")
+        try:
+            text = briefing.build_briefing_text(market, strength, rank, dxy, events)
+        except Exception:
+            log.exception("Сборка текста /briefing")
+            text = format_strength(rank, last_closed_h1_dt(h1_series(market)))
+            text += "\n\nПолная доска пар сейчас недоступна."
         for part in briefing.split_telegram(text):
             await update.message.reply_text(part)
     except Exception:
@@ -497,7 +506,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 dxy = briefing.collect_extras(api_key, h1_dt=closed_dt)
             except Exception:
                 log.exception("DXY часового брифинга")
-                dxy = {}
+                dxy = None
             try:
                 events = briefing.session_events(newsmod.load_events())
                 text = briefing.build_briefing_text(market, strength, rank, dxy, events)
