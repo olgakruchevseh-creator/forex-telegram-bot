@@ -428,31 +428,6 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         dxy = briefing.collect_extras(api_key)
         all_events = newsmod.load_events()
         now_utc = datetime.now(timezone.utc)
-        bid = briefing.briefing_id()
-        closed_dt = last_closed_h1_dt(h1_series(market))
-        already_h1 = closed_dt and (
-            closed_dt in SENT_H1 or state.get("last_strength_h1") == closed_dt
-        )
-        if (
-            briefing.just_opened(window_min=cfg.BRIEFING_OPEN_WINDOW_MIN)
-            and state.get("last_briefing_id") != bid
-            and not already_h1
-        ):
-            state["last_briefing_id"] = bid
-            if closed_dt:
-                SENT_H1.add(closed_dt)
-                state["last_strength_h1"] = closed_dt
-            save_state(state)
-            try:
-                dxy = briefing.collect_extras(api_key, h1_dt=closed_dt or "")
-            except Exception:
-                log.exception("DXY сессии")
-                dxy = dxy or {}
-            text = briefing.build_briefing_text(
-                market, strength, rank, dxy, briefing.session_events(all_events)
-            )
-            await _send_parts(context.application, int(chat_id), text)
-
         for event in newsmod.high_events(all_events):
             left = newsmod.minutes_left(event, now_utc)
             if 50 <= left <= cfg.NEWS_WARN_MINUTES + 8:
@@ -494,12 +469,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         h1 = h1_series(market)
         closed_dt = last_closed_h1_dt(h1)
         already = state.get("last_strength_h1")
-        if rank and closed_dt and closed_dt not in SENT_H1 and closed_dt != already:
+        recent = time.time() - float(state.get("last_briefing_sent_ts") or 0) < 50 * 60
+        empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
+        if rank and closed_dt and closed_dt not in SENT_H1 and closed_dt != already and not recent and not empty:
             SENT_H1.add(closed_dt)
             state["last_rank"] = [c for c, _ in rank]
             state["last_strength_h1"] = closed_dt
             state["last_strength_ts"] = time.time()
             state["last_briefing_id"] = briefing.briefing_id()
+            state["last_briefing_sent_ts"] = time.time()
             save_state(state)
             api_key = env("TWELVE_DATA_API_KEY")
             try:
