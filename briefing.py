@@ -724,6 +724,18 @@ DXY_BASKET = (
     ("USD/SEK", 0.042),
     ("USD/CHF", 0.036),
 )
+DXY_CORE = ("EUR/USD", "USD/JPY", "GBP/USD", "USD/CAD", "USD/CHF")
+SEK_MAX_LAG_HOURS = 2
+
+
+def parse_h1_dt(raw: str) -> Optional[datetime]:
+    text = normalize_h1_ts(raw)
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
 
 
 def dxy_cache_path() -> Path:
@@ -735,6 +747,14 @@ def normalize_h1_ts(raw: str) -> str:
     if len(text) == 16:
         text += ":00"
     return text
+
+
+def _h1_age_hours(closed_h1: str) -> float:
+    ts = parse_h1_dt(closed_h1)
+    if not ts:
+        return -1.0
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return (now - ts).total_seconds() / 3600.0
 
 
 def dxy_matches_h1(view: Optional[IndexView], h1_dt: str) -> bool:
@@ -897,25 +917,25 @@ def _store_dxy(view: IndexView, h1_dt: str) -> Optional[IndexView]:
 
 def _fetch_direct_dxy(api_key: str) -> Optional[IndexView]:
     symbol = cfg.DXY_SYMBOL
-    last_err = ""
-    for attempt in range(1, 4):
-        try:
-            raw = fetch_index(api_key, symbol, "1h", 120)
-            dxy = analyze_index("DXY", raw)
-            if dxy and dxy.available:
-                log.info(
-                    "DXY_OK symbol=%s price=%s closed_h1=%s candles=ok",
-                    symbol,
-                    dxy.price,
-                    dxy.closed_h1,
-                )
-                return dxy
-            last_err = "мало закрытых свечей H1"
-        except Exception as e:
-            last_err = str(e)
-            log.warning("DXY_ERROR symbol=%s reason=%s", symbol, last_err)
-        time.sleep(0.4 * attempt)
-    log.warning("DXY_ERROR symbol=%s reason=%s", symbol, last_err or "нет валидного расчёта")
+    try:
+        raw = fetch_index(api_key, symbol, "1h", 120)
+    except Exception as e:
+        err = str(e)
+        if "404" in err:
+            log.warning("DXY_DIRECT_UNAVAILABLE symbol=%s status=404", symbol)
+            return None
+        log.warning("DXY_ERROR symbol=%s reason=%s", symbol, err)
+        return None
+    dxy = analyze_index("DXY", raw)
+    if dxy and dxy.available:
+        log.info(
+            "DXY_OK symbol=%s price=%s closed_h1=%s candles=ok",
+            symbol,
+            dxy.price,
+            dxy.closed_h1,
+        )
+        return dxy
+    log.warning("DXY_ERROR symbol=%s reason=мало закрытых свечей H1", symbol)
     return None
 
 
@@ -927,18 +947,86 @@ def _fetch_sek_h1(api_key: str) -> list[Candle]:
         return []
 
 
-def _synthetic_dxy(api_key: str, market: Optional[dict]) -> Optional[IndexView]:
+def core_target_h1(by_core: dict[str, list[Candle]]) -> str:
+    common: Optional[set[str]] = None
+    for symbol in DXY_CORE:
+        keys = {normalize_h1_ts(c.dt) for c in closed_candles(by_core.get(symbol) or [])}
+        common = keys if common is None else common & keys
+    if not common:
+        return ""
+    return max(common)
+
+
+def align_usdsek(sek_candles: list[Candle], target_h1: str, max_lag: int = SEK_MAX_LAG_HOURS):
+    closed = closed_candles(sek_candles)
+    target = parse_h1_dt(target_h1)
+    if not closed or not target:
+        return [], None
+    last = closed[-1]
+    last_ts = parse_h1_dt(last.dt)
+    if not last_ts:
+        return [], None
+    lag_hours = int(round((target - last_ts).total_seconds() / 3600.0))
+    if lag_hours < 0:
+        trimmed = [c for c in closed if normalize_h1_ts(c.dt) <= normalize_h1_ts(target_h1)]
+        return trimmed, "exact"
+    if lag_hours == 0:
+        return closed, "exact"
+    log.info(
+        "DXY_COMPONENT_LAG symbol=USD/SEK target_h1=%s actual_h1=%s lag_hours=%s",
+        normalize_h1_ts(target_h1),
+        normalize_h1_ts(last.dt),
+        lag_hours,
+    )
+    if lag_hours > max_lag:
+        log.warning(
+            "DXY_REJECTED reason=STALE_COMPONENT symbol=USD/SEK target_h1=%s actual_h1=%s lag_hours=%s",
+            normalize_h1_ts(target_h1),
+            normalize_h1_ts(last.dt),
+            lag_hours,
+        )
+        return [], None
+    filled = list(closed)
+    cursor = last_ts + timedelta(hours=1)
+    while cursor <= target:
+        filled.append(
+            Candle(
+                dt=cursor.strftime("%Y-%m-%d %H:%M:%S"),
+                open=last.close,
+                high=last.close,
+                low=last.close,
+                close=last.close,
+            )
+        )
+        cursor += timedelta(hours=1)
+    return filled, "forward_fill"
+
+
+def _synthetic_dxy(api_key: str, market: Optional[dict], target_h1: str = "") -> Optional[IndexView]:
     by_symbol: dict[str, list[Candle]] = {}
-    for symbol, _exp in DXY_BASKET:
-        if symbol == "USD/SEK":
-            continue
+    for symbol in DXY_CORE:
         by_symbol[symbol] = _pair_h1_closed(market, symbol)
-        if len(by_symbol[symbol]) < 21 and api_key:
-            try:
-                by_symbol[symbol] = closed_candles(fetch_index(api_key, symbol, "1h", 120))
-            except Exception as e:
-                log.warning("DXY_ERROR symbol=%s reason=%s", symbol, e)
-    by_symbol["USD/SEK"] = _fetch_sek_h1(api_key) if api_key else _pair_h1_closed(market, "USD/SEK")
+    target = normalize_h1_ts(target_h1) or core_target_h1(by_symbol)
+    if not target:
+        log.warning("DXY_ERROR symbol=synthetic reason=нет общей закрытой H1 ядра")
+        return None
+    core_last = core_target_h1(by_symbol)
+    if core_last and target > core_last:
+        log.warning(
+            "DXY_ERROR symbol=synthetic reason=ядро старше цели target=%s core=%s",
+            target,
+            core_last,
+        )
+        target = core_last
+    sek = _pair_h1_closed(market, "USD/SEK")
+    if len(sek) < 5 and api_key:
+        fetched = _fetch_sek_h1(api_key)
+        if fetched:
+            sek = fetched
+    aligned, sek_src = align_usdsek(sek, target)
+    if not aligned or not sek_src:
+        return None
+    by_symbol["USD/SEK"] = aligned
     candles = build_synthetic_dxy_candles(by_symbol)
     if len(candles) < 21:
         log.warning("DXY_ERROR symbol=synthetic reason=мало общих закрытых H1")
@@ -946,10 +1034,12 @@ def _synthetic_dxy(api_key: str, market: Optional[dict]) -> Optional[IndexView]:
     view = analyze_index("DXY", candles)
     if not view or not view.available:
         return None
+    view.closed_h1 = target
     log.info(
-        "DXY_OK symbol=synthetic price=%s closed_h1=%s candles=ok",
+        "DXY_OK symbol=synthetic price=%s closed_h1=%s usdsek_source=%s",
         view.price,
         view.closed_h1,
+        sek_src,
     )
     return view
 
@@ -970,7 +1060,12 @@ def collect_extras(
         and dxy_matches_h1(cached, expected or cache_key)
         and (not expected or cache_key == expected)
     ):
-        log.info("DXY_CACHE_USED symbol=%s closed_h1=%s", cfg.DXY_SYMBOL, expected or cache_key)
+        log.info(
+            "DXY_CACHE_USED symbol=%s closed_h1=%s age_hours=%.1f",
+            cfg.DXY_SYMBOL,
+            expected or cache_key,
+            _h1_age_hours(getattr(cached, "closed_h1", "") or cache_key),
+        )
         cached.cached = True
         return cached
     if expected and not force:
@@ -978,7 +1073,12 @@ def collect_extras(
         if disk and dxy_matches_h1(disk, expected):
             _DXY_CACHE["view"] = disk
             _DXY_CACHE["h1"] = expected
-            log.info("DXY_CACHE_USED symbol=%s closed_h1=%s", cfg.DXY_SYMBOL, expected)
+            log.info(
+                "DXY_CACHE_USED symbol=%s closed_h1=%s age_hours=%.1f",
+                cfg.DXY_SYMBOL,
+                expected,
+                _h1_age_hours(disk.closed_h1),
+            )
             return disk
     dxy = _fetch_direct_dxy(api_key)
     if dxy and dxy.available and dxy_matches_h1(dxy, expected):
@@ -987,7 +1087,7 @@ def collect_extras(
             return stored
     elif dxy and dxy.available and expected:
         pass
-    dxy = _synthetic_dxy(api_key, market)
+    dxy = _synthetic_dxy(api_key, market, expected)
     if dxy and dxy.available and dxy_matches_h1(dxy, expected):
         stored = _store_dxy(dxy, expected or dxy.closed_h1)
         if stored:

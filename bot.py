@@ -395,7 +395,9 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
         dxy = None
         try:
-            dxy = briefing.collect_extras(api_key, force=True, h1_dt=last_closed_h1_dt(h1_series(market)))
+            dxy = briefing.collect_extras(
+                api_key, force=True, h1_dt=last_closed_h1_dt(h1_series(market)), market=market
+            )
         except Exception:
             log.exception("DXY для /briefing")
         events = []
@@ -437,7 +439,7 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         market = fetch_market(api_key)
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
-        dxy = briefing.collect_extras(api_key)
+        dxy = briefing.collect_extras(api_key, market=market)
         all_events = newsmod.load_events()
         now_utc = datetime.now(timezone.utc)
         for event in newsmod.high_events(all_events):
@@ -448,7 +450,7 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 fresh_m = fetch_market(api_key, force=True)
                 fresh_s = currency_strength(h1_series(fresh_m), cfg.STRENGTH_LOOKBACK)
                 fresh_r = rank_currencies(fresh_s)
-                fresh_dxy = briefing.collect_extras(api_key)
+                fresh_dxy = briefing.collect_extras(api_key, market=fresh_m)
                 state["news_warned"][event.event_id] = time.time()
                 save_state(state)
                 await _send_parts(
@@ -502,7 +504,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 try:
                     api_key = env("TWELVE_DATA_API_KEY")
                     try:
-                        dxy = briefing.collect_extras(api_key, h1_dt=closed_dt)
+                        dxy = briefing.collect_extras(
+                            api_key,
+                            h1_dt=closed_dt,
+                            market=market,
+                        )
                     except Exception:
                         log.exception("DXY часового брифинга")
                         dxy = None
