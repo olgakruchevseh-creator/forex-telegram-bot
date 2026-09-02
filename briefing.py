@@ -64,18 +64,31 @@ def now_local() -> datetime:
     return datetime.now(timezone.utc).astimezone(LOCAL_TZ)
 
 
+def sessions() -> list[dict]:
+    raw = getattr(cfg, "SESSIONS", None)
+    if raw:
+        return raw
+    return [
+        {"key": "ASIA", "name": "АЗИАТСКАЯ СЕССИЯ", "start_hm": "00:00"},
+        {"key": "EUROPE", "name": "ЕВРОПЕЙСКАЯ СЕССИЯ", "start_hm": "09:00"},
+        {"key": "AMERICA", "name": "АМЕРИКАНСКАЯ СЕССИЯ", "start_hm": "15:00"},
+    ]
+
+
 def session_by_key(key: str) -> dict:
-    for s in cfg.SESSIONS:
+    items = sessions()
+    for s in items:
         if s["key"] == key:
             return s
-    return cfg.SESSIONS[0]
+    return items[0]
 
 
 def current_session(now: Optional[datetime] = None) -> dict:
     now = now or now_local()
     hm = now.strftime("%H:%M")
-    chosen = cfg.SESSIONS[0]
-    for s in cfg.SESSIONS:
+    items = sessions()
+    chosen = items[0]
+    for s in items:
         if hm >= s["start_hm"]:
             chosen = s
     return chosen
@@ -84,8 +97,9 @@ def current_session(now: Optional[datetime] = None) -> dict:
 def next_session(now: Optional[datetime] = None) -> tuple[dict, datetime]:
     now = now or now_local()
     cur = current_session(now)
-    keys = [s["key"] for s in cfg.SESSIONS]
-    nxt = cfg.SESSIONS[(keys.index(cur["key"]) + 1) % len(cfg.SESSIONS)]
+    items = sessions()
+    keys = [s["key"] for s in items]
+    nxt = items[(keys.index(cur["key"]) + 1) % len(items)]
     h, m = map(int, nxt["start_hm"].split(":"))
     start = now.replace(hour=h, minute=m, second=0, microsecond=0)
     if start <= now:

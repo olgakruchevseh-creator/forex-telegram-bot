@@ -64,3 +64,37 @@ LTF_KEYS = ["H1", "M15", "M5"]
 LTF_MIN_AGREE = 2
 
 SIGNAL_COOLDOWN_HOURS = 6
+
+LOCAL_TZ_NAME = "Europe/Amsterdam"
+SESSIONS = [
+    {"key": "ASIA", "name": "АЗИАТСКАЯ СЕССИЯ", "start_hm": "00:00"},
+    {"key": "EUROPE", "name": "ЕВРОПЕЙСКАЯ СЕССИЯ", "start_hm": "09:00"},
+    {"key": "AMERICA", "name": "АМЕРИКАНСКАЯ СЕССИЯ", "start_hm": "15:00"},
+]
+DXY_SYMBOL = "DXY"
+BRIEFING_ENABLED = True
+NEWS_WARN_MINUTES = 60
+BRIEFING_OPEN_WINDOW_MIN = 12
+LEVELS_ENABLED = True
+PATTERNS_ENABLED = True
+PATTERN_MIN_QUALITY = 72
+PATTERN_MIN_CONFIDENCE = 70
+PATTERN_LOOKBACK = {"W1": 80, "D1": 150, "H4": 180, "H1": 180, "M15": 160, "M5": 140}
+PATTERN_PIVOT = {"W1": 3, "D1": 3, "H4": 3, "H1": 2, "M15": 2, "M5": 2}
+# Допуски Фибоначчи для гармонических и ABCD.
+FIB_TOL = 0.06
+HARMONIC_RATIOS = {
+    "gartley": {"xb": (0.56, 0.66), "ac": (0.382, 0.886), "bd": (1.13, 1.618), "xd": (0.72, 0.85)},
+    "bat": {"xb": (0.382, 0.50), "ac": (0.382, 0.886), "bd": (1.618, 2.618), "xd": (0.82, 0.95)},
+    "alt_bat": {"xb": (0.382, 0.382), "ac": (0.382, 0.886), "bd": (2.0, 3.618), "xd": (1.08, 1.18)},
+    "butterfly": {"xb": (0.76, 0.81), "ac": (0.382, 0.886), "bd": (1.618, 2.24), "xd": (1.20, 1.50)},
+    "crab": {"xb": (0.382, 0.618), "ac": (0.382, 0.886), "bd": (2.24, 3.618), "xd": (1.55, 1.68)},
+    "deep_crab": {"xb": (0.84, 0.924), "ac": (0.382, 0.886), "bd": (2.0, 3.618), "xd": (1.55, 1.68)},
+    "shark": {"xb": (0.382, 0.618), "ac": (1.13, 1.618), "xd": (0.86, 1.13)},
+    "cypher": {"xb": (0.382, 0.618), "ac": (1.13, 1.414), "xd": (0.75, 0.81)},
+    "five_o": {"xb": (1.13, 1.618), "ac": (1.618, 2.24), "cd": (0.48, 0.62)},
+    "abcd": {"bc": (0.382, 0.886), "cd_ab": (1.0, 1.68)},
+}
+ABCD_TIME_SYM = 0.45
+PATTERN_MAIN_TFS = ["W1", "D1", "H4", "H1"]
+PATTERN_CONFIRM_TFS = ["M15", "M5"]
