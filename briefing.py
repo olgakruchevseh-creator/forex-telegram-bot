@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -852,9 +853,154 @@ def persist_state(store: dict) -> dict:
     return _with_file_lock(_inner)
 
 
-def issue_id(closed_h1: str, chat_id) -> str:
-    sess = current_session()["key"]
-    return f"hourly|{sess}|{closed_h1}|{chat_id}"
+def instance_id() -> str:
+    return (
+        os.getenv("RAILWAY_REPLICA_ID")
+        or os.getenv("RAILWAY_REPLICA_ID".lower(), "")
+        or str(os.getpid())
+    )
+
+
+def _session_slug(now: Optional[datetime] = None) -> str:
+    sess = current_session(now)
+    return {"ASIA": "asian", "EUROPE": "european", "AMERICA": "american"}.get(
+        sess["key"], (sess["key"] or "session").lower()
+    )
+
+
+def issue_id(closed_h1: str, chat_id=None) -> str:
+    raw = (closed_h1 or "")[:19]
+    try:
+        opened = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        slug = _session_slug()
+        return f"briefing:{slug}:{raw or 'unknown'}:00:00"
+    closed_local = (opened + timedelta(hours=1)).astimezone(LOCAL_TZ)
+    slug = _session_slug(closed_local)
+    return f"briefing:{slug}:{closed_local:%Y-%m-%d}:{closed_local:%H}:00"
+
+
+def db_path() -> Path:
+    return state_dir() / "briefing.db"
+
+
+def _connect_db() -> sqlite3.Connection:
+    path = db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=20, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS briefing_issues (
+            briefing_key TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            pid TEXT,
+            created_ts REAL,
+            sent_ts REAL,
+            parts INTEGER DEFAULT 0
+        )
+        """
+    )
+    return conn
+
+
+def _sql_claim(key: str, reason: str = "scan_job", ttl_sec: int = 480) -> bool:
+    pid = instance_id()
+    now = time.time()
+    conn = _connect_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO briefing_issues "
+            "(briefing_key, status, pid, created_ts, parts) VALUES (?, 'claimed', ?, ?, 0)",
+            (key, pid, now),
+        )
+        if cur.rowcount == 1:
+            conn.execute("COMMIT")
+            log.info(
+                "LOCK_ACQUIRED briefing_key=%s pid=%s reason=%s",
+                key,
+                pid,
+                reason,
+            )
+            return True
+        row = conn.execute(
+            "SELECT status, pid, created_ts FROM briefing_issues WHERE briefing_key=?",
+            (key,),
+        ).fetchone()
+        if not row:
+            conn.execute("COMMIT")
+            log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=empty_row", key, pid)
+            return False
+        status, owner, created = row
+        if status == "sent":
+            conn.execute("COMMIT")
+            log.info(
+                "DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=already_sent owner=%s",
+                key,
+                pid,
+                owner,
+            )
+            return False
+        age = now - float(created or 0)
+        if age < ttl_sec:
+            conn.execute("COMMIT")
+            log.info(
+                "DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=lock_held owner=%s age=%.0f",
+                key,
+                pid,
+                owner,
+                age,
+            )
+            return False
+        cur = conn.execute(
+            "UPDATE briefing_issues SET status='claimed', pid=?, created_ts=? "
+            "WHERE briefing_key=? AND status!='sent' AND created_ts < ?",
+            (pid, now, key, now - ttl_sec),
+        )
+        conn.execute("COMMIT")
+        if cur.rowcount == 1:
+            log.info(
+                "LOCK_ACQUIRED briefing_key=%s pid=%s reason=stale_takeover",
+                key,
+                pid,
+            )
+            return True
+        log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=lost_takeover", key, pid)
+        return False
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception as e:
+            log.warning("sqlite rollback: %s", e)
+        log.exception("sqlite claim_issue %s", key)
+        return False
+    finally:
+        conn.close()
+
+
+def _sql_mark_sent(key: str, parts: int = 1) -> None:
+    conn = _connect_db()
+    try:
+        conn.execute(
+            "UPDATE briefing_issues SET status='sent', sent_ts=?, parts=? WHERE briefing_key=?",
+            (time.time(), int(parts), key),
+        )
+    finally:
+        conn.close()
+
+
+def _sql_is_sent(key: str) -> bool:
+    conn = _connect_db()
+    try:
+        row = conn.execute(
+            "SELECT status FROM briefing_issues WHERE briefing_key=?",
+            (key,),
+        ).fetchone()
+        return bool(row and row[0] == "sent")
+    finally:
+        conn.close()
 
 
 def h1_is_current(closed_dt: str, max_age_min: int = 70) -> bool:
@@ -897,28 +1043,22 @@ def _with_file_lock(fn):
 
 
 def claim_issue(store: dict, iid: str, ttl_sec: int = 480) -> bool:
-    """Читает диск внутри лока. False если sent или живой лок."""
+    """Атомарный INSERT OR IGNORE в briefing.db, затем зеркало в state.json."""
+    if not _sql_claim(iid, reason="claim_issue", ttl_sec=ttl_sec):
+        disk = _read_state_disk()
+        _sync_store(store, disk)
+        return False
 
     def _inner() -> bool:
         disk = _read_state_disk()
         if disk.get("_corrupt"):
-            log.error("claim_issue: state.json повреждён, выпуск не занимаем %s", iid)
+            log.error("claim_issue: state.json повреждён после LOCK_ACQUIRED %s", iid)
             _sync_store(store, disk)
-            return False
+            return True
         sent = disk.setdefault("briefing_sent", {})
         locks = disk.setdefault("briefing_locks", {})
         rec = sent.get(iid) if isinstance(sent.get(iid), dict) else {}
-        if rec.get("status") == "sent":
-            log.info("выпуск уже отправлен %s", iid)
-            _atomic_write_state(disk)
-            _sync_store(store, disk)
-            return False
         now = time.time()
-        held = float(locks.get(iid) or 0)
-        if held and now - held < ttl_sec:
-            log.info("выпуск занят другим процессом %s age=%.0f", iid, now - held)
-            _sync_store(store, disk)
-            return False
         locks[iid] = now
         sent[iid] = {
             "status": "claimed",
@@ -947,6 +1087,7 @@ def mark_part_delivered(store: dict, iid: str, part_no: int, total: int) -> dict
         if len(delivered) >= int(total) and total > 0:
             rec["status"] = "sent"
             disk.setdefault("briefing_locks", {}).pop(iid, None)
+            _sql_mark_sent(iid, total)
             log.info("выпуск полностью отправлен %s parts=%s", iid, total)
         else:
             rec["status"] = rec.get("status") or "claimed"
@@ -960,6 +1101,8 @@ def mark_part_delivered(store: dict, iid: str, part_no: int, total: int) -> dict
 
 
 def mark_issue_sent(store: dict, iid: str, parts: int = 1) -> None:
+    _sql_mark_sent(iid, parts)
+
     def _inner():
         disk = _read_state_disk()
         sent = disk.setdefault("briefing_sent", {})
@@ -981,7 +1124,20 @@ def mark_issue_sent(store: dict, iid: str, parts: int = 1) -> None:
     _with_file_lock(_inner)
 
 
+def _sql_release(key: str) -> None:
+    conn = _connect_db()
+    try:
+        conn.execute(
+            "UPDATE briefing_issues SET created_ts=0 WHERE briefing_key=? AND status!='sent'",
+            (key,),
+        )
+    finally:
+        conn.close()
+
+
 def release_issue(store: dict, iid: str) -> None:
+    _sql_release(iid)
+
     def _inner():
         disk = _read_state_disk()
         rec = (disk.get("briefing_sent") or {}).get(iid) or {}
@@ -1004,7 +1160,7 @@ def issue_sent(store: dict, iid: str) -> bool:
     def _inner() -> bool:
         disk = _read_state_disk()
         rec = (disk.get("briefing_sent") or {}).get(iid) or {}
-        ok = isinstance(rec, dict) and rec.get("status") == "sent"
+        ok = _sql_is_sent(iid) or (isinstance(rec, dict) and rec.get("status") == "sent")
         _sync_store(store, disk)
         return ok
 

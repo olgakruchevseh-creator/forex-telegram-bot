@@ -308,8 +308,11 @@ def cooldown_ok(state: dict, symbol: str, side: str) -> bool:
     return (time.time() - last) / 3600 >= cfg.SIGNAL_COOLDOWN_HOURS
 
 
-async def send(app: Application, chat_id: int, text: str) -> None:
-    await app.bot.send_message(chat_id=chat_id, text=text)
+async def send(app: Application, chat_id: int, text: str):
+    msg = await app.bot.send_message(chat_id=chat_id, text=text)
+    mid = getattr(msg, "message_id", None)
+    log.info("telegram_message_id=%s pid=%s", mid, briefing.instance_id())
+    return mid
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -480,17 +483,18 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
         iid = briefing.issue_id(closed_dt, chat_id) if closed_dt else ""
         log.info(
-            "скан брифинг h1=%s current=%s empty=%s issue=%s",
+            "briefing_key=%s pid=%s reason=scan_job h1=%s current=%s empty=%s",
+            iid,
+            briefing.instance_id(),
             closed_dt,
             briefing.h1_is_current(closed_dt) if closed_dt else False,
             empty,
-            iid,
         )
         if closed_dt and iid and briefing.h1_is_current(closed_dt) and not empty and rank:
             if briefing.issue_sent(state, iid):
-                log.info("пропуск: выпуск уже отправлен %s", iid)
+                log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=already_sent", iid, briefing.instance_id())
             elif not briefing.claim_issue(state, iid):
-                log.info("пропуск: не удалось занять выпуск %s", iid)
+                log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=claim_failed", iid, briefing.instance_id())
                 save_state(state)
             else:
                 save_state(state)

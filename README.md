@@ -65,6 +65,7 @@ python bot.py
 Тогда постоянно хранятся три файла:
 
 - `/data/state.json` — чат, брифинг, отправленные сигналы
+- `/data/briefing.db` — атомарный замок часового брифинга
 - `/data/levels_state.json` — уровни
 - `/data/patterns_state.json` — паттерны
 
