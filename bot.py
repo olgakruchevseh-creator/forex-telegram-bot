@@ -86,11 +86,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    dest = state_file()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
-    tmp.replace(dest)
+    briefing.persist_state(state)
 
 
 def _parse_values(values: list) -> list[Candle]:
@@ -396,7 +392,7 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
         dxy = None
         try:
-            dxy = briefing.collect_extras(api_key)
+            dxy = briefing.collect_extras(api_key, force=True, h1_dt=last_closed_h1_dt(h1_series(market)))
         except Exception:
             log.exception("DXY для /briefing")
         events = []
@@ -481,38 +477,61 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         h1 = h1_series(market)
         closed_dt = last_closed_h1_dt(h1)
-        already = state.get("last_strength_h1")
-        recent = time.time() - float(state.get("last_briefing_sent_ts") or 0) < 50 * 60
         empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
-        if (
-            rank
-            and closed_dt
-            and h1_just_closed(closed_dt)
-            and closed_dt not in SENT_H1
-            and closed_dt != already
-            and not recent
-            and not empty
-        ):
-            SENT_H1.add(closed_dt)
-            state["last_rank"] = [c for c, _ in rank]
-            state["last_strength_h1"] = closed_dt
-            state["last_strength_ts"] = time.time()
-            state["last_briefing_id"] = briefing.briefing_id()
-            state["last_briefing_sent_ts"] = time.time()
-            save_state(state)
-            api_key = env("TWELVE_DATA_API_KEY")
-            try:
-                dxy = briefing.collect_extras(api_key, h1_dt=closed_dt)
-            except Exception:
-                log.exception("DXY часового брифинга")
-                dxy = None
-            try:
-                events = briefing.session_events(newsmod.load_events())
-                text = briefing.build_briefing_text(market, strength, rank, dxy, events)
-                await _send_parts(context.application, int(chat_id), text)
-            except Exception:
-                log.exception("Текст часового брифинга")
-                await _send_parts(context.application, int(chat_id), format_strength(rank, closed_dt))
+        iid = briefing.issue_id(closed_dt, chat_id) if closed_dt else ""
+        log.info(
+            "скан брифинг h1=%s current=%s empty=%s issue=%s",
+            closed_dt,
+            briefing.h1_is_current(closed_dt) if closed_dt else False,
+            empty,
+            iid,
+        )
+        if closed_dt and iid and briefing.h1_is_current(closed_dt) and not empty and rank:
+            if briefing.issue_sent(state, iid):
+                log.info("пропуск: выпуск уже отправлен %s", iid)
+            elif not briefing.claim_issue(state, iid):
+                log.info("пропуск: не удалось занять выпуск %s", iid)
+                save_state(state)
+            else:
+                save_state(state)
+                sent_ok = False
+                try:
+                    api_key = env("TWELVE_DATA_API_KEY")
+                    try:
+                        dxy = briefing.collect_extras(api_key, h1_dt=closed_dt)
+                    except Exception:
+                        log.exception("DXY часового брифинга")
+                        dxy = None
+                    try:
+                        events = briefing.session_events(newsmod.load_events())
+                    except Exception:
+                        log.exception("новости часового брифинга")
+                        events = []
+                    text = briefing.build_briefing_text(market, strength, rank, dxy, events)
+                    parts = briefing.prepare_telegram_parts(text)
+                    already = set(briefing.delivered_parts(state, iid))
+                    for idx, part in enumerate(parts, 1):
+                        if idx in already:
+                            log.info("часть %s/%s уже доставлена, пропуск", idx, len(parts))
+                            continue
+                        await send(context.application, int(chat_id), part)
+                        briefing.mark_part_delivered(state, iid, idx, len(parts))
+                    if len(briefing.delivered_parts(state, iid)) >= len(parts):
+                        briefing.mark_issue_sent(state, iid, len(parts))
+                    state["last_rank"] = [c for c, _ in rank]
+                    state["last_strength_h1"] = closed_dt
+                    state["last_strength_ts"] = time.time()
+                    state["last_briefing_id"] = briefing.briefing_id()
+                    state["last_briefing_sent_ts"] = time.time()
+                    SENT_H1.add(closed_dt)
+                    sent_ok = True
+                    log.info("брифинг отправлен issue=%s parts=%s", iid, len(parts))
+                except Exception:
+                    log.exception("отправка часового брифинга")
+                    briefing.release_issue(state, iid)
+                if not sent_ok:
+                    briefing.release_issue(state, iid)
+                save_state(state)
 
         for symbol, by_tf in market.items():
             stack = build_stack(symbol, by_tf, strength)

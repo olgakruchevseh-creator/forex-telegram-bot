@@ -1,9 +1,13 @@
 """Сессионный брифинг. Анализ пар и сила валют берутся из analysis.py."""
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -143,7 +147,23 @@ def _dir_word(bias: int) -> str:
         return "LONG"
     if bias < 0:
         return "SHORT"
-    return "RANGE"
+    return "НЕЙТРАЛЬНО"
+
+
+def _tf_status(stack: Optional[PairStack], key: str) -> str:
+    """LONG / SHORT / RANGE только по валидному расчёту. Иначе «нет данных»."""
+    if not stack or key not in stack.views:
+        return "нет данных"
+    v = stack.views[key]
+    if v.bias > 0:
+        return "LONG"
+    if v.bias < 0:
+        return "SHORT"
+    phase = (v.phase or "").lower()
+    struct = (v.structure or "").lower()
+    if "флэт" in phase or "консолидац" in phase or "сжатие" in struct:
+        return "RANGE"
+    return "неясно"
 
 
 def _arrow(bias: int) -> str:
@@ -162,9 +182,7 @@ def _tf_bias(stack: Optional[PairStack], key: str) -> int:
 
 
 def _tf_label(stack: Optional[PairStack], key: str) -> str:
-    if not stack or key not in stack.views:
-        return "—"
-    return _dir_word(stack.views[key].bias)
+    return _tf_status(stack, key)
 
 
 def _zigzag_line(stack: Optional[PairStack]) -> str:
@@ -178,7 +196,10 @@ def _zigzag_line(stack: Optional[PairStack]) -> str:
 
 def classify_state(stack: Optional[PairStack]) -> str:
     if not stack:
-        return "RANGE"
+        return "НЕТ ДАННЫХ"
+    have = [k for k in ("D1", "H4", "H1") if stack.views.get(k)]
+    if len(have) < 2:
+        return "НЕТ ДАННЫХ"
     d1, h4, h1, m15 = (_tf_bias(stack, k) for k in ("D1", "H4", "H1", "M15"))
     majors = [d1, h4, h1]
     if d1 and h4 and d1 == h4 == h1:
@@ -195,7 +216,19 @@ def classify_state(stack: Optional[PairStack]) -> str:
         return f"ТРЕНД {_dir_word(d1)}"
     if m15 and not any(majors):
         return f"ЛОКАЛЬНЫЙ ИМПУЛЬС {_dir_word(m15)}"
-    return "RANGE"
+    flat = 0
+    unclear = 0
+    for k in ("D1", "H4", "H1"):
+        st = _tf_status(stack, k)
+        if st == "RANGE":
+            flat += 1
+        elif st in ("нет данных", "неясно"):
+            unclear += 1
+    if flat >= 2:
+        return "RANGE"
+    if unclear >= 2:
+        return "НЕТ ДАННЫХ"
+    return "СМЕШАННО"
 
 
 def agree_score(stack: Optional[PairStack]) -> tuple[str, int]:
@@ -363,8 +396,8 @@ def build_pair_briefs(
             news_near=news_near,
         )
         brief.side = pair_side(brief)
-        if not brief.side:
-            brief.state = brief.state if "ТРЕНД" in brief.state else ("RANGE" if brief.agree_n < 2 else brief.state)
+        if brief.state == "НЕТ ДАННЫХ":
+            brief.side = None
         brief.confidence = leader_confidence(brief) if brief.side else 0
         m15 = _tf_bias(stack, "M15")
         score = n * 2.0 + abs(brief.gap) * 4
@@ -435,6 +468,15 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
     return lines
 
 
+def _impact_ru(impact: str) -> str:
+    raw = (impact or "").upper()
+    return {
+        "HIGH": "ВЫСОКАЯ ВАЖНОСТЬ",
+        "MEDIUM": "СРЕДНЯЯ ВАЖНОСТЬ",
+        "LOW": "НИЗКАЯ ВАЖНОСТЬ",
+    }.get(raw, impact or "")
+
+
 def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float], now_utc: datetime) -> list[str]:
     highs = [e for e in events if e.impact in ("HIGH", "MEDIUM")]
     highs = [e for e in highs if e.impact == "HIGH"] or highs[:4]
@@ -445,7 +487,7 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
     for e in highs[:8]:
         left = newsmod.minutes_left(e, now_utc)
         when = "уже вышла" if left < 0 else f"через {left} мин"
-        lines.append(f"🔴 {e.local_hm} · {e.currency} · {e.impact}")
+        lines.append(f"🔴 {e.local_hm} · {e.currency} · {_impact_ru(e.impact)}")
         lines.append(newsmod.translate_title(e.title))
         lines.append(f"Предыдущее: {e.previous}")
         lines.append(f"Прогноз: {e.forecast}")
@@ -461,28 +503,42 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
 
 
 def format_board(briefs: list[PairBrief]) -> list[str]:
-    lines = ["📊 PRIORITY BOARD", ""]
+    lines = ["📊 ДОСКА ПРИОРИТЕТОВ", ""]
     for b in briefs:
         base, quote = split_pair(b.symbol)
         if b.gap > 0.03:
-            force = f"{base} сильнее {quote}"
+            force = f"{base} сильнее {quote} на {abs(b.gap):.2f}"
         elif b.gap < -0.03:
-            force = f"{quote} сильнее {base}"
+            force = f"{quote} сильнее {base} на {abs(b.gap):.2f}"
         else:
-            force = "сила почти равная"
+            force = f"сила почти равная ({b.gap:+.2f})"
         lines.append(b.symbol)
         lines.append(f"D1 {b.d1} · H4 {b.h4} · H1 {b.h1} · M15 {b.m15}")
         lines.append(f"ZigZag {b.zigzag}")
         lines.append(f"Согласие: {b.agree}")
-        lines.append(f"Сила: {force} ({b.gap:+.2f})")
+        lines.append(f"Сила: {force}")
         lines.append(f"Состояние: {b.state}")
         lines.append("")
     return lines
 
 
-def format_leaders(leaders: list[PairBrief]) -> list[str]:
+def briefs_have_market(briefs: list[PairBrief]) -> bool:
+    ok = 0
+    for b in briefs:
+        if b.stack and sum(1 for k in ("D1", "H4", "H1") if b.stack.views.get(k)) >= 2:
+            ok += 1
+    return ok >= 3
+
+
+def format_leaders(leaders: list[PairBrief], data_ok: bool = True) -> list[str]:
     lines = ["🏆 ЛИДЕР:"]
-    ready = [b for b in leaders if b.side]
+    ready = [b for b in leaders if b.side] if data_ok else []
+    if not data_ok:
+        lines.append("расчёт по рынку неполный")
+        lines.append("")
+        lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")
+        lines.append("расчёт по рынку неполный")
+        return lines
     if not ready:
         lines.append("НЕТ")
         lines.append("")
@@ -542,7 +598,7 @@ def build_briefing_text(
     except Exception:
         log.exception("доска пар")
     try:
-        lines.extend(format_leaders(leaders))
+        lines.extend(format_leaders(leaders, briefs_have_market(briefs)))
     except Exception:
         log.exception("лидеры")
         lines.extend(["🏆 ЛИДЕР:", "НЕТ", "", "🎯 ПРИОРИТЕТ СЕССИИ:", "НЕТ"])
@@ -600,7 +656,7 @@ def format_news_warning(
         lines.append("Если факт существенно лучше прогноза → положительно для валюты.")
         lines.append("Если факт существенно хуже прогноза → отрицательно для валюты.")
     else:
-        lines.append("Показатель контекстный. Направление до Actual не утверждаем.")
+        lines.append("До публикации возможна повышенная волатильность. Новость пока не используется как направляющий фактор.")
     lines.append("")
     lines.append(newsmod.scenario_before(event, score))
     lines.append("")
@@ -645,29 +701,321 @@ _DXY_CACHE: dict = {"view": None, "h1": ""}
 
 
 def collect_extras(api_key: str, force: bool = False, h1_dt: str = "") -> Optional[IndexView]:
-    """DXY с Twelve Data только по force или новой закрытой H1."""
+    """DXY: кэш той же H1, иначе ограниченный повторный запрос."""
     cached = _DXY_CACHE.get("view")
-    if not force:
-        return cached
-    if h1_dt and _DXY_CACHE.get("h1") == h1_dt and cached is not None:
+    same_h1 = bool(h1_dt and _DXY_CACHE.get("h1") == h1_dt and cached is not None)
+    if cached and not force and (same_h1 or not h1_dt):
         return cached
     dxy = None
-    try:
-        raw = fetch_index(api_key, cfg.DXY_SYMBOL, "1h", 120)
-        if raw:
-            dxy = analyze_index("DXY", raw)
-    except Exception as e:
-        log.warning("DXY: %s", e)
-    if dxy:
+    last_err = ""
+    for attempt in range(1, 4):
+        try:
+            raw = fetch_index(api_key, cfg.DXY_SYMBOL, "1h", 120)
+            if raw:
+                dxy = analyze_index("DXY", raw)
+                if dxy and dxy.available:
+                    break
+                last_err = "мало закрытых свечей DXY"
+            else:
+                last_err = "пустой ответ DXY"
+        except Exception as e:
+            last_err = str(e)
+            log.warning("DXY попытка %s: %s", attempt, e)
+        time.sleep(0.4 * attempt)
+    if dxy and dxy.available:
         _DXY_CACHE["view"] = dxy
         if h1_dt:
             _DXY_CACHE["h1"] = h1_dt
-    return dxy or cached
+        log.info("DXY получен цена=%s h1=%s", getattr(dxy, "price", None), h1_dt)
+        return dxy
+    log.warning("DXY недоступен: %s", last_err or "нет валидного расчёта")
+    return cached if cached and getattr(cached, "available", False) else None
 
 
 def session_events(events: list[newsmod.NewsEvent]) -> list[newsmod.NewsEvent]:
     _, start, end = session_window()
     return newsmod.events_in_window(events, start, end)
+
+
+def state_dir() -> Path:
+    raw = os.getenv("STATE_DIR", "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parent
+
+
+def state_path() -> Path:
+    return state_dir() / "state.json"
+
+
+_MERGE_MAPS = (
+    "briefing_sent",
+    "briefing_locks",
+    "news_warned",
+    "news_actual_sent",
+    "last_signals",
+)
+
+
+def _empty_state() -> dict:
+    return {
+        "chat_id": os.getenv("TELEGRAM_CHAT_ID") or None,
+        "last_signals": {},
+        "last_rank": [],
+        "last_strength_ts": 0,
+        "briefing_sent": {},
+        "briefing_locks": {},
+        "news_warned": {},
+        "news_actual_sent": {},
+    }
+
+
+def _read_state_disk() -> dict:
+    dest = state_path()
+    if not dest.exists():
+        return _empty_state()
+    try:
+        raw = dest.read_text()
+        data = json.loads(raw) if raw.strip() else {}
+        if not isinstance(data, dict):
+            raise ValueError("state.json не объект")
+        data["_corrupt"] = False
+        return data
+    except Exception as e:
+        log.exception("повреждён state.json: %s", e)
+        return {**_empty_state(), "_corrupt": True}
+
+
+def _atomic_write_state(data: dict) -> None:
+    dest = state_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    payload = {k: v for k, v in data.items() if k != "_corrupt"}
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    tmp.replace(dest)
+
+
+def _merge_record(disk_v, mem_v):
+    if isinstance(disk_v, dict) and isinstance(mem_v, dict):
+        out = dict(disk_v)
+        out.update(mem_v)
+        if disk_v.get("status") == "sent" or mem_v.get("status") == "sent":
+            out["status"] = "sent"
+        d_parts = list(disk_v.get("delivered") or [])
+        m_parts = list(mem_v.get("delivered") or [])
+        if d_parts or m_parts:
+            out["delivered"] = sorted(set(int(x) for x in d_parts + m_parts))
+        for key in ("ts", "parts"):
+            dv, mv = disk_v.get(key), mem_v.get(key)
+            if isinstance(dv, (int, float)) and isinstance(mv, (int, float)):
+                out[key] = max(dv, mv)
+        return out
+    if isinstance(disk_v, (int, float)) and isinstance(mem_v, (int, float)):
+        return max(disk_v, mem_v)
+    return mem_v if mem_v is not None else disk_v
+
+
+def merge_states(disk: dict, mem: dict) -> dict:
+    out = dict(disk or {})
+    for key, val in (mem or {}).items():
+        if key == "_corrupt":
+            continue
+        if key in _MERGE_MAPS and isinstance(val, dict):
+            base = dict(out.get(key) or {})
+            incoming = dict(val)
+            for ik, iv in incoming.items():
+                base[ik] = _merge_record(base.get(ik), iv) if ik in base else iv
+            out[key] = base
+        else:
+            out[key] = val
+    return out
+
+
+def _sync_store(store: dict, disk: dict) -> None:
+    store.clear()
+    store.update({k: v for k, v in disk.items() if k != "_corrupt"})
+
+
+def persist_state(store: dict) -> dict:
+    """Сохранить store, не затирая более новые поля с диска."""
+
+    def _inner():
+        disk = _read_state_disk()
+        if disk.get("_corrupt"):
+            log.error("persist_state: state.json повреждён, запись пропущена")
+            return disk
+        merged = merge_states(disk, store)
+        _atomic_write_state(merged)
+        _sync_store(store, merged)
+        return merged
+
+    return _with_file_lock(_inner)
+
+
+def issue_id(closed_h1: str, chat_id) -> str:
+    sess = current_session()["key"]
+    return f"hourly|{sess}|{closed_h1}|{chat_id}"
+
+
+def h1_is_current(closed_dt: str, max_age_min: int = 70) -> bool:
+    """Свеча открылась в UTC; закрытие = open+60м. Не старше max_age_min после закрытия."""
+    raw = (closed_dt or "")[:19]
+    if not raw:
+        return False
+    try:
+        opened = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    closed_at = opened + timedelta(hours=1)
+    age = (datetime.now(timezone.utc) - closed_at).total_seconds() / 60.0
+    return 0 <= age <= max_age_min
+
+
+def _lock_path() -> Path:
+    p = state_dir() / "briefing.lock"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _with_file_lock(fn):
+    path = _lock_path()
+    fh = open(path, "a+")
+    try:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except Exception as e:
+            log.warning("файловая блокировка: %s", e)
+        return fn()
+    finally:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fh.close()
+
+
+def claim_issue(store: dict, iid: str, ttl_sec: int = 480) -> bool:
+    """Читает диск внутри лока. False если sent или живой лок."""
+
+    def _inner() -> bool:
+        disk = _read_state_disk()
+        if disk.get("_corrupt"):
+            log.error("claim_issue: state.json повреждён, выпуск не занимаем %s", iid)
+            _sync_store(store, disk)
+            return False
+        sent = disk.setdefault("briefing_sent", {})
+        locks = disk.setdefault("briefing_locks", {})
+        rec = sent.get(iid) if isinstance(sent.get(iid), dict) else {}
+        if rec.get("status") == "sent":
+            log.info("выпуск уже отправлен %s", iid)
+            _atomic_write_state(disk)
+            _sync_store(store, disk)
+            return False
+        now = time.time()
+        held = float(locks.get(iid) or 0)
+        if held and now - held < ttl_sec:
+            log.info("выпуск занят другим процессом %s age=%.0f", iid, now - held)
+            _sync_store(store, disk)
+            return False
+        locks[iid] = now
+        sent[iid] = {
+            "status": "claimed",
+            "ts": now,
+            "parts": int(rec.get("parts") or 0),
+            "delivered": list(rec.get("delivered") or []),
+        }
+        _atomic_write_state(disk)
+        _sync_store(store, disk)
+        log.info("лок выпуска %s", iid)
+        return True
+
+    return _with_file_lock(_inner)
+
+
+def mark_part_delivered(store: dict, iid: str, part_no: int, total: int) -> dict:
+    def _inner():
+        disk = _read_state_disk()
+        sent = disk.setdefault("briefing_sent", {})
+        rec = sent.get(iid) if isinstance(sent.get(iid), dict) else {}
+        delivered = sorted(set(int(x) for x in (rec.get("delivered") or []) + [int(part_no)]))
+        rec = dict(rec)
+        rec["delivered"] = delivered
+        rec["parts"] = int(total)
+        rec["ts"] = time.time()
+        if len(delivered) >= int(total) and total > 0:
+            rec["status"] = "sent"
+            disk.setdefault("briefing_locks", {}).pop(iid, None)
+            log.info("выпуск полностью отправлен %s parts=%s", iid, total)
+        else:
+            rec["status"] = rec.get("status") or "claimed"
+            log.info("часть %s/%s выпуска %s сохранена", part_no, total, iid)
+        sent[iid] = rec
+        _atomic_write_state(disk)
+        _sync_store(store, disk)
+        return rec
+
+    return _with_file_lock(_inner)
+
+
+def mark_issue_sent(store: dict, iid: str, parts: int = 1) -> None:
+    def _inner():
+        disk = _read_state_disk()
+        sent = disk.setdefault("briefing_sent", {})
+        rec = sent.get(iid) if isinstance(sent.get(iid), dict) else {}
+        delivered = list(rec.get("delivered") or [])
+        if parts and not delivered:
+            delivered = list(range(1, int(parts) + 1))
+        sent[iid] = {
+            "status": "sent",
+            "ts": time.time(),
+            "parts": int(parts),
+            "delivered": delivered,
+        }
+        disk.setdefault("briefing_locks", {}).pop(iid, None)
+        _atomic_write_state(disk)
+        _sync_store(store, disk)
+        log.info("выпуск отмечен отправленным %s parts=%s", iid, parts)
+
+    _with_file_lock(_inner)
+
+
+def release_issue(store: dict, iid: str) -> None:
+    def _inner():
+        disk = _read_state_disk()
+        rec = (disk.get("briefing_sent") or {}).get(iid) or {}
+        if isinstance(rec, dict) and rec.get("status") == "sent":
+            _sync_store(store, disk)
+            return
+        disk.setdefault("briefing_locks", {}).pop(iid, None)
+        if isinstance(rec, dict) and rec.get("status") != "sent":
+            rec = dict(rec)
+            rec["status"] = "partial" if rec.get("delivered") else "open"
+            disk.setdefault("briefing_sent", {})[iid] = rec
+        _atomic_write_state(disk)
+        _sync_store(store, disk)
+        log.info("лок выпуска снят %s", iid)
+
+    _with_file_lock(_inner)
+
+
+def issue_sent(store: dict, iid: str) -> bool:
+    def _inner() -> bool:
+        disk = _read_state_disk()
+        rec = (disk.get("briefing_sent") or {}).get(iid) or {}
+        ok = isinstance(rec, dict) and rec.get("status") == "sent"
+        _sync_store(store, disk)
+        return ok
+
+    return _with_file_lock(_inner)
+
+
+def delivered_parts(store: dict, iid: str) -> list[int]:
+    rec = (store.get("briefing_sent") or {}).get(iid) or {}
+    if isinstance(rec, dict):
+        return [int(x) for x in rec.get("delivered") or []]
+    return []
 
 
 def split_telegram(text: str, limit: int = 3900) -> list[str]:
@@ -686,3 +1034,14 @@ def split_telegram(text: str, limit: int = 3900) -> list[str]:
     if buf:
         parts.append("\n".join(buf))
     return parts
+
+
+def prepare_telegram_parts(text: str, limit: int = 3900) -> list[str]:
+    raw = split_telegram(text, limit)
+    if len(raw) <= 1:
+        return raw
+    total = len(raw)
+    out = []
+    for i, part in enumerate(raw, 1):
+        out.append(f"БРИФИНГ — ЧАСТЬ {i}/{total}\n\n{part}")
+    return out
