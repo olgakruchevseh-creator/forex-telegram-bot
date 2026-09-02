@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -212,6 +212,19 @@ def last_closed_h1_dt(h1: dict[str, list[Candle]]) -> str:
         if closed:
             dts.append(closed[-1].dt)
     return max(dts) if dts else ""
+
+
+def h1_just_closed(dt_str: str, max_min: int = 12) -> bool:
+    raw = (dt_str or "")[:19]
+    if not raw:
+        return False
+    try:
+        opened = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    closed_at = opened + timedelta(hours=1)
+    age = (datetime.now(timezone.utc) - closed_at).total_seconds() / 60.0
+    return 0 <= age <= max_min
 
 
 def format_h1_time(dt_str: str) -> str:
@@ -471,7 +484,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         already = state.get("last_strength_h1")
         recent = time.time() - float(state.get("last_briefing_sent_ts") or 0) < 50 * 60
         empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
-        if rank and closed_dt and closed_dt not in SENT_H1 and closed_dt != already and not recent and not empty:
+        if (
+            rank
+            and closed_dt
+            and h1_just_closed(closed_dt)
+            and closed_dt not in SENT_H1
+            and closed_dt != already
+            and not recent
+            and not empty
+        ):
             SENT_H1.add(closed_dt)
             state["last_rank"] = [c for c, _ in rank]
             state["last_strength_h1"] = closed_dt
