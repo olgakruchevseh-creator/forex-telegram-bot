@@ -323,7 +323,11 @@ def build_pair_briefs(
     ]
     out: list[PairBrief] = []
     for symbol in cfg.PAIRS:
-        stack = build_stack(symbol, market.get(symbol) or {}, strength)
+        try:
+            stack = build_stack(symbol, market.get(symbol) or {}, strength)
+        except Exception:
+            log.exception("брифинг стек %s", symbol)
+            stack = None
         agree, n = agree_score(stack)
         base, quote = split_pair(symbol)
         gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
@@ -505,11 +509,29 @@ def build_briefing_text(
         f"🕐 Время: {now.strftime('%H:%M')} · Europe/Amsterdam",
         "",
     ]
-    lines.extend(format_strength_block(rank))
-    lines.extend(format_dxy_block(dxy, usd))
-    lines.extend(format_news_block(events, strength, now_utc))
-    lines.extend(format_board(briefs))
-    lines.extend(format_leaders(leaders))
+    try:
+        lines.extend(format_strength_block(rank))
+    except Exception:
+        log.exception("блок силы")
+    try:
+        lines.extend(format_dxy_block(dxy, usd))
+    except Exception:
+        log.exception("блок DXY")
+        lines.extend(["", "🇺🇸 DXY", "", "нет данных"])
+    try:
+        lines.extend(format_news_block(events or [], strength, now_utc))
+    except Exception:
+        log.exception("блок новостей")
+        lines.extend(["", "📰 НОВОСТИ ЭТОЙ СЕССИИ", "", "Календарь сейчас недоступен"])
+    try:
+        lines.extend(format_board(briefs))
+    except Exception:
+        log.exception("доска пар")
+    try:
+        lines.extend(format_leaders(leaders))
+    except Exception:
+        log.exception("лидеры")
+        lines.extend(["🏆 ЛИДЕР:", "НЕТ", "", "🎯 ПРИОРИТЕТ СЕССИИ:", "НЕТ"])
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines).strip()
