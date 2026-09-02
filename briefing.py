@@ -44,6 +44,8 @@ class IndexView:
     adx: float
     bias: int
     available: bool = True
+    cached: bool = False
+    closed_h1: str = ""
 
 
 @dataclass
@@ -278,23 +280,31 @@ def leader_confidence(brief: PairBrief) -> int:
 
 
 def _parse_values(values: list) -> list[Candle]:
-    candles = [
-        Candle(
-            dt=v["datetime"],
-            open=float(v["open"]),
-            high=float(v["high"]),
-            low=float(v["low"]),
-            close=float(v["close"]),
-        )
-        for v in values or []
-    ]
+    candles = []
+    for v in values or []:
+        if not isinstance(v, dict):
+            continue
+        if not all(k in v for k in ("datetime", "open", "high", "low", "close")):
+            continue
+        try:
+            candles.append(
+                Candle(
+                    dt=str(v["datetime"]),
+                    open=float(v["open"]),
+                    high=float(v["high"]),
+                    low=float(v["low"]),
+                    close=float(v["close"]),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
     candles.sort(key=lambda x: x.dt)
     return candles
 
 
 def fetch_index(api_key: str, symbol: str, interval: str = "1h", outputsize: int = 120) -> list[Candle]:
     if not symbol:
-        return []
+        raise RuntimeError("пустой символ")
     r = requests.get(
         TD_URL,
         params={
@@ -306,32 +316,36 @@ def fetch_index(api_key: str, symbol: str, interval: str = "1h", outputsize: int
         },
         timeout=40,
     )
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(f"http {r.status_code}")
     data = r.json()
     if not isinstance(data, dict):
-        return []
+        raise RuntimeError("ответ не JSON-объект")
     if data.get("status") == "error":
-        log.warning("%s: %s", symbol, data.get("message"))
-        return []
+        raise RuntimeError(str(data.get("message") or "status=error"))
     values = data.get("values")
     if not values and symbol in data and isinstance(data[symbol], dict):
         values = data[symbol].get("values")
-    return _parse_values(values or [])
+    if not isinstance(values, list) or not values:
+        raise RuntimeError("нет массива values")
+    candles = _parse_values(values)
+    if not candles:
+        raise RuntimeError("свечи без datetime/OHLC")
+    return candles
 
 
 def analyze_index(symbol: str, candles: list[Candle]) -> IndexView:
-    if len(candles) < 21:
-        return IndexView(symbol, 0.0, 0.0, "нет данных", "нет данных", 0.0, 0, False)
-    closed = closed_candles(candles, 60)
+    closed = closed_candles(candles)
     if len(closed) < 21:
-        closed = candles
+        return IndexView(symbol, 0.0, 0.0, "нет данных", "нет данных", 0.0, 0, False)
     view = analyze_tf("H1", "Час", closed)
     last = closed[-1].close
     prev = closed[-2].close if len(closed) >= 2 else last
     chg = (last / prev - 1) * 100 if prev else 0.0
+    closed_h1 = closed[-1].dt
     if not view:
-        return IndexView(symbol, last, chg, "неясно", "неясно", 0.0, 0, True)
-    return IndexView(symbol, last, chg, view.structure, view.phase, view.adx, view.bias, True)
+        return IndexView(symbol, last, chg, "неясно", "неясно", 0.0, 0, True, False, closed_h1)
+    return IndexView(symbol, last, chg, view.structure, view.phase, view.adx, view.bias, True, False, closed_h1)
 
 
 def dxy_context(usd_score: float, dxy: Optional[IndexView]) -> str:
@@ -460,7 +474,8 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
     if not dxy or not getattr(dxy, "available", False):
         lines.append("нет данных")
         return lines
-    lines.append(f"Цена: {dxy.price:.2f} ({dxy.change_pct:+.2f}%)")
+    lines.append(f"Цена: {dxy.price:.2f}")
+    lines.append(f"Изменение за H1: {dxy.change_pct:+.2f}%")
     lines.append(f"Направление: {_dir_word(dxy.bias)}")
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
@@ -700,37 +715,292 @@ def format_actual_update(
 
 _DXY_CACHE: dict = {"view": None, "h1": ""}
 
+DXY_BASKET_CONST = 50.14348112
+DXY_BASKET = (
+    ("EUR/USD", -0.576),
+    ("USD/JPY", 0.136),
+    ("GBP/USD", -0.119),
+    ("USD/CAD", 0.091),
+    ("USD/SEK", 0.042),
+    ("USD/CHF", 0.036),
+)
 
-def collect_extras(api_key: str, force: bool = False, h1_dt: str = "") -> Optional[IndexView]:
-    """DXY: кэш той же H1, иначе ограниченный повторный запрос."""
-    cached = _DXY_CACHE.get("view")
-    same_h1 = bool(h1_dt and _DXY_CACHE.get("h1") == h1_dt and cached is not None)
-    if cached and not force and (same_h1 or not h1_dt):
-        return cached
-    dxy = None
+
+def dxy_cache_path() -> Path:
+    return state_dir() / "dxy_cache.json"
+
+
+def normalize_h1_ts(raw: str) -> str:
+    text = (raw or "").strip().replace("T", " ")[:19]
+    if len(text) == 16:
+        text += ":00"
+    return text
+
+
+def dxy_matches_h1(view: Optional[IndexView], h1_dt: str) -> bool:
+    if not view or not view.available:
+        return False
+    if not h1_dt:
+        return True
+    expected = normalize_h1_ts(h1_dt)
+    actual = normalize_h1_ts(getattr(view, "closed_h1", "") or "")
+    if expected != actual:
+        log.warning(
+            "DXY_ERROR reason=H1_TIME_MISMATCH expected=%s actual=%s",
+            expected,
+            actual,
+        )
+        return False
+    return True
+
+
+def synthetic_dxy_price(prices: dict[str, float]) -> float:
+    value = DXY_BASKET_CONST
+    for symbol, exp in DXY_BASKET:
+        px = float(prices[symbol])
+        if px <= 0:
+            raise ValueError(f"некорректная цена {symbol}")
+        value *= px ** exp
+    return value
+
+
+def _pair_h1_closed(market: Optional[dict], symbol: str) -> list[Candle]:
+    if not market:
+        return []
+    raw = (market.get(symbol) or {}).get("H1") or []
+    return closed_candles(raw)
+
+
+def build_synthetic_dxy_candles(by_symbol: dict[str, list[Candle]]) -> list[Candle]:
+    maps: dict[str, dict[str, Candle]] = {}
+    common: Optional[set[str]] = None
+    for symbol, _exp in DXY_BASKET:
+        closed = closed_candles(by_symbol.get(symbol) or [])
+        mm = {c.dt[:19]: c for c in closed}
+        maps[symbol] = mm
+        keys = set(mm)
+        common = keys if common is None else common & keys
+    if not common:
+        return []
+    out: list[Candle] = []
+    for dt in sorted(common):
+        opens, highs, lows, closes = {}, {}, {}, {}
+        for symbol, exp in DXY_BASKET:
+            c = maps[symbol][dt]
+            opens[symbol] = c.open
+            closes[symbol] = c.close
+            if exp < 0:
+                highs[symbol] = c.low
+                lows[symbol] = c.high
+            else:
+                highs[symbol] = c.high
+                lows[symbol] = c.low
+        hi = synthetic_dxy_price(highs)
+        lo = synthetic_dxy_price(lows)
+        if hi < lo:
+            hi, lo = lo, hi
+        out.append(
+            Candle(
+                dt=dt,
+                open=synthetic_dxy_price(opens),
+                high=hi,
+                low=lo,
+                close=synthetic_dxy_price(closes),
+            )
+        )
+    return out
+
+
+def _indexview_to_dict(view: IndexView) -> dict:
+    return {
+        "symbol": view.symbol,
+        "price": view.price,
+        "change_pct": view.change_pct,
+        "structure": view.structure,
+        "phase": view.phase,
+        "adx": view.adx,
+        "bias": view.bias,
+        "available": view.available,
+        "cached": True,
+        "closed_h1": view.closed_h1,
+    }
+
+
+def _indexview_from_dict(data: dict) -> Optional[IndexView]:
+    if not isinstance(data, dict) or not data.get("available"):
+        return None
+    try:
+        return IndexView(
+            symbol=str(data.get("symbol") or "DXY"),
+            price=float(data["price"]),
+            change_pct=float(data.get("change_pct") or 0.0),
+            structure=str(data.get("structure") or "неясно"),
+            phase=str(data.get("phase") or "неясно"),
+            adx=float(data.get("adx") or 0.0),
+            bias=int(data.get("bias") or 0),
+            available=True,
+            cached=True,
+            closed_h1=str(data.get("closed_h1") or ""),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _save_dxy_disk(view: IndexView, h1_dt: str) -> None:
+    key = normalize_h1_ts(h1_dt)
+    actual = normalize_h1_ts(view.closed_h1)
+    if not key or key != actual:
+        log.warning(
+            "DXY_ERROR reason=H1_TIME_MISMATCH expected=%s actual=%s",
+            key,
+            actual,
+        )
+        return
+    dest = dxy_cache_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"h1": key, "view": _indexview_to_dict(view)}
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False))
+    tmp.replace(dest)
+
+
+def _load_dxy_disk(h1_dt: str) -> Optional[IndexView]:
+    dest = dxy_cache_path()
+    expected = normalize_h1_ts(h1_dt)
+    if not dest.exists() or not expected:
+        return None
+    try:
+        raw = json.loads(dest.read_text())
+    except Exception as e:
+        log.warning("DXY_ERROR symbol=cache reason=%s", e)
+        return None
+    if not isinstance(raw, dict) or normalize_h1_ts(str(raw.get("h1") or "")) != expected:
+        return None
+    view = _indexview_from_dict(raw.get("view") or {})
+    if not dxy_matches_h1(view, expected):
+        return None
+    return view
+
+
+def _store_dxy(view: IndexView, h1_dt: str) -> Optional[IndexView]:
+    key = normalize_h1_ts(h1_dt or view.closed_h1)
+    if not dxy_matches_h1(view, key):
+        return None
+    _DXY_CACHE["view"] = view
+    _DXY_CACHE["h1"] = key
+    try:
+        _save_dxy_disk(view, key)
+    except Exception as e:
+        log.warning("DXY_ERROR symbol=cache_write reason=%s", e)
+    return view
+
+
+def _fetch_direct_dxy(api_key: str) -> Optional[IndexView]:
+    symbol = cfg.DXY_SYMBOL
     last_err = ""
     for attempt in range(1, 4):
         try:
-            raw = fetch_index(api_key, cfg.DXY_SYMBOL, "1h", 120)
-            if raw:
-                dxy = analyze_index("DXY", raw)
-                if dxy and dxy.available:
-                    break
-                last_err = "мало закрытых свечей DXY"
-            else:
-                last_err = "пустой ответ DXY"
+            raw = fetch_index(api_key, symbol, "1h", 120)
+            dxy = analyze_index("DXY", raw)
+            if dxy and dxy.available:
+                log.info(
+                    "DXY_OK symbol=%s price=%s closed_h1=%s candles=ok",
+                    symbol,
+                    dxy.price,
+                    dxy.closed_h1,
+                )
+                return dxy
+            last_err = "мало закрытых свечей H1"
         except Exception as e:
             last_err = str(e)
-            log.warning("DXY попытка %s: %s", attempt, e)
+            log.warning("DXY_ERROR symbol=%s reason=%s", symbol, last_err)
         time.sleep(0.4 * attempt)
-    if dxy and dxy.available:
-        _DXY_CACHE["view"] = dxy
-        if h1_dt:
-            _DXY_CACHE["h1"] = h1_dt
-        log.info("DXY получен цена=%s h1=%s", getattr(dxy, "price", None), h1_dt)
-        return dxy
-    log.warning("DXY недоступен: %s", last_err or "нет валидного расчёта")
-    return cached if cached and getattr(cached, "available", False) else None
+    log.warning("DXY_ERROR symbol=%s reason=%s", symbol, last_err or "нет валидного расчёта")
+    return None
+
+
+def _fetch_sek_h1(api_key: str) -> list[Candle]:
+    try:
+        return closed_candles(fetch_index(api_key, "USD/SEK", "1h", 120))
+    except Exception as e:
+        log.warning("DXY_ERROR symbol=USD/SEK reason=%s", e)
+        return []
+
+
+def _synthetic_dxy(api_key: str, market: Optional[dict]) -> Optional[IndexView]:
+    by_symbol: dict[str, list[Candle]] = {}
+    for symbol, _exp in DXY_BASKET:
+        if symbol == "USD/SEK":
+            continue
+        by_symbol[symbol] = _pair_h1_closed(market, symbol)
+        if len(by_symbol[symbol]) < 21 and api_key:
+            try:
+                by_symbol[symbol] = closed_candles(fetch_index(api_key, symbol, "1h", 120))
+            except Exception as e:
+                log.warning("DXY_ERROR symbol=%s reason=%s", symbol, e)
+    by_symbol["USD/SEK"] = _fetch_sek_h1(api_key) if api_key else _pair_h1_closed(market, "USD/SEK")
+    candles = build_synthetic_dxy_candles(by_symbol)
+    if len(candles) < 21:
+        log.warning("DXY_ERROR symbol=synthetic reason=мало общих закрытых H1")
+        return None
+    view = analyze_index("DXY", candles)
+    if not view or not view.available:
+        return None
+    log.info(
+        "DXY_OK symbol=synthetic price=%s closed_h1=%s candles=ok",
+        view.price,
+        view.closed_h1,
+    )
+    return view
+
+
+def collect_extras(
+    api_key: str,
+    force: bool = False,
+    h1_dt: str = "",
+    market: Optional[dict] = None,
+) -> Optional[IndexView]:
+    """Прямой DXY, иначе синтетика по корзине, иначе кэш той же H1."""
+    expected = normalize_h1_ts(h1_dt)
+    cached = _DXY_CACHE.get("view")
+    cache_key = normalize_h1_ts(str(_DXY_CACHE.get("h1") or ""))
+    if (
+        cached
+        and not force
+        and dxy_matches_h1(cached, expected or cache_key)
+        and (not expected or cache_key == expected)
+    ):
+        log.info("DXY_CACHE_USED symbol=%s closed_h1=%s", cfg.DXY_SYMBOL, expected or cache_key)
+        cached.cached = True
+        return cached
+    if expected and not force:
+        disk = _load_dxy_disk(expected)
+        if disk and dxy_matches_h1(disk, expected):
+            _DXY_CACHE["view"] = disk
+            _DXY_CACHE["h1"] = expected
+            log.info("DXY_CACHE_USED symbol=%s closed_h1=%s", cfg.DXY_SYMBOL, expected)
+            return disk
+    dxy = _fetch_direct_dxy(api_key)
+    if dxy and dxy.available and dxy_matches_h1(dxy, expected):
+        stored = _store_dxy(dxy, expected or dxy.closed_h1)
+        if stored:
+            return stored
+    elif dxy and dxy.available and expected:
+        pass
+    dxy = _synthetic_dxy(api_key, market)
+    if dxy and dxy.available and dxy_matches_h1(dxy, expected):
+        stored = _store_dxy(dxy, expected or dxy.closed_h1)
+        if stored:
+            return stored
+    if cached and dxy_matches_h1(cached, expected) and cache_key == expected:
+        cached.cached = True
+        log.info("DXY_CACHE_USED symbol=%s closed_h1=%s", cfg.DXY_SYMBOL, expected)
+        return cached
+    disk = _load_dxy_disk(expected) if expected else None
+    if disk and dxy_matches_h1(disk, expected):
+        log.info("DXY_CACHE_USED symbol=%s closed_h1=%s", cfg.DXY_SYMBOL, expected)
+        return disk
+    return None
 
 
 def session_events(events: list[newsmod.NewsEvent]) -> list[newsmod.NewsEvent]:
