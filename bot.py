@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -426,6 +427,27 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
         await send(app, chat_id, part)
 
 
+def _alert_pair(text: str) -> str:
+    match = re.search(r"(?:Пара:\s*|💱 Пара:\s*)([A-Z]{3}/[A-Z]{3})", text or "")
+    return match.group(1) if match else ""
+
+
+def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pairs=None) -> list[str]:
+    """One alert per pair, at most two strongest alerts per market scan."""
+    ranked = sorted(items, key=lambda item: item[0])
+    chosen, pairs = [], set(blocked_pairs or [])
+    for _priority, text in ranked:
+        pair = _alert_pair(text)
+        if pair and pair in pairs:
+            continue
+        chosen.append(text)
+        if pair:
+            pairs.add(pair)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
 async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not cfg.BRIEFING_ENABLED:
         return
@@ -490,10 +512,10 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             iid,
             briefing.instance_id(),
             closed_dt,
-            briefing.h1_is_current(closed_dt) if closed_dt else False,
+            briefing.h1_is_current(closed_dt, cfg.BRIEFING_OPEN_WINDOW_MIN) if closed_dt else False,
             empty,
         )
-        if closed_dt and iid and briefing.h1_is_current(closed_dt) and not empty and rank:
+        if closed_dt and iid and briefing.h1_is_current(closed_dt, cfg.BRIEFING_OPEN_WINDOW_MIN) and not empty and rank:
             if briefing.issue_sent(state, iid):
                 log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=already_sent", iid, briefing.instance_id())
             elif not briefing.claim_issue(state, iid):
@@ -554,26 +576,46 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             await send(context.application, int(chat_id), format_signal(side, stack, strength))
             state.setdefault("last_signals", {})[f"{symbol}:{side}"] = time.time()
 
+        module_alerts: list[tuple[int, str]] = []
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
                 for text in levels.process_market(market):
-                    await _send_parts(context.application, int(chat_id), text)
+                    module_alerts.append((0, text))
             except Exception:
                 log.exception("Ошибка модуля уровней")
 
         if getattr(cfg, "ZIGZAG_SCANNER_ENABLED", True):
             try:
                 for text in zigzag_scanner.process_market(market):
-                    await _send_parts(context.application, int(chat_id), text)
+                    module_alerts.append((2, text))
             except Exception:
                 log.exception("Ошибка отдельного ZigZag-сканера")
 
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
                 for text in patterns.process_market(market):
-                    await _send_parts(context.application, int(chat_id), text)
+                    structural = any(name in text for name in ("BOS", "Двойная", "голова и плечи", "AB=CD"))
+                    module_alerts.append((1 if structural else 3, text))
             except Exception:
                 log.exception("Ошибка сканера паттернов")
+
+        buckets = state.setdefault("module_alert_buckets", {})
+        bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
+        bucket = buckets.setdefault(bucket_key, {"count": 0, "pairs": []})
+        remaining = max(0, 2 - int(bucket.get("count") or 0))
+        selected_alerts = select_trade_alerts(
+            module_alerts,
+            limit=remaining,
+            blocked_pairs=set(bucket.get("pairs") or []),
+        ) if remaining else []
+        for text in selected_alerts:
+            await _send_parts(context.application, int(chat_id), text)
+            pair = _alert_pair(text)
+            bucket["count"] = int(bucket.get("count") or 0) + 1
+            if pair and pair not in bucket.setdefault("pairs", []):
+                bucket["pairs"].append(pair)
+        # One small current-H1 record is enough; old budgets cannot affect new hours.
+        state["module_alert_buckets"] = {bucket_key: bucket}
 
         save_state(state)
         log.info("Скан %s OK top=%s", datetime.now(timezone.utc).strftime("%H:%M"), rank[0][0] if rank else "-")

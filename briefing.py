@@ -396,6 +396,12 @@ def build_pair_briefs(
         base, quote = split_pair(symbol)
         gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
         news_near = any(e.currency in (base, quote) for e in soon)
+        zigzag_text = _zigzag_line(stack)
+        try:
+            import zigzag_scanner
+            zigzag_text = zigzag_scanner.briefing_status(symbol, market.get(symbol) or {})
+        except Exception:
+            log.exception("ZigZag для брифинга %s", symbol)
         brief = PairBrief(
             symbol=symbol,
             stack=stack,
@@ -403,7 +409,7 @@ def build_pair_briefs(
             h4=_tf_label(stack, "H4"),
             h1=_tf_label(stack, "H1"),
             m15=_tf_label(stack, "M15"),
-            zigzag=_zigzag_line(stack),
+            zigzag=zigzag_text,
             agree=agree,
             agree_n=n,
             gap=gap,

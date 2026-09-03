@@ -570,6 +570,21 @@ REPEATABLE = {
 }
 
 
+def semantic_recent(store: dict, zone: Zone, event: str, side: str) -> bool:
+    """Suppress the same event/side for a pair even if clustering changes id."""
+    if not side:
+        return False
+    key = f"{zone.symbol}:{event}:{side}"
+    last = float((store.get("semantic_sent") or {}).get(key) or 0)
+    cooldown = 6 * 3600 if event in ("break", "role", "invalid") else 60 * 60
+    return _now() - last < cooldown
+
+
+def mark_semantic(store: dict, zone: Zone, event: str, side: str) -> None:
+    if side:
+        store.setdefault("semantic_sent", {})[f"{zone.symbol}:{event}:{side}"] = _now()
+
+
 def already_sent(store: dict, zone: Zone, event: str, candle_dt: str = "") -> bool:
     sent = store.get("sent") or {}
     if event == "new_level":
@@ -819,6 +834,7 @@ def detect_events(
     if (
         zone.strength >= MIN_NOTIFY_STRENGTH
         and "new_level" not in zone.sent_events
+        and getattr(cfg, "LEVEL_NOTIFY_NEW", False)
         and getattr(zone, "post_bootstrap", False)
         and any(t in SENIOR or t in WORKING for t in zone.tfs)
     ):
@@ -913,11 +929,14 @@ def process_market(market: dict) -> list[str]:
                     for ev, fact, side in evs:
                         if already_sent(store, z, ev, cdt):
                             continue
+                        if semantic_recent(store, z, ev, side):
+                            continue
                         if ev == "new_level" and z.strength < MIN_NOTIFY_STRENGTH:
                             continue
                         if chosen is None:
                             chosen = (ev, fact, side)
                             mark_sent(store, z, ev, cdt)
+                            mark_semantic(store, z, ev, side)
                         else:
                             extras.append(fact)
                     if chosen and not bootstrap:

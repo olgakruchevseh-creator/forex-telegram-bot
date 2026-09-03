@@ -53,6 +53,22 @@ def _word(v: int) -> str:
     return "LONG" if v > 0 else "SHORT" if v < 0 else ""
 
 
+def _sequence(swings: list) -> str:
+    """Convert completed extrema to a compact HH/HL/LH/LL sequence."""
+    prev_high = prev_low = None
+    labels = []
+    for point in swings:
+        if point.kind == "high":
+            if prev_high is not None:
+                labels.append("HH" if point.price > prev_high else "LH")
+            prev_high = point.price
+        else:
+            if prev_low is not None:
+                labels.append("HL" if point.price > prev_low else "LL")
+            prev_low = point.price
+    return " → ".join(labels[-4:])
+
+
 def analyze_symbol(symbol: str, by_tf: dict) -> dict:
     # Lazy import avoids a circular import: analysis uses the same primitives.
     from analysis import analyze_tf, closed_candles, zigzag
@@ -94,9 +110,24 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         "adx": round(key_view.adx) if key_view else 0,
         "high": last_high,
         "low": last_low,
+        "sequence": _sequence(swings),
         "directions": {tf: _side(v.structure, v.phase) for tf, v in views.items()},
         "last_dt": max((str((by_tf.get(tf) or [])[-1].dt) for tf in views if by_tf.get(tf)), default=""),
     }
+
+
+def briefing_status(symbol: str, by_tf: dict) -> str:
+    snap = analyze_symbol(symbol, by_tf)
+    seq = snap.get("sequence") or ""
+    direction = _word(snap.get("side") or 0)
+    if not direction:
+        dirs = snap.get("directions") or {}
+        direction = _word(dirs.get(snap.get("tf"), 0))
+    if seq:
+        return f"{snap['tf']}: {seq}" + (f" · {direction}" if direction else "")
+    # Do not print the misleading combination "arrow + неясно". If fewer
+    # than four confirmed extrema exist, state exactly what ZigZag has.
+    return f"{snap.get('tf') or 'H4'}: структура формируется"
 
 
 def _fmt_price(symbol: str, value: float) -> str:
