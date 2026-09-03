@@ -251,7 +251,8 @@ def agree_score(stack: Optional[PairStack]) -> tuple[str, int]:
     return f"{n}/3", n
 
 
-def pair_side(brief: PairBrief) -> Optional[str]:
+def technical_pair_side(brief: PairBrief) -> Optional[str]:
+    """Direction of D1/H4/H1 consensus without using currency strength."""
     d1 = _tf_bias(brief.stack, "D1")
     h4 = _tf_bias(brief.stack, "H4")
     h1 = _tf_bias(brief.stack, "H1")
@@ -260,10 +261,19 @@ def pair_side(brief: PairBrief) -> Optional[str]:
     down = sum(1 for x in core if x < 0)
     if up and down:
         return None
-    if up >= 2 and brief.gap > 0:
+    if up >= 2:
         return "LONG"
-    if down >= 2 and brief.gap < 0:
+    if down >= 2:
         return "SHORT"
+    return None
+
+
+def pair_side(brief: PairBrief) -> Optional[str]:
+    side = technical_pair_side(brief)
+    if side == "LONG" and brief.gap > 0:
+        return side
+    if side == "SHORT" and brief.gap < 0:
+        return side
     return None
 
 
@@ -451,10 +461,11 @@ def build_pair_briefs(
             zigzag_h4_side=zigzag_h4_side,
             zigzag_h4_mixed=zigzag_h4_mixed,
         )
+        technical_side = technical_pair_side(brief)
         brief.side = pair_side(brief)
-        if brief.side and zigzag_h4_side and (
-            (brief.side == "LONG" and zigzag_h4_side < 0)
-            or (brief.side == "SHORT" and zigzag_h4_side > 0)
+        if technical_side and zigzag_h4_side and (
+            (technical_side == "LONG" and zigzag_h4_side < 0)
+            or (technical_side == "SHORT" and zigzag_h4_side > 0)
         ):
             brief.state = "КОНФЛИКТ СТРУКТУРЫ H4"
             brief.side = None
