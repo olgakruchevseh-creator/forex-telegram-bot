@@ -864,7 +864,10 @@ def process_market(market: dict) -> list[str]:
         return []
     messages: list[str] = []
     try:
-        bootstrap = not store.get("bootstrapped")
+        # Older broken builds could mark bootstrap complete while saving no
+        # zones at all. Rebuild that empty baseline silently after deployment
+        # so the repair does not flood Telegram with seven "new level" cards.
+        bootstrap = not store.get("bootstrapped") or not store.get("zones")
         known = set(store.get("known_ids") or [])
         old_zones = {k: zone_from_dict(v) for k, v in store.get("zones", {}).items()}
         new_map: dict[str, Zone] = {}

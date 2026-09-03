@@ -29,6 +29,7 @@ from analysis import (
 import briefing
 import news as newsmod
 import levels
+import zigzag_scanner
 try:
     import patterns
 except ImportError:
@@ -559,6 +560,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await _send_parts(context.application, int(chat_id), text)
             except Exception:
                 log.exception("Ошибка модуля уровней")
+
+        if getattr(cfg, "ZIGZAG_SCANNER_ENABLED", True):
+            try:
+                for text in zigzag_scanner.process_market(market):
+                    await _send_parts(context.application, int(chat_id), text)
+            except Exception:
+                log.exception("Ошибка отдельного ZigZag-сканера")
 
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:

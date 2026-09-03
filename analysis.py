@@ -259,12 +259,14 @@ def split_pair(symbol: str) -> tuple[str, str]:
     return base, quote
 
 
-def closed_candles(candles: list[Candle]) -> list[Candle]:
-    """Return closed H1 candles without blindly deleting a valid last bar.
+def closed_candles(candles: list[Candle], timeframe_minutes: int = 60) -> list[Candle]:
+    """Return closed candles without blindly deleting a valid last bar.
 
     Twelve Data may either include or omit the currently forming candle. The
     old ``candles[:-1]`` rule therefore shifted every DXY component back one
-    extra hour and made the exact-H1 validation reject the result.
+    extra hour and made the exact-H1 validation reject the result. ``levels``
+    also passes its timeframe length here, so keep this helper shared by every
+    scanner.
     """
     if not candles:
         return []
@@ -275,7 +277,8 @@ def closed_candles(candles: list[Candle]) -> list[Candle]:
     except ValueError:
         # Preserve the conservative legacy behaviour for an unknown timestamp.
         return out[:-1] if len(out) >= 2 else out
-    if opened + timedelta(hours=1) > datetime.now(timezone.utc):
+    minutes = max(1, int(timeframe_minutes or 60))
+    if opened + timedelta(minutes=minutes) > datetime.now(timezone.utc):
         return out[:-1]
     return out
 
