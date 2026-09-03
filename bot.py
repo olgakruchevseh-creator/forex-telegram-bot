@@ -35,6 +35,7 @@ import disbalance
 import imbalance
 import accumulation_distribution
 import daily_high_low
+import chain_entries
 try:
     import patterns
 except ImportError:
@@ -608,6 +609,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля дневного максимума/минимума")
+
+        if getattr(cfg, "CHAIN_ENTRIES_ENABLED", True):
+            try:
+                for text in chain_entries.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля Chain Entries")
 
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
