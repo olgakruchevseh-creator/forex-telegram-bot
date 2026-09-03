@@ -456,6 +456,9 @@ def build_pair_briefs(
             (brief.side == "LONG" and zigzag_h4_side < 0)
             or (brief.side == "SHORT" and zigzag_h4_side > 0)
         ):
+            brief.state = "КОНФЛИКТ СТРУКТУРЫ H4"
+            brief.side = None
+        elif brief.side and zigzag_h4_mixed and brief.state == "СМЕШАННО":
             brief.side = None
         if brief.state == "НЕТ ДАННЫХ":
             brief.side = None
@@ -490,6 +493,8 @@ def pick_leaders(briefs: list[PairBrief]) -> list[PairBrief]:
         if b.gap == 0 or (b.side == "LONG" and b.gap <= 0) or (b.side == "SHORT" and b.gap >= 0):
             continue
         if "RANGE" in b.state:
+            continue
+        if b.state in ("СМЕШАННО", "КОНФЛИКТ СТРУКТУРЫ H4"):
             continue
         chosen.append(b)
         if len(chosen) >= 2:
@@ -561,7 +566,10 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
         if touched:
             lines.append("Затрагивает: " + ", ".join(touched))
         score = strength.get(e.currency, 0.0)
-        lines.append(newsmod.scenario_before(e, score))
+        if left < 0 and not newsmod.has_actual(e):
+            lines.append("Время публикации прошло, фактическое значение источником ещё не получено.")
+        else:
+            lines.append(newsmod.scenario_before(e, score))
         lines.append("")
     return lines
 

@@ -83,6 +83,18 @@ def _swing_side(swings: list) -> int:
     return 0
 
 
+def _sequence_side(sequence: str) -> int:
+    """Направление по последней паре подписей high/low."""
+    labels = [x.strip() for x in (sequence or "").split("→") if x.strip()]
+    last_high = next((x for x in reversed(labels) if x in ("HH", "LH")), "")
+    last_low = next((x for x in reversed(labels) if x in ("HL", "LL")), "")
+    if last_high == "HH" and last_low == "HL":
+        return 1
+    if last_high == "LH" and last_low == "LL":
+        return -1
+    return 0
+
+
 def analyze_symbol(symbol: str, by_tf: dict) -> dict:
     # Lazy import avoids a circular import: analysis uses the same primitives.
     from analysis import analyze_tf, closed_candles, zigzag
@@ -135,7 +147,10 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         "low": last_low,
         "sequence": _sequence(swings),
         "directions": {tf: direction(tf) for tf in views},
-        "zigzag_directions": {tf: _swing_side(swings_by_tf.get(tf) or []) for tf in views},
+        "zigzag_directions": {
+            tf: (_swing_side(swings_by_tf.get(tf) or []) or _sequence_side(_sequence(swings_by_tf.get(tf) or [])))
+            for tf in views
+        },
         "sequences": {tf: _sequence(swings_by_tf.get(tf) or []) for tf in views},
         "last_dt": max((bars[-1].dt for bars in bars_by_tf.values() if bars), default=""),
     }

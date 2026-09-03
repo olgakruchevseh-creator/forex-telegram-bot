@@ -797,12 +797,12 @@ def detect_events(
     # beyond an old zone. The previous closed candle must still be on/before
     # the boundary and the newest one must close through it.
     broke_up = (
-        c0.close <= zone.high + buf
+        c0.close <= zone.high
         and closed_beyond(c1, zone, "up", buf)
         and (c1.close - c1.open) > 0
     )
     broke_dn = (
-        c0.close >= zone.low - buf
+        c0.close >= zone.low
         and closed_beyond(c1, zone, "down", buf)
         and (c1.close - c1.open) < 0
     )
@@ -1002,6 +1002,17 @@ def process_market(market: dict) -> list[str]:
                             continue
                         if ev == "new_level" and z.strength < MIN_NOTIFY_STRENGTH:
                             continue
+                        if ev != "new_level":
+                            work = pick_work_tf(z)
+                            confirm_bars = closed_map.get(work) or []
+                            confirm_candle = confirm_bars[-1] if confirm_bars else None
+                            q, probability = reaction_metrics(
+                                z, confirm_candle, atr_map.get(work, z.width), ev
+                            )
+                            if q < int(getattr(cfg, "LEVEL_MIN_EVENT_QUALITY", 74)):
+                                continue
+                            if probability < int(getattr(cfg, "LEVEL_MIN_EVENT_CONFIDENCE", 70)):
+                                continue
                         if chosen is None:
                             chosen = (ev, fact, side)
                             mark_sent(store, z, ev, cdt)
