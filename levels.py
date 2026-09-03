@@ -645,13 +645,18 @@ def kind_ru(kind: str) -> str:
     return "ПОДДЕРЖКА" if kind == "support" else "СОПРОТИВЛЕНИЕ"
 
 
-def reaction_metrics(zone: Zone, candle: Candle | None, atr_v: float) -> tuple[int, int]:
+def reaction_metrics(zone: Zone, candle: Candle | None, atr_v: float, event: str = "") -> tuple[int, int]:
     """Оценка основана на силе зоны и размере подтверждающей реакции."""
     body_atr = abs(candle.close - candle.open) / max(atr_v, 1e-12) if candle else 0.0
     multi = min(12, max(0, len(zone.tfs) - 1) * 3)
     impulse = min(18, int(body_atr * 12))
     quality = int(max(60, min(94, zone.strength * 0.62 + multi + impulse + 12)))
-    return quality, max(58, min(91, quality - 4))
+    confidence = max(58, min(91, quality - 4))
+    # Первый пробой ещё не доказал удержание следующей свечой.
+    if event == "break":
+        quality = min(86, quality)
+        confidence = min(82, confidence)
+    return quality, confidence
 
 
 def build_message(
@@ -675,6 +680,9 @@ def build_message(
         was = "СОПРОТИВЛЕНИЕ" if zone.kind == "support" else "ПОДДЕРЖКА"
         lines.append(f"🧱 Было: {was}")
         lines.append(f"🛡 Стало: {kind_ru(zone.kind)}")
+    elif event in ("hold", "retest") and zone.broken_side:
+        former = "БЫВШЕЕ СОПРОТИВЛЕНИЕ" if zone.broken_side == "up" else "БЫВШАЯ ПОДДЕРЖКА"
+        lines.append(f"🧱 Тип: {former}")
     else:
         lines.append(f"🧱 Тип: {kind_ru(zone.kind)}")
     lines.append(f"📊 Таймфреймы уровня: {format_tfs(zone.tfs)}")
@@ -985,7 +993,7 @@ def process_market(market: dict) -> list[str]:
                     work_bars = closed_map.get(work) or []
                     candle = work_bars[-1] if work_bars else None
                     av = atr_map.get(work, z.width)
-                    quality, confidence = reaction_metrics(z, candle, av)
+                    quality, confidence = reaction_metrics(z, candle, av, ev)
                     messages.append(build_message(
                         z, ev, fact, side,
                         confirmation_tf=work if ev != "new_level" else "",

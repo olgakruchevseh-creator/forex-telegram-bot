@@ -400,6 +400,12 @@ def decide_signal(stack: PairStack) -> Optional[str]:
         return None
     if stack.htf_bias != stack.ltf_bias:
         return None
+    # Два старших голоса не должны маскировать противоположную структуру H4.
+    if getattr(cfg, "SIGNAL_BLOCK_OPPOSITE_H4_ZIGZAG", True):
+        h4 = stack.views.get("H4")
+        structural = structure_bias(h4.structure) if h4 else 0
+        if structural and structural != stack.htf_bias:
+            return None
     if stack.htf_bias > 0 and strong:
         return "LONG"
     if stack.htf_bias < 0 and weak:
@@ -413,3 +419,13 @@ def bias_word(v: int) -> str:
     if v < 0:
         return "вниз"
     return "нет согласия"
+
+
+def structure_bias(structure: str) -> int:
+    """Направление только структуры, без подмены текущим импульсом/EMA."""
+    text = (structure or "").lower()
+    if "быч" in text or ("hh" in text and "hl" in text) or "higher high" in text:
+        return 1
+    if "медвеж" in text or ("lh" in text and "ll" in text) or "lower low" in text:
+        return -1
+    return 0

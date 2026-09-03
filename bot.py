@@ -264,19 +264,24 @@ def format_stack_block(stack: PairStack) -> list[str]:
             lines.append(f"• {tf['label']}: нет данных")
             continue
         arrow = "↑" if v.bias > 0 else "↓" if v.bias < 0 else "•"
-        lines.append(f"• {tf['label']}: {arrow} {v.structure}; {v.phase} (ADX {v.adx:.0f})")
+        lines.append(f"• {tf['label']}: структура — {v.structure}; импульс — {v.phase}; итоговый уклон {arrow} (ADX {v.adx:.0f})")
     return lines
 
 
 def format_signal(side: str, stack: PairStack, strength: dict[str, float]) -> str:
     base, quote = stack.symbol.split("/")
     icon = "🟢" if side == "LONG" else "🔴"
+    wanted = 1 if side == "LONG" else -1
+    senior = [stack.views[k].bias for k in cfg.HTF_KEYS if k in stack.views]
+    junior = [stack.views[k].bias for k in cfg.LTF_KEYS if k in stack.views]
+    senior_agree = sum(1 for value in senior if value == wanted)
+    junior_agree = sum(1 for value in junior if value == wanted)
     facts = [
         f"{icon} {side} {stack.symbol}",
         "",
         "Факты:",
-        f"• Старшие ТФ (W/D/H4): {bias_word(stack.htf_bias)}",
-        f"• Младшие ТФ (H1/M15/M5): {bias_word(stack.ltf_bias)}",
+        f"• Старшие ТФ (W1/D1/H4): {senior_agree} из {len(senior)} подтверждают {side}",
+        f"• Младшие ТФ (H1/M15/M5): {junior_agree} из {len(junior)} подтверждают {side}",
         f"• {base} {strength[base]:+.2f} vs {quote} {strength[quote]:+.2f} (разница {stack.strength_gap:+.2f})",
         f"• Цена: {stack.last}",
         "",

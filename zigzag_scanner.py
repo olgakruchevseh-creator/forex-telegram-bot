@@ -135,6 +135,8 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         "low": last_low,
         "sequence": _sequence(swings),
         "directions": {tf: direction(tf) for tf in views},
+        "zigzag_directions": {tf: _swing_side(swings_by_tf.get(tf) or []) for tf in views},
+        "sequences": {tf: _sequence(swings_by_tf.get(tf) or []) for tf in views},
         "last_dt": max((bars[-1].dt for bars in bars_by_tf.values() if bars), default=""),
     }
 
@@ -142,10 +144,10 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
 def briefing_status(symbol: str, by_tf: dict) -> str:
     snap = analyze_symbol(symbol, by_tf)
     seq = snap.get("sequence") or ""
-    direction = _word(snap.get("side") or 0)
-    if not direction:
-        dirs = snap.get("directions") or {}
-        direction = _word(dirs.get(snap.get("tf"), 0))
+    # Подпись рядом с HH/HL/LH/LL обязана описывать именно ZigZag,
+    # а не противоположный краткосрочный импульс индикаторов.
+    structural_dirs = snap.get("zigzag_directions") or {}
+    direction = _word(structural_dirs.get(snap.get("tf"), 0))
     if seq:
         return f"{snap['tf']}: {seq}" + (f" · {direction}" if direction else " · структура смешанная")
     # Do not print the misleading combination "arrow + неясно". If fewer

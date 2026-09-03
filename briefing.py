@@ -67,6 +67,8 @@ class PairBrief:
     score: float
     news_near: bool
     confidence: int = 0
+    zigzag_h4_side: int = 0
+    zigzag_h4_mixed: bool = False
 
 
 def now_local() -> datetime:
@@ -278,7 +280,29 @@ def leader_confidence(brief: PairBrief) -> int:
         conf += 6
     if "ТРЕНД" in brief.state:
         conf += 5
+    if brief.zigzag_h4_mixed:
+        conf -= 8
+    elif brief.zigzag_h4_side and ((brief.side == "LONG" and brief.zigzag_h4_side > 0) or (brief.side == "SHORT" and brief.zigzag_h4_side < 0)):
+        conf += 4
     return max(62, min(92, int(round(conf))))
+
+
+def effective_dxy_bias(dxy: Optional[IndexView]) -> int:
+    """Сильный подтверждённый импульс не становится NEUTRAL из-за сжатия ZigZag."""
+    if not dxy or not dxy.available:
+        return 0
+    if dxy.bias:
+        return dxy.bias
+    phase = (dxy.phase or "").lower()
+    enough = (
+        abs(dxy.change_pct) >= float(getattr(cfg, "DXY_IMPULSE_MIN_CHANGE_PCT", 0.05))
+        and dxy.adx >= float(getattr(cfg, "DXY_IMPULSE_MIN_ADX", 25))
+    )
+    if enough and dxy.change_pct < 0 and "вниз" in phase:
+        return -1
+    if enough and dxy.change_pct > 0 and "вверх" in phase:
+        return 1
+    return 0
 
 
 def _parse_values(values: list) -> list[Candle]:
@@ -353,13 +377,14 @@ def analyze_index(symbol: str, candles: list[Candle]) -> IndexView:
 def dxy_context(usd_score: float, dxy: Optional[IndexView]) -> str:
     if not dxy or not dxy.available:
         return "DXY нет в данных, смотрим только относительную силу USD"
-    if usd_score < -0.03 and dxy.bias < 0:
+    dxy_bias = effective_dxy_bias(dxy)
+    if usd_score < -0.03 and dxy_bias < 0:
         return "доллар ослабевает, DXY подтверждает"
-    if usd_score > 0.03 and dxy.bias > 0:
+    if usd_score > 0.03 and dxy_bias > 0:
         return "доллар усиливается, DXY подтверждает"
-    if usd_score < -0.03 and dxy.bias > 0:
+    if usd_score < -0.03 and dxy_bias > 0:
         return "USD в корзине слабый, рост DXY — локальная коррекция, не смена силы"
-    if usd_score > 0.03 and dxy.bias < 0:
+    if usd_score > 0.03 and dxy_bias < 0:
         return "USD в корзине сильный, просадка DXY — локальная коррекция"
     return "DXY и корзина USD без явного подтверждения"
 
@@ -397,9 +422,15 @@ def build_pair_briefs(
         gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
         news_near = any(e.currency in (base, quote) for e in soon)
         zigzag_text = _zigzag_line(stack)
+        zigzag_h4_side = 0
+        zigzag_h4_mixed = False
         try:
             import zigzag_scanner
+            zz = zigzag_scanner.analyze_symbol(symbol, market.get(symbol) or {})
             zigzag_text = zigzag_scanner.briefing_status(symbol, market.get(symbol) or {})
+            zigzag_h4_side = int((zz.get("zigzag_directions") or {}).get("H4", 0))
+            h4_sequence = (zz.get("sequences") or {}).get("H4", "")
+            zigzag_h4_mixed = bool(h4_sequence and not zigzag_h4_side)
         except Exception:
             log.exception("ZigZag для брифинга %s", symbol)
         brief = PairBrief(
@@ -417,8 +448,15 @@ def build_pair_briefs(
             side=None,
             score=0.0,
             news_near=news_near,
+            zigzag_h4_side=zigzag_h4_side,
+            zigzag_h4_mixed=zigzag_h4_mixed,
         )
         brief.side = pair_side(brief)
+        if brief.side and zigzag_h4_side and (
+            (brief.side == "LONG" and zigzag_h4_side < 0)
+            or (brief.side == "SHORT" and zigzag_h4_side > 0)
+        ):
+            brief.side = None
         if brief.state == "НЕТ ДАННЫХ":
             brief.side = None
         brief.confidence = leader_confidence(brief) if brief.side else 0
@@ -484,7 +522,7 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
         return lines
     lines.append(f"Цена: {dxy.price:.2f}")
     lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
-    lines.append(f"Направление: {_dir_word(dxy.bias)}")
+    lines.append(f"Направление: {_dir_word(effective_dxy_bias(dxy))}")
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
     lines.append(f"ADX: {dxy.adx:.0f}")
