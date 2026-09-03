@@ -34,6 +34,7 @@ import zigzag_scanner
 import disbalance
 import imbalance
 import accumulation_distribution
+import daily_high_low
 try:
     import patterns
 except ImportError:
@@ -600,6 +601,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля накопления/распределения")
+
+        if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
+            try:
+                for text in daily_high_low.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля дневного максимума/минимума")
 
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
