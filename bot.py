@@ -440,7 +440,28 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
 
 def _alert_pair(text: str) -> str:
     match = re.search(r"(?:Пара:\s*|💱 Пара:\s*)([A-Z]{3}/[A-Z]{3})", text or "")
+    if not match:
+        match = re.search(r"(?:LONG|SHORT)\s+([A-Z]{3}/[A-Z]{3})", text or "")
     return match.group(1) if match else ""
+
+
+def _direct_signal_side(text: str) -> str:
+    match = re.search(r"(?:^|\n)[🟢🔴]?\s*(LONG|SHORT)\s+[A-Z]{3}/[A-Z]{3}", text or "")
+    return match.group(1) if match else ""
+
+
+def signal_allowed_by_h4_zigzag(symbol: str, by_tf: dict, side: str) -> bool:
+    """Use the same confirmed H4 ZigZag direction as the hourly briefing."""
+    if not getattr(cfg, "SIGNAL_BLOCK_OPPOSITE_H4_ZIGZAG", True):
+        return True
+    try:
+        snapshot = zigzag_scanner.analyze_symbol(symbol, by_tf)
+        h4_side = int((snapshot.get("zigzag_directions") or {}).get("H4", 0))
+    except Exception:
+        log.exception("Не удалось проверить ZigZag H4 для %s", symbol)
+        return False
+    wanted = 1 if side == "LONG" else -1
+    return not h4_side or h4_side == wanted
 
 
 def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pairs=None) -> list[str]:
@@ -583,6 +604,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     briefing.release_issue(state, iid)
                 save_state(state)
 
+        module_alerts: list[tuple[int, str]] = []
         for symbol, by_tf in market.items():
             stack = build_stack(symbol, by_tf, strength)
             if not stack:
@@ -590,10 +612,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             side = decide_signal(stack)
             if not side or not cooldown_ok(state, symbol, side):
                 continue
-            await send(context.application, int(chat_id), format_signal(side, stack, strength))
-            state.setdefault("last_signals", {})[f"{symbol}:{side}"] = time.time()
+            if not signal_allowed_by_h4_zigzag(symbol, by_tf, side):
+                log.info("Сигнал %s %s заблокирован противоположным ZigZag H4", symbol, side)
+                continue
+            # Прямой сигнал участвует в том же часовом бюджете, что и все модули.
+            module_alerts.append((0, format_signal(side, stack, strength)))
 
-        module_alerts: list[tuple[int, str]] = []
         if getattr(cfg, "DISBALANCE_ENABLED", True):
             try:
                 for text in disbalance.process_market(market, strength):
@@ -654,7 +678,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
         bucket = buckets.setdefault(bucket_key, {"count": 0, "pairs": []})
-        remaining = max(0, 2 - int(bucket.get("count") or 0))
+        hourly_limit = max(0, int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 2)))
+        remaining = max(0, hourly_limit - int(bucket.get("count") or 0))
         selected_alerts = select_trade_alerts(
             module_alerts,
             limit=remaining,
@@ -663,6 +688,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
             pair = _alert_pair(text)
+            direct_side = _direct_signal_side(text)
+            if pair and direct_side:
+                state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
             bucket["count"] = int(bucket.get("count") or 0) + 1
             if pair and pair not in bucket.setdefault("pairs", []):
                 bucket["pairs"].append(pair)

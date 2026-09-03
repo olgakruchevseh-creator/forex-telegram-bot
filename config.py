@@ -75,6 +75,9 @@ LTF_KEYS = ["H1", "M15", "M5"]
 LTF_MIN_AGREE = 2
 
 SIGNAL_COOLDOWN_HOURS = 6
+# Единый бюджет для всех торговых модулей после одной закрытой H1.
+# Часовой брифинг и новостные сообщения в этот лимит не входят.
+MAX_MODULE_ALERTS_PER_H1 = 2
 
 LOCAL_TZ_NAME = "Europe/Amsterdam"
 SESSIONS = [
