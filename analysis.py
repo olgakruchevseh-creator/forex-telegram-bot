@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import config as cfg
@@ -235,7 +236,10 @@ def phase(candles: list[Candle]) -> tuple[str, float]:
 
 
 def bias_of(structure: str, ph: str) -> int:
-    if "флэт" in ph or structure in ("сужение / сжатие", "неясно"):
+    # ZigZag needs several completed swings and can legitimately be ``неясно``
+    # while EMA/ADX already give a usable direction. Do not let the missing
+    # ZigZag label erase that confirmed phase direction.
+    if "флэт" in ph or structure == "сужение / сжатие":
         return 0
     up = "быч" in structure or structure in ("Higher High", "Higher Low") or "вверх" in ph or "бычь" in ph
     down = "медвеж" in structure or structure in ("Lower High", "Lower Low") or "вниз" in ph
@@ -256,10 +260,24 @@ def split_pair(symbol: str) -> tuple[str, str]:
 
 
 def closed_candles(candles: list[Candle]) -> list[Candle]:
-    """Последняя свеча H1 часто ещё рисуется — для силы берём только закрытые."""
-    if len(candles) >= 2:
-        return candles[:-1]
-    return candles
+    """Return closed H1 candles without blindly deleting a valid last bar.
+
+    Twelve Data may either include or omit the currently forming candle. The
+    old ``candles[:-1]`` rule therefore shifted every DXY component back one
+    extra hour and made the exact-H1 validation reject the result.
+    """
+    if not candles:
+        return []
+    out = list(candles)
+    raw = str(out[-1].dt or "").strip().replace("T", " ")[:19]
+    try:
+        opened = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        # Preserve the conservative legacy behaviour for an unknown timestamp.
+        return out[:-1] if len(out) >= 2 else out
+    if opened + timedelta(hours=1) > datetime.now(timezone.utc):
+        return out[:-1]
+    return out
 
 
 def currency_strength(series: dict[str, list[Candle]], lookback: int) -> dict[str, float]:

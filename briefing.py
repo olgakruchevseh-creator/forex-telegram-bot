@@ -800,8 +800,11 @@ def build_synthetic_dxy_candles(by_symbol: dict[str, list[Candle]]) -> list[Cand
     maps: dict[str, dict[str, Candle]] = {}
     common: Optional[set[str]] = None
     for symbol, _exp in DXY_BASKET:
-        closed = closed_candles(by_symbol.get(symbol) or [])
-        mm = {c.dt[:19]: c for c in closed}
+        # Inputs are already closed by _pair_h1_closed/_fetch_sek_h1. Closing
+        # them a second time removed another valid hour and made synthetic DXY
+        # fail the briefing-hour check.
+        bars = by_symbol.get(symbol) or []
+        mm = {c.dt[:19]: c for c in bars}
         maps[symbol] = mm
         keys = set(mm)
         common = keys if common is None else common & keys
@@ -1049,7 +1052,8 @@ def _fetch_sek_h1(api_key: str, target_h1: str = "") -> list[Candle]:
 def core_target_h1(by_core: dict[str, list[Candle]]) -> str:
     common: Optional[set[str]] = None
     for symbol in DXY_CORE:
-        keys = {normalize_h1_ts(c.dt) for c in closed_candles(by_core.get(symbol) or [])}
+        # by_core is produced by _pair_h1_closed and is already closed.
+        keys = {normalize_h1_ts(c.dt) for c in (by_core.get(symbol) or [])}
         common = keys if common is None else common & keys
     if not common:
         return ""
@@ -1059,7 +1063,8 @@ def core_target_h1(by_core: dict[str, list[Candle]]) -> str:
 def align_usdsek(sek_candles: list[Candle], target_h1: str, max_lag: int = None):
     if max_lag is None:
         max_lag = int(getattr(cfg, "DXY_SEK_MAX_LAG_HOURS", SEK_MAX_LAG_HOURS))
-    closed = closed_candles(sek_candles)
+    # The API and market paths pass an already closed H1 series here.
+    closed = list(sek_candles or [])
     target = parse_h1_dt(target_h1)
     if not closed or not target:
         return [], None

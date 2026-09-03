@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import briefing
-from analysis import Candle, PairStack, TfView
+from analysis import Candle, PairStack, TfView, bias_of
 
 
 def _tf(key, bias=0, phase="импульс / тренд вверх", structure="бычья (HH + HL)"):
@@ -79,6 +79,12 @@ class BriefingFixes(unittest.TestCase):
         stack = PairStack("EUR/USD", 1.1, 0.0, views, 0, 0)
         self.assertEqual(briefing._tf_status(stack, "D1"), "RANGE")
         self.assertEqual(briefing.classify_state(stack), "RANGE")
+
+    def test_unclear_zigzag_keeps_bullish_ema_adx_direction(self):
+        self.assertEqual(bias_of("неясно", "импульс / тренд вверх"), 1)
+
+    def test_unclear_zigzag_keeps_bearish_ema_adx_direction(self):
+        self.assertEqual(bias_of("неясно", "импульс / тренд вниз"), -1)
 
     def test_unclear_not_range(self):
         views = {
