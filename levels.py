@@ -133,12 +133,14 @@ def load_store() -> dict:
                 data.setdefault("zones", {})
                 data.setdefault("sent", {})
                 data.setdefault("last_closed", {})
+                data.setdefault("semantic_sent", {})
+                data.setdefault("semantic_candles", {})
                 data.setdefault("bootstrapped", False)
                 data.setdefault("lock", 0)
                 return data
         except Exception:
             log.exception("Не прочитался levels_state.json")
-    return {"zones": {}, "sent": {}, "last_closed": {}, "bootstrapped": False, "lock": 0}
+    return {"zones": {}, "sent": {}, "last_closed": {}, "semantic_sent": {}, "semantic_candles": {}, "bootstrapped": False, "lock": 0}
 
 
 def save_store(store: dict) -> None:
@@ -579,19 +581,41 @@ REPEATABLE = {
 }
 
 
-def semantic_recent(store: dict, zone: Zone, event: str, side: str) -> bool:
-    """Suppress the same event/side for a pair even if clustering changes id."""
+def semantic_candle_key(zone: Zone, event: str, side: str, candle_dt: str) -> str:
+    return f"{zone.symbol}:{event}:{side}:{candle_dt}"
+
+
+def semantic_recent(store: dict, zone: Zone, event: str, side: str, candle_dt: str = "") -> bool:
+    """Подавляет повтор даже после сдвига границ и смены zone_id."""
     if not side:
         return False
+    if candle_dt:
+        exact = semantic_candle_key(zone, event, side, candle_dt)
+        if exact in (store.get("semantic_candles") or {}):
+            return True
+        # Совместимость с предыдущей версией: ищем то же событие/свечу
+        # по старому zone_id, пока новый точный индекс ещё не создан.
+        sent = store.get("sent") or {}
+        for old_id, raw in (store.get("zones") or {}).items():
+            if isinstance(raw, dict) and raw.get("symbol") == zone.symbol:
+                if f"{old_id}:{event}:{candle_dt}" in sent:
+                    return True
     key = f"{zone.symbol}:{event}:{side}"
     last = float((store.get("semantic_sent") or {}).get(key) or 0)
-    cooldown = 6 * 3600 if event in ("break", "role", "invalid") else 60 * 60
+    if event in ("role", "invalid"):
+        cooldown = 6 * 3600
+    else:
+        cooldown = float(getattr(cfg, "LEVEL_EVENT_COOLDOWN_MINUTES", 55)) * 60
     return _now() - last < cooldown
 
 
-def mark_semantic(store: dict, zone: Zone, event: str, side: str) -> None:
+def mark_semantic(store: dict, zone: Zone, event: str, side: str, candle_dt: str = "") -> None:
     if side:
         store.setdefault("semantic_sent", {})[f"{zone.symbol}:{event}:{side}"] = _now()
+        if candle_dt:
+            store.setdefault("semantic_candles", {})[
+                semantic_candle_key(zone, event, side, candle_dt)
+            ] = _now()
 
 
 def already_sent(store: dict, zone: Zone, event: str, candle_dt: str = "") -> bool:
@@ -948,6 +972,9 @@ def process_market(market: dict) -> list[str]:
                     continue
                 pair_old = {k: z for k, z in old_zones.items() if z.symbol == symbol}
                 zones = attach_existing(pair_old, fresh)
+                # Если одна свеча пересекла несколько близких зон, первой
+                # рассматривается самая сильная; остальные отсечёт точный ключ.
+                zones.sort(key=lambda item: item.strength, reverse=True)
                 changed = candle_changed(store, symbol, last_map)
                 if not changed and store.get("bootstrapped"):
                     for z in zones:
@@ -971,14 +998,14 @@ def process_market(market: dict) -> list[str]:
                     for ev, fact, side in evs:
                         if already_sent(store, z, ev, cdt):
                             continue
-                        if semantic_recent(store, z, ev, side):
+                        if semantic_recent(store, z, ev, side, cdt):
                             continue
                         if ev == "new_level" and z.strength < MIN_NOTIFY_STRENGTH:
                             continue
                         if chosen is None:
                             chosen = (ev, fact, side)
                             mark_sent(store, z, ev, cdt)
-                            mark_semantic(store, z, ev, side)
+                            mark_semantic(store, z, ev, side, cdt)
                         else:
                             extras.append(fact)
                     if chosen and not bootstrap:
@@ -1005,6 +1032,12 @@ def process_market(market: dict) -> list[str]:
                 log.exception("Уровни %s", symbol)
         store["zones"] = {k: {kk: vv for kk, vv in asdict(z).items() if kk != "post_bootstrap"} for k, z in new_map.items()}
         store["known_ids"] = sorted(known)
+        history_limit = int(getattr(cfg, "LEVEL_EXACT_EVENT_HISTORY", 1500))
+        exact_items = sorted(
+            (store.get("semantic_candles") or {}).items(),
+            key=lambda item: float(item[1] or 0),
+        )[-history_limit:]
+        store["semantic_candles"] = dict(exact_items)
         if bootstrap:
             store["bootstrapped"] = True
             messages = []
