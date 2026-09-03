@@ -355,13 +355,22 @@ def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float]) -> 
         pack = [a]
         used[i] = True
         base_tol = atr_map.get(a["tf"], abs(a["high"] - a["low"])) * 0.9
+        pip = 0.01 if "JPY" in symbol else 0.0001
+        absolute_cap = pip * float(getattr(cfg, "LEVEL_MAX_ZONE_PIPS", 45))
+        h1_atr = atr_map.get("H1", 0.0)
+        dynamic_cap = h1_atr * float(getattr(cfg, "LEVEL_MAX_ZONE_H1_ATR", 3.0)) if h1_atr > 0 else absolute_cap
+        max_span = min(absolute_cap, dynamic_cap) if dynamic_cap > 0 else absolute_cap
         for j in range(i + 1, len(items)):
             if used[j]:
                 continue
             b = items[j]
             if a["kind"] != b["kind"]:
                 continue
-            if abs(a["mid"] - b["mid"]) <= max(base_tol, atr_map.get(b["tf"], base_tol) * 0.9):
+            candidate_low = min([p["low"] for p in pack] + [b["low"]])
+            candidate_high = max([p["high"] for p in pack] + [b["high"]])
+            candidate_span = candidate_high - candidate_low
+            near = abs(a["mid"] - b["mid"]) <= max(base_tol, atr_map.get(b["tf"], base_tol) * 0.9)
+            if near and candidate_span <= max_span:
                 pack.append(b)
                 used[j] = True
         tfs = sorted({p["tf"] for p in pack}, key=lambda t: TF_ORDER.index(t) if t in TF_ORDER else 9)
@@ -636,7 +645,25 @@ def kind_ru(kind: str) -> str:
     return "ПОДДЕРЖКА" if kind == "support" else "СОПРОТИВЛЕНИЕ"
 
 
-def build_message(zone: Zone, event: str, extra: str, side: str = "") -> str:
+def reaction_metrics(zone: Zone, candle: Candle | None, atr_v: float) -> tuple[int, int]:
+    """Оценка основана на силе зоны и размере подтверждающей реакции."""
+    body_atr = abs(candle.close - candle.open) / max(atr_v, 1e-12) if candle else 0.0
+    multi = min(12, max(0, len(zone.tfs) - 1) * 3)
+    impulse = min(18, int(body_atr * 12))
+    quality = int(max(60, min(94, zone.strength * 0.62 + multi + impulse + 12)))
+    return quality, max(58, min(91, quality - 4))
+
+
+def build_message(
+    zone: Zone,
+    event: str,
+    extra: str,
+    side: str = "",
+    confirmation_tf: str = "",
+    close_price: float | None = None,
+    quality: int | None = None,
+    confidence: int | None = None,
+) -> str:
     lines = [
         "━━━━━━━━━━━━━━━━━━",
         header_event(event),
@@ -650,7 +677,7 @@ def build_message(zone: Zone, event: str, extra: str, side: str = "") -> str:
         lines.append(f"🛡 Стало: {kind_ru(zone.kind)}")
     else:
         lines.append(f"🧱 Тип: {kind_ru(zone.kind)}")
-    lines.append(f"📊 Таймфреймы: {format_tfs(zone.tfs)}")
+    lines.append(f"📊 Таймфреймы уровня: {format_tfs(zone.tfs)}")
     lines.append(
         f"📍 Зона: {fmt_price(zone.symbol, zone.low)}–{fmt_price(zone.symbol, zone.high)}"
     )
@@ -660,6 +687,13 @@ def build_message(zone: Zone, event: str, extra: str, side: str = "") -> str:
     if side:
         icon = "🟢" if side == "LONG" else "🔴"
         lines.append(f"{icon} Направление реакции: {side}")
+    if confirmation_tf:
+        lines.append(f"🕯 Подтверждение реакции: закрытая {confirmation_tf}-свеча")
+    if close_price is not None:
+        lines.append(f"💵 Цена закрытия: {fmt_price(zone.symbol, close_price)}")
+    if quality is not None and confidence is not None:
+        lines.append(f"💪 Качество реакции: {quality}/100")
+        lines.append(f"📈 Вероятность: {confidence}%")
     lines.append(f"✅ Факт: {extra}")
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━")
@@ -709,7 +743,7 @@ def detect_events(
                 events.append(
                     (
                         "bounce_res",
-                        "Цена протестировала сопротивление и закрылась ниже зоны. Отбой подтверждён закрытыми свечами.",
+                        f"Цена протестировала сопротивление и закрылась ниже зоны. Отбой подтверждён закрытой {work}-свечой.",
                         "SHORT",
                     )
                 )
@@ -722,7 +756,7 @@ def detect_events(
                 events.append(
                     (
                         "bounce_sup",
-                        "Цена протестировала поддержку и закрылась выше зоны. Отбой подтверждён закрытыми свечами.",
+                        f"Цена протестировала поддержку и закрылась выше зоны. Отбой подтверждён закрытой {work}-свечой.",
                         "LONG",
                     )
                 )
@@ -947,7 +981,18 @@ def process_market(market: dict) -> list[str]:
                 if pair_cards and not bootstrap:
                     pair_cards.sort(key=lambda x: x[0])
                     _pr, z, ev, fact, side = pair_cards[0]
-                    messages.append(build_message(z, ev, fact, side))
+                    work = pick_work_tf(z)
+                    work_bars = closed_map.get(work) or []
+                    candle = work_bars[-1] if work_bars else None
+                    av = atr_map.get(work, z.width)
+                    quality, confidence = reaction_metrics(z, candle, av)
+                    messages.append(build_message(
+                        z, ev, fact, side,
+                        confirmation_tf=work if ev != "new_level" else "",
+                        close_price=candle.close if candle and ev != "new_level" else None,
+                        quality=quality if ev != "new_level" else None,
+                        confidence=confidence if ev != "new_level" else None,
+                    ))
             except Exception:
                 log.exception("Уровни %s", symbol)
         store["zones"] = {k: {kk: vv for kk, vv in asdict(z).items() if kk != "post_bootstrap"} for k, z in new_map.items()}
