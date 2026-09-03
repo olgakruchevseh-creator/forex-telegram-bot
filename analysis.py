@@ -132,35 +132,59 @@ def adx(candles: list[Candle], period: int = 14) -> float:
 
 
 def zigzag(candles: list[Candle], pct: float, min_bars: int) -> list[Swing]:
-    if len(candles) < min_bars + 2:
+    """Подтверждённые экстремумы без использования незакрытых будущих свечей.
+
+    Старый алгоритм начинал поиск от первой свечи выборки и на спокойном рынке
+    мог месяцами не завершать первый разворот. Теперь сначала находятся локальные
+    pivot-точки, после чего шум фильтруется адаптивным порогом процент + ATR.
+    """
+    pivot_bars = max(2, int(min_bars))
+    if len(candles) < pivot_bars * 2 + 8:
         return []
-    swings: list[Swing] = []
-    last_ext = candles[0].high
-    last_idx = 0
-    direction = 0
-    for i, c in enumerate(candles):
-        if direction >= 0:
-            if c.high >= last_ext:
-                last_ext = c.high
-                last_idx = i
-            drop = (last_ext - c.low) / last_ext * 100 if last_ext else 0
-            if drop >= pct and i - last_idx >= min_bars:
-                swings.append(Swing(last_idx, last_ext, "high"))
-                direction = -1
-                last_ext = c.low
-                last_idx = i
-        if direction <= 0:
-            if c.low <= last_ext:
-                last_ext = c.low
-                last_idx = i
-            rise = (c.high - last_ext) / last_ext * 100 if last_ext else 0
-            if rise >= pct and i - last_idx >= min_bars:
-                if not swings or swings[-1].kind != "low":
-                    swings.append(Swing(last_idx, last_ext, "low"))
-                direction = 1
-                last_ext = c.high
-                last_idx = i
-    return swings[-8:]
+    candidates: list[Swing] = []
+    for i in range(pivot_bars, len(candles) - pivot_bars):
+        area = candles[i-pivot_bars:i+pivot_bars+1]
+        high = candles[i].high >= max(c.high for c in area)
+        low = candles[i].low <= min(c.low for c in area)
+        # Редкая внешняя свеча может быть одновременно high и low. Берём ту
+        # сторону, которая дальше от середины соседнего диапазона.
+        if high and low:
+            neighbour_mid = (max(c.high for c in area if c is not candles[i]) + min(c.low for c in area if c is not candles[i])) / 2
+            high = abs(candles[i].high-neighbour_mid) >= abs(candles[i].low-neighbour_mid)
+            low = not high
+        if high:
+            candidates.append(Swing(i, candles[i].high, "high"))
+        elif low:
+            candidates.append(Swing(i, candles[i].low, "low"))
+    if not candidates:
+        return []
+
+    av = atr(candles, 14) if len(candles) >= 15 else 0.0
+    pct_part = candles[-1].close * max(float(pct), 0.01) / 100.0
+    factor = float(getattr(cfg, "ZIGZAG_ADAPTIVE_PCT_FACTOR", 0.55))
+    atr_factor = float(getattr(cfg, "ZIGZAG_MIN_MOVE_ATR", 0.55))
+    threshold = max(pct_part * factor, av * atr_factor)
+
+    def normalize(need: float) -> list[Swing]:
+        out: list[Swing] = []
+        for point in candidates:
+            if not out:
+                out.append(point)
+                continue
+            last = out[-1]
+            if point.kind == last.kind:
+                more_extreme = point.price > last.price if point.kind == "high" else point.price < last.price
+                if more_extreme:
+                    out[-1] = point
+                continue
+            if abs(point.price - last.price) >= need:
+                out.append(point)
+        return out
+
+    swings = normalize(threshold)
+    if len(swings) < 4:
+        swings = normalize(threshold * 0.65)
+    return swings[-12:]
 
 
 def structure_from_swings(swings: list[Swing]) -> str:

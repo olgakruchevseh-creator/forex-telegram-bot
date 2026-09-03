@@ -53,6 +53,9 @@ ZIGZAG_PCT = {
     "M5": 0.08,
 }
 ZIGZAG_MIN_BARS = 3
+# Адаптивный ZigZag: процентный порог дополняется текущей волатильностью ATR.
+ZIGZAG_ADAPTIVE_PCT_FACTOR = 0.55
+ZIGZAG_MIN_MOVE_ATR = 0.55
 
 ADX_PERIOD = 14
 ADX_TREND = 22

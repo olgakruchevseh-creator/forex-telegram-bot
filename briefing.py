@@ -540,7 +540,7 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             force = f"сила почти равная ({b.gap:+.2f})"
         lines.append(b.symbol)
         lines.append(f"D1 {b.d1} · H4 {b.h4} · H1 {b.h1} · M15 {b.m15}")
-        lines.append(f"ZigZag {b.zigzag}")
+        lines.append(f"ZigZag: {b.zigzag}")
         lines.append(f"Согласие: {b.agree}")
         lines.append(f"Сила: {force}")
         lines.append(f"Состояние: {b.state}")
@@ -572,7 +572,7 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True) -> list[str]:
         lines.append("НЕТ")
         return lines
     lines.append(
-        ", ".join(f"{b.symbol} {b.side} — {b.confidence}%" for b in ready)
+        ", ".join(f"{b.symbol} {b.side} — оценка уверенности {b.confidence}%" for b in ready)
     )
     lines.append("")
     lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")

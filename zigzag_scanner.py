@@ -69,11 +69,25 @@ def _sequence(swings: list) -> str:
     return " → ".join(labels[-4:])
 
 
+def _swing_side(swings: list) -> int:
+    highs = [x.price for x in swings if x.kind == "high"]
+    lows = [x.price for x in swings if x.kind == "low"]
+    if len(highs) < 2 or len(lows) < 2:
+        return 0
+    hh, lh = highs[-1] > highs[-2], highs[-1] < highs[-2]
+    hl, ll = lows[-1] > lows[-2], lows[-1] < lows[-2]
+    if hh and hl:
+        return 1
+    if lh and ll:
+        return -1
+    return 0
+
+
 def analyze_symbol(symbol: str, by_tf: dict) -> dict:
     # Lazy import avoids a circular import: analysis uses the same primitives.
     from analysis import analyze_tf, closed_candles, zigzag
 
-    views, swings_by_tf = {}, {}
+    views, swings_by_tf, bars_by_tf = {}, {}, {}
     for tf in SCAN_TFS:
         bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
         if len(bars) < 20:
@@ -81,11 +95,17 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         view = analyze_tf(tf, tf, bars)
         if view:
             views[tf] = view
+            bars_by_tf[tf] = bars
             swings_by_tf[tf] = zigzag(bars, cfg.ZIGZAG_PCT.get(tf, 0.18), cfg.ZIGZAG_MIN_BARS)
 
-    d1 = _side(views.get("D1").structure, views.get("D1").phase) if views.get("D1") else 0
-    h4 = _side(views.get("H4").structure, views.get("H4").phase) if views.get("H4") else 0
-    h1 = _side(views.get("H1").structure, views.get("H1").phase) if views.get("H1") else 0
+    def direction(tf: str) -> int:
+        structural = _swing_side(swings_by_tf.get(tf) or [])
+        if structural:
+            return structural
+        view = views.get(tf)
+        return _side(view.structure, view.phase) if view else 0
+
+    d1, h4, h1 = direction("D1"), direction("H4"), direction("H1")
     main = d1 if d1 and d1 == h4 else h4 if h4 else d1
     event, side = "", 0
     if main and h1 and h1 != main:
@@ -95,7 +115,10 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
     elif h4 and h1 and h4 == h1:
         event, side = "СТРУКТУРА", h4
 
-    key_tf = "H4" if views.get("H4") else "D1" if views.get("D1") else "H1"
+    # Показываем старший ТФ, на котором уже есть читаемая последовательность.
+    key_tf = next((tf for tf in ("H4", "D1", "H1", "M15") if _sequence(swings_by_tf.get(tf) or [])), "")
+    if not key_tf:
+        key_tf = max(swings_by_tf, key=lambda tf: len(swings_by_tf[tf]), default="H4")
     key_view = views.get(key_tf)
     swings = swings_by_tf.get(key_tf) or []
     last_high = next((x.price for x in reversed(swings) if x.kind == "high"), 0.0)
@@ -111,8 +134,8 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         "high": last_high,
         "low": last_low,
         "sequence": _sequence(swings),
-        "directions": {tf: _side(v.structure, v.phase) for tf, v in views.items()},
-        "last_dt": max((str((by_tf.get(tf) or [])[-1].dt) for tf in views if by_tf.get(tf)), default=""),
+        "directions": {tf: direction(tf) for tf in views},
+        "last_dt": max((bars[-1].dt for bars in bars_by_tf.values() if bars), default=""),
     }
 
 
@@ -124,10 +147,12 @@ def briefing_status(symbol: str, by_tf: dict) -> str:
         dirs = snap.get("directions") or {}
         direction = _word(dirs.get(snap.get("tf"), 0))
     if seq:
-        return f"{snap['tf']}: {seq}" + (f" · {direction}" if direction else "")
+        return f"{snap['tf']}: {seq}" + (f" · {direction}" if direction else " · структура смешанная")
     # Do not print the misleading combination "arrow + неясно". If fewer
     # than four confirmed extrema exist, state exactly what ZigZag has.
-    return f"{snap.get('tf') or 'H4'}: структура формируется"
+    swings_count = len((snap.get("sequence") or "").split(" → ")) if snap.get("sequence") else 0
+    suffix = f" ({swings_count} элемента)" if swings_count else ""
+    return f"{snap.get('tf') or 'H4'}: структура формируется{suffix}"
 
 
 def _fmt_price(symbol: str, value: float) -> str:
