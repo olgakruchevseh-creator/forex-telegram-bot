@@ -31,6 +31,7 @@ import briefing
 import news as newsmod
 import levels
 import zigzag_scanner
+import disbalance
 try:
     import patterns
 except ImportError:
@@ -577,6 +578,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             state.setdefault("last_signals", {})[f"{symbol}:{side}"] = time.time()
 
         module_alerts: list[tuple[int, str]] = []
+        if getattr(cfg, "DISBALANCE_ENABLED", True):
+            try:
+                for text in disbalance.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля дисбаланса")
+
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
                 for text in levels.process_market(market):
