@@ -32,6 +32,7 @@ import news as newsmod
 import levels
 import zigzag_scanner
 import disbalance
+import imbalance
 try:
     import patterns
 except ImportError:
@@ -584,6 +585,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля дисбаланса")
+
+        if getattr(cfg, "IMBALANCE_ENABLED", True):
+            try:
+                for text in imbalance.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля Imbalance/FVG")
 
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
