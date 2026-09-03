@@ -2,6 +2,7 @@
 Пороги и настройки. Если логика будет врать — крутим ТОЛЬКО здесь.
 Тариф: Twelve Data, 337 кредитов/мин.
 """
+import os
 
 PAIRS = [
     "EUR/USD",
@@ -71,7 +72,13 @@ SESSIONS = [
     {"key": "EUROPE", "name": "ЕВРОПЕЙСКАЯ СЕССИЯ", "start_hm": "09:00"},
     {"key": "AMERICA", "name": "АМЕРИКАНСКАЯ СЕССИЯ", "start_hm": "15:00"},
 ]
-DXY_SYMBOL = "DXY"
+# Публичный /indices Twelve Data не содержит DXY; time_series на тарифе часто отдаёт DXY.
+# Рабочий тикер можно задать в ENV, не меняя код.
+DXY_SYMBOL = (os.getenv("DXY_SYMBOL") or "DXY").strip() or "DXY"
+USDSEK_SYMBOL = "USD/SEK"
+DXY_SEK_MAX_LAG_HOURS = int(os.getenv("DXY_SEK_MAX_LAG_HOURS") or "2")
+DXY_MIN_PRICE = 50.0
+DXY_MAX_PRICE = 200.0
 BRIEFING_ENABLED = True
 NEWS_WARN_MINUTES = 60
 BRIEFING_OPEN_WINDOW_MIN = 12

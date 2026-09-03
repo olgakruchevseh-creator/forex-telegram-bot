@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -46,6 +47,7 @@ class IndexView:
     available: bool = True
     cached: bool = False
     closed_h1: str = ""
+    source: str = ""
 
 
 @dataclass
@@ -475,12 +477,14 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
         lines.append("нет данных")
         return lines
     lines.append(f"Цена: {dxy.price:.2f}")
-    lines.append(f"Изменение за H1: {dxy.change_pct:+.2f}%")
+    lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
     lines.append(f"Направление: {_dir_word(dxy.bias)}")
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
     lines.append(f"ADX: {dxy.adx:.0f}")
-    lines.append(f"USD-контекст: {dxy_context(usd_score, dxy)}")
+    lines.append(f"Контекст относительно силы USD: {dxy_context(usd_score, dxy)}")
+    if getattr(dxy, "source", "") == "synthetic":
+        lines.append("Источник: синтетическая корзина")
     return lines
 
 
@@ -714,6 +718,7 @@ def format_actual_update(
 
 
 _DXY_CACHE: dict = {"view": None, "h1": ""}
+_SEK_CACHE: dict = {"h1": "", "candles": []}
 
 DXY_BASKET_CONST = 50.14348112
 DXY_BASKET = (
@@ -843,6 +848,7 @@ def _indexview_to_dict(view: IndexView) -> dict:
         "available": view.available,
         "cached": True,
         "closed_h1": view.closed_h1,
+        "source": view.source,
     }
 
 
@@ -861,6 +867,7 @@ def _indexview_from_dict(data: dict) -> Optional[IndexView]:
             available=True,
             cached=True,
             closed_h1=str(data.get("closed_h1") or ""),
+            source=str(data.get("source") or ""),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -915,36 +922,128 @@ def _store_dxy(view: IndexView, h1_dt: str) -> Optional[IndexView]:
     return view
 
 
+def parse_twelve_time_series(payload) -> list[Candle]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("ответ не JSON-объект")
+    if payload.get("status") == "error":
+        raise RuntimeError(str(payload.get("message") or "status=error"))
+    values = payload.get("values")
+    if not isinstance(values, list) or not values:
+        raise RuntimeError("нет массива values")
+    candles = _parse_values(values)
+    if not candles:
+        raise RuntimeError("свечи без datetime/OHLC")
+    return candles
+
+
+def dxy_value_ok(price: float) -> bool:
+    lo = float(getattr(cfg, "DXY_MIN_PRICE", 50.0))
+    hi = float(getattr(cfg, "DXY_MAX_PRICE", 200.0))
+    return math.isfinite(price) and lo <= price <= hi
+
+
+def validate_dxy_view(view: Optional[IndexView], expected_h1: str, candle_count: int = 0) -> bool:
+    if not view or not view.available:
+        log.warning("DXY_REJECTED reason=unavailable expected=%s candles=%s", expected_h1, candle_count)
+        return False
+    if not math.isfinite(view.price) or not dxy_value_ok(view.price):
+        log.warning(
+            "DXY_REJECTED reason=BAD_PRICE price=%s expected=%s actual=%s",
+            view.price,
+            expected_h1,
+            view.closed_h1,
+        )
+        return False
+    if expected_h1 and not dxy_matches_h1(view, expected_h1):
+        return False
+    if candle_count and candle_count < 21:
+        log.warning(
+            "DXY_REJECTED reason=TOO_FEW_CANDLES expected=%s candles=%s",
+            expected_h1,
+            candle_count,
+        )
+        return False
+    return True
+
+
 def _fetch_direct_dxy(api_key: str) -> Optional[IndexView]:
     symbol = cfg.DXY_SYMBOL
     try:
         raw = fetch_index(api_key, symbol, "1h", 120)
     except Exception as e:
         err = str(e)
-        if "404" in err:
-            log.warning("DXY_DIRECT_UNAVAILABLE symbol=%s status=404", symbol)
-            return None
-        log.warning("DXY_ERROR symbol=%s reason=%s", symbol, err)
+        status = "404" if "404" in err else err
+        log.warning(
+            "DXY_DIRECT_UNAVAILABLE symbol=%s status=%s",
+            symbol,
+            status,
+        )
         return None
     dxy = analyze_index("DXY", raw)
     if dxy and dxy.available:
+        dxy.source = "direct"
         log.info(
-            "DXY_OK symbol=%s price=%s closed_h1=%s candles=ok",
+            "DXY_DIRECT_OK symbol=%s price=%s closed_h1=%s candles=%s",
             symbol,
             dxy.price,
             dxy.closed_h1,
+            len(raw),
         )
         return dxy
-    log.warning("DXY_ERROR symbol=%s reason=мало закрытых свечей H1", symbol)
+    log.warning(
+        "DXY_DIRECT_UNAVAILABLE symbol=%s status=few_closed expected=%s candles=%s",
+        symbol,
+        "",
+        len(raw or []),
+    )
     return None
 
 
-def _fetch_sek_h1(api_key: str) -> list[Candle]:
-    try:
-        return closed_candles(fetch_index(api_key, "USD/SEK", "1h", 120))
-    except Exception as e:
-        log.warning("DXY_ERROR symbol=USD/SEK reason=%s", e)
-        return []
+def _fetch_sek_h1(api_key: str, target_h1: str = "") -> list[Candle]:
+    symbol = getattr(cfg, "USDSEK_SYMBOL", "USD/SEK")
+    want = normalize_h1_ts(target_h1)
+    cached = _SEK_CACHE.get("candles") or []
+    if cached and (not want or _SEK_CACHE.get("h1") == want or any(normalize_h1_ts(c.dt) == want for c in cached)):
+        log.info(
+            "DXY_USDSEK_OK symbol=%s closed_h1=%s candles=%s source=cache",
+            symbol,
+            _SEK_CACHE.get("h1") or (cached[-1].dt if cached else ""),
+            len(cached),
+        )
+        return list(cached)
+    last_err = ""
+    for attempt in range(1, 3):
+        try:
+            raw = fetch_index(api_key, symbol, "1h", 120)
+            closed = closed_candles(raw)
+            if closed:
+                _SEK_CACHE["candles"] = closed
+                _SEK_CACHE["h1"] = normalize_h1_ts(closed[-1].dt)
+                log.info(
+                    "DXY_USDSEK_OK symbol=%s closed_h1=%s candles=%s",
+                    symbol,
+                    _SEK_CACHE["h1"],
+                    len(closed),
+                )
+                return closed
+            last_err = "empty_closed"
+        except Exception as e:
+            last_err = str(e)
+            log.warning(
+                "DXY_USDSEK_ERROR symbol=%s status=%s expected=%s attempt=%s",
+                symbol,
+                last_err,
+                want,
+                attempt,
+            )
+        time.sleep(0.4 * attempt)
+    log.warning(
+        "DXY_USDSEK_ERROR symbol=%s status=%s expected=%s candles=0",
+        symbol,
+        last_err or "empty",
+        want,
+    )
+    return []
 
 
 def core_target_h1(by_core: dict[str, list[Candle]]) -> str:
@@ -957,7 +1056,9 @@ def core_target_h1(by_core: dict[str, list[Candle]]) -> str:
     return max(common)
 
 
-def align_usdsek(sek_candles: list[Candle], target_h1: str, max_lag: int = SEK_MAX_LAG_HOURS):
+def align_usdsek(sek_candles: list[Candle], target_h1: str, max_lag: int = None):
+    if max_lag is None:
+        max_lag = int(getattr(cfg, "DXY_SEK_MAX_LAG_HOURS", SEK_MAX_LAG_HOURS))
     closed = closed_candles(sek_candles)
     target = parse_h1_dt(target_h1)
     if not closed or not target:
@@ -973,7 +1074,7 @@ def align_usdsek(sek_candles: list[Candle], target_h1: str, max_lag: int = SEK_M
     if lag_hours == 0:
         return closed, "exact"
     log.info(
-        "DXY_COMPONENT_LAG symbol=USD/SEK target_h1=%s actual_h1=%s lag_hours=%s",
+        "DXY_USDSEK_LAG symbol=USD/SEK target_h1=%s actual_h1=%s lag_hours=%s",
         normalize_h1_ts(target_h1),
         normalize_h1_ts(last.dt),
         lag_hours,
@@ -1008,38 +1109,50 @@ def _synthetic_dxy(api_key: str, market: Optional[dict], target_h1: str = "") ->
         by_symbol[symbol] = _pair_h1_closed(market, symbol)
     target = normalize_h1_ts(target_h1) or core_target_h1(by_symbol)
     if not target:
-        log.warning("DXY_ERROR symbol=synthetic reason=нет общей закрытой H1 ядра")
+        log.warning("DXY_REJECTED reason=NO_CORE_H1 expected=%s", target_h1)
         return None
     core_last = core_target_h1(by_symbol)
     if core_last and target > core_last:
         log.warning(
-            "DXY_ERROR symbol=synthetic reason=ядро старше цели target=%s core=%s",
+            "DXY_REJECTED reason=CORE_OLDER expected=%s actual=%s",
             target,
             core_last,
         )
         target = core_last
-    sek = _pair_h1_closed(market, "USD/SEK")
-    if len(sek) < 5 and api_key:
-        fetched = _fetch_sek_h1(api_key)
-        if fetched:
-            sek = fetched
+    sek = _fetch_sek_h1(api_key, target) if api_key else _pair_h1_closed(market, "USD/SEK")
+    if not sek:
+        sek = _pair_h1_closed(market, "USD/SEK")
     aligned, sek_src = align_usdsek(sek, target)
     if not aligned or not sek_src:
         return None
     by_symbol["USD/SEK"] = aligned
+    missing = [s for s, _e in DXY_BASKET if not by_symbol.get(s)]
+    if missing:
+        log.warning("DXY_REJECTED reason=MISSING_COMPONENT symbol=%s expected=%s", ",".join(missing), target)
+        return None
     candles = build_synthetic_dxy_candles(by_symbol)
     if len(candles) < 21:
-        log.warning("DXY_ERROR symbol=synthetic reason=мало общих закрытых H1")
+        log.warning(
+            "DXY_REJECTED reason=TOO_FEW_CANDLES expected=%s actual=%s candles=%s",
+            target,
+            candles[-1].dt if candles else "",
+            len(candles),
+        )
         return None
     view = analyze_index("DXY", candles)
     if not view or not view.available:
+        log.warning("DXY_REJECTED reason=ANALYZE_FAIL expected=%s candles=%s", target, len(candles))
         return None
     view.closed_h1 = target
+    view.source = "synthetic"
+    if not validate_dxy_view(view, target, len(candles)):
+        return None
     log.info(
-        "DXY_OK symbol=synthetic price=%s closed_h1=%s usdsek_source=%s",
+        "DXY_SYNTHETIC_OK price=%s closed_h1=%s usdsek_source=%s candles=%s",
         view.price,
         view.closed_h1,
         sek_src,
+        len(candles),
     )
     return view
 
