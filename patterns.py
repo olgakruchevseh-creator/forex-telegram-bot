@@ -117,7 +117,8 @@ def _pivots(bars: list[Candle], n: int = 3) -> list[tuple[int, float, str]]:
 def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     if len(bars) < 30:
         return []
-    out, c, av = [], bars[-1], atr(bars, 14) or _range(c)
+    out, prev, c = [], bars[-2], bars[-1]
+    av = atr(bars, 14) or _range(c)
     piv = _pivots(bars, cfg.PATTERN_PIVOT.get(tf, 3))
     highs = [(i, p) for i, p, k in piv if k == "H"]
     lows = [(i, p) for i, p, k in piv if k == "L"]
@@ -125,17 +126,23 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     # Double top/bottom require neckline close, not just two extrema.
     if len(highs) >= 2 and abs(highs[-1][1] - highs[-2][1]) <= tol:
         between = [p for i, p in lows if highs[-2][0] < i < highs[-1][0]]
-        if between and c.close < min(between):
-            _add(out, "Двойная вершина", "SHORT", tf, 88, 84, "Две сопоставимые вершины сформированы; последняя свеча закрылась ниже линии шеи.", min(between), c)
+        if between and prev.close >= min(between) and c.close < min(between):
+            symmetry = max(0, 8 - int(abs(highs[-1][1] - highs[-2][1]) / max(tol, 1e-12) * 8))
+            _add(out, "Двойная вершина", "SHORT", tf, 82 + symmetry, 78 + symmetry, "Две сопоставимые вершины сформированы; последняя свеча впервые закрылась ниже линии шеи.", min(between), c)
     if len(lows) >= 2 and abs(lows[-1][1] - lows[-2][1]) <= tol:
         between = [p for i, p in highs if lows[-2][0] < i < lows[-1][0]]
-        if between and c.close > max(between):
-            _add(out, "Двойное дно", "LONG", tf, 88, 84, "Два сопоставимых минимума сформированы; последняя свеча закрылась выше линии шеи.", max(between), c)
+        if between and prev.close <= max(between) and c.close > max(between):
+            symmetry = max(0, 8 - int(abs(lows[-1][1] - lows[-2][1]) / max(tol, 1e-12) * 8))
+            _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry, "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.", max(between), c)
     # Confirmed BOS from the latest completed swing.
-    if highs and c.close > highs[-1][1] + av * .05 and _bull(c):
-        _add(out, "BOS вверх", "LONG", tf, 84, 81, "Закрытая свеча пробила последний подтверждённый максимум структуры.", highs[-1][1], c)
-    if lows and c.close < lows[-1][1] - av * .05 and _bear(c):
-        _add(out, "BOS вниз", "SHORT", tf, 84, 81, "Закрытая свеча пробила последний подтверждённый минимум структуры.", lows[-1][1], c)
+    if highs and prev.close <= highs[-1][1] and c.close > highs[-1][1] + av * .05 and _bull(c):
+        impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
+        clearance = min(6, int((c.close-highs[-1][1]) / max(av, 1e-12) * 12))
+        _add(out, "BOS вверх", "LONG", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Предыдущая свеча была под максимумом структуры, а новая впервые закрылась выше него.", highs[-1][1], c)
+    if lows and prev.close >= lows[-1][1] and c.close < lows[-1][1] - av * .05 and _bear(c):
+        impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
+        clearance = min(6, int((lows[-1][1]-c.close) / max(av, 1e-12) * 12))
+        _add(out, "BOS вниз", "SHORT", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Предыдущая свеча была над минимумом структуры, а новая впервые закрылась ниже него.", lows[-1][1], c)
     # Head & shoulders / inverse H&S with closed neckline break.
     if len(highs) >= 3 and highs[-2][1] > highs[-3][1] and highs[-2][1] > highs[-1][1] and abs(highs[-3][1]-highs[-1][1]) <= av*.65:
         necks = [p for i,p in lows if highs[-3][0] < i < highs[-1][0]]
@@ -198,13 +205,19 @@ def process_market(market: dict) -> list[str]:
     for symbol in cfg.PAIRS:
         try:
             candidates = scan_symbol(symbol, market.get(symbol) or {})
+            if first:
+                # Mark the complete historical snapshot, not only the first
+                # candidate per pair. Otherwise old patterns leak out one by
+                # one on every following scan.
+                for p in candidates:
+                    sent[f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"] = p.dt
+                continue
             for p in candidates:
                 key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
                 if key in sent:
                     continue
                 sent[key] = p.dt
-                if not first:
-                    messages.append(_fmt(symbol, p))
+                messages.append(_fmt(symbol, p))
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:
             log.exception("Паттерны %s", symbol)

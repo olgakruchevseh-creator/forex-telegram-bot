@@ -664,8 +664,9 @@ def detect_events(
         return []
     work = pick_work_tf(zone)
     candles = closed_by_tf.get(work) or []
-    if len(candles) < 1:
+    if len(candles) < 2:
         return []
+    c0 = candles[-2]
     c1 = candles[-1]
     atr_v = atr_map.get(work, zone.width)
     buf = max(atr_v * 0.08, zone.width * 0.15)
@@ -711,8 +712,19 @@ def detect_events(
                     )
                 )
 
-    broke_up = closed_beyond(c1, zone, "up", buf) and (c1.close - c1.open) > 0
-    broke_dn = closed_beyond(c1, zone, "down", buf) and (c1.close - c1.open) < 0
+    # A breakout is a crossing event, not merely a candle that happens to be
+    # beyond an old zone. The previous closed candle must still be on/before
+    # the boundary and the newest one must close through it.
+    broke_up = (
+        c0.close <= zone.high + buf
+        and closed_beyond(c1, zone, "up", buf)
+        and (c1.close - c1.open) > 0
+    )
+    broke_dn = (
+        c0.close >= zone.low - buf
+        and closed_beyond(c1, zone, "down", buf)
+        and (c1.close - c1.open) < 0
+    )
     still_up = c1.close > zone.high + buf
     still_dn = c1.close < zone.low - buf
     returned = zone.low <= c1.close <= zone.high or (
