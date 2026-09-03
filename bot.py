@@ -36,6 +36,7 @@ import imbalance
 import accumulation_distribution
 import daily_high_low
 import chain_entries
+import market_schedule
 try:
     import patterns
 except ImportError:
@@ -454,6 +455,9 @@ def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pa
 
 
 async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Выход до чтения API-ключа и запросов: в выходные нет расхода кредитов.
+    if not market_schedule.automatic_jobs_allowed():
+        return
     if not cfg.BRIEFING_ENABLED:
         return
     state = load_state()
@@ -498,6 +502,9 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Автоматические брифинги, новости и все модули молчат в субботу/воскресенье.
+    if not market_schedule.automatic_jobs_allowed():
+        return
     state = load_state()
     chat_id = state.get("chat_id")
     if not chat_id:
