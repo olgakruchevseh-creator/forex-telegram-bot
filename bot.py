@@ -33,6 +33,7 @@ import levels
 import zigzag_scanner
 import disbalance
 import imbalance
+import accumulation_distribution
 try:
     import patterns
 except ImportError:
@@ -592,6 +593,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля Imbalance/FVG")
+
+        if getattr(cfg, "ACCUMULATION_DISTRIBUTION_ENABLED", True):
+            try:
+                for text in accumulation_distribution.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля накопления/распределения")
 
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
