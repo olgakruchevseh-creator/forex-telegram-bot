@@ -6,10 +6,14 @@ Twelve Data здесь не используется: у него нет нор�
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -21,6 +25,7 @@ log = logging.getLogger("fxbot.news")
 LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 
 FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_CALENDAR_STATUS = "unavailable"  # live / cache / unavailable
 
 COUNTRY_TO_CCY = {
     "US": "USD", "USA": "USD", "UNITED STATES": "USD", "USD": "USD",
@@ -124,6 +129,73 @@ class NewsEvent:
     @property
     def local_hm(self) -> str:
         return self.local.strftime("%H:%M")
+
+
+def _cache_path() -> Path:
+    root = os.getenv("STATE_DIR", "").strip()
+    return (Path(root) if root else Path(__file__).resolve().parent) / "news_calendar_cache.json"
+
+
+def _event_to_dict(event: NewsEvent) -> dict:
+    return {
+        "event_id": event.event_id,
+        "title": event.title,
+        "currency": event.currency,
+        "impact": event.impact,
+        "dt_utc": event.dt_utc.astimezone(timezone.utc).isoformat(),
+        "previous": event.previous,
+        "forecast": event.forecast,
+        "actual": event.actual,
+        "economic_effect": event.economic_effect,
+    }
+
+
+def _save_cache(events: list[NewsEvent]) -> None:
+    if not events:
+        return
+    dest = _cache_path()
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "saved_ts": time.time(),
+            "events": [_event_to_dict(event) for event in events],
+        }, ensure_ascii=False, indent=2))
+        tmp.replace(dest)
+    except OSError:
+        log.exception("Не удалось сохранить резервный календарь")
+
+
+def _load_cache() -> list[NewsEvent]:
+    try:
+        data = json.loads(_cache_path().read_text())
+        age_hours = (time.time() - float(data.get("saved_ts") or 0)) / 3600
+        max_age = float(getattr(cfg, "NEWS_CACHE_MAX_AGE_HOURS", 168))
+        if age_hours < 0 or age_hours > max_age:
+            return []
+        events = []
+        for raw in data.get("events") or []:
+            dt = _parse_dt(raw.get("dt_utc"))
+            if not dt:
+                continue
+            events.append(NewsEvent(
+                event_id=str(raw.get("event_id") or event_id_of(raw.get("title", ""), raw.get("currency", ""), dt)),
+                title=str(raw.get("title") or ""),
+                currency=str(raw.get("currency") or ""),
+                impact=str(raw.get("impact") or "LOW"),
+                dt_utc=dt,
+                previous=str(raw.get("previous") or "—"),
+                forecast=str(raw.get("forecast") or "—"),
+                actual=str(raw.get("actual") or "—"),
+                economic_effect=str(raw.get("economic_effect") or classify_effect(raw.get("title", ""))),
+            ))
+        return events
+    except (FileNotFoundError, ValueError, TypeError, OSError):
+        return []
+
+
+def calendar_status() -> str:
+    return _CALENDAR_STATUS
 
 
 def event_id_of(title: str, currency: str, dt_utc: datetime) -> str:
@@ -252,10 +324,22 @@ def fetch_ff() -> list[NewsEvent]:
 
 
 def load_events() -> list[NewsEvent]:
+    global _CALENDAR_STATUS
     try:
-        return fetch_ff()
+        events = fetch_ff()
+        if events:
+            _save_cache(events)
+            _CALENDAR_STATUS = "live"
+            return events
+        raise RuntimeError("источник вернул пустой календарь")
     except Exception as e:
         log.warning("Forex Factory календарь: %s", e)
+        cached = _load_cache()
+        if cached:
+            _CALENDAR_STATUS = "cache"
+            log.info("Использован сохранённый экономический календарь: %s событий", len(cached))
+            return cached
+        _CALENDAR_STATUS = "unavailable"
         return []
 
 

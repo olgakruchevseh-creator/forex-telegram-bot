@@ -571,7 +571,10 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
     highs = [e for e in highs if e.impact == "HIGH"] or highs[:4]
     lines = ["", "📰 НОВОСТИ ЭТОЙ СЕССИИ", ""]
     if not highs:
-        lines.append("Важных событий до следующей сессии нет")
+        if newsmod.calendar_status() == "unavailable":
+            lines.append("Источник календаря временно недоступен, подтверждённых данных о событиях нет")
+        else:
+            lines.append("Важных событий до следующей сессии нет")
         return lines
     for e in highs[:8]:
         left = newsmod.minutes_left(e, now_utc)
@@ -586,7 +589,9 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
         if touched:
             lines.append("Затрагивает: " + ", ".join(touched))
         score = strength.get(e.currency, 0.0)
-        if left < 0 and not newsmod.has_actual(e):
+        if left < 0 and newsmod.is_speech_event(e):
+            lines.append("Выступление состоялось; числовой Actual для него не предусмотрен. Направление оцениваем только по реакции цены.")
+        elif left < 0 and not newsmod.has_actual(e):
             lines.append("Время публикации прошло, фактическое значение источником ещё не получено.")
         else:
             lines.append(newsmod.scenario_before(e, score))
