@@ -893,6 +893,16 @@ def detect_events(
                 zone.state = "удержание подтверждено"
                 events.append(("hold", "Следующая закрытая свеча удержалась ниже зоны. Удержание подтверждено.", "SHORT"))
             elif returned or (zone.broken_side == "up" and c1.close < zone.high) or (zone.broken_side == "down" and c1.close > zone.low):
+                failed_res_confirmed = (
+                    zone.broken_side == "up"
+                    and c1.close < zone.mid
+                    and c1.close < c1.open
+                )
+                failed_sup_confirmed = (
+                    zone.broken_side == "down"
+                    and c1.close > zone.mid
+                    and c1.close > c1.open
+                )
                 zone.state = "активна"
                 zone.kind = zone.original_kind or zone.kind
                 zone.break_dt = ""
@@ -901,10 +911,10 @@ def detect_events(
                 zone.broken_side = ""
                 zone.counted_beyond_dts = []
                 zone.closes_beyond = 0
-                if zone.kind == "resistance" and c1.close < zone.high:
-                    events.append(("fail_res", "Пробой сопротивления не удержался. Цена вернулась вниз. Ложный пробой подтверждён.", "SHORT"))
-                elif zone.kind == "support" and c1.close > zone.low:
-                    events.append(("fail_sup", "Пробой поддержки не удержался. Цена вернулась вверх. Ложный пробой подтверждён.", "LONG"))
+                if zone.kind == "resistance" and failed_res_confirmed:
+                    events.append(("fail_res", "Пробой сопротивления не удержался. Закрытая свеча вернулась ниже середины зоны и продолжила снижение. Ложный пробой подтверждён.", "SHORT"))
+                elif zone.kind == "support" and failed_sup_confirmed:
+                    events.append(("fail_sup", "Пробой поддержки не удержался. Закрытая свеча вернулась выше середины зоны и продолжила рост. Ложный пробой подтверждён.", "LONG"))
 
     # 3) ретест — отдельная свеча после удержания
     elif zone.state == "удержание подтверждено" and zone.hold_dt and not zone.retest_dt:
@@ -1001,10 +1011,16 @@ def candle_changed(store: dict, symbol: str, last_map: dict[str, str]) -> bool:
     return changed
 
 
-def _strength_confirms(symbol: str, side: str, strength: dict[str, float]) -> bool:
+def _strength_confirms(
+    symbol: str,
+    side: str,
+    strength: dict[str, float],
+    minimum: float | None = None,
+) -> bool:
     base, quote = split_pair(symbol)
     gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
-    minimum = float(getattr(cfg, "LEVEL_BOUNCE_MIN_STRENGTH_GAP", 0.05))
+    if minimum is None:
+        minimum = float(getattr(cfg, "LEVEL_BOUNCE_MIN_STRENGTH_GAP", 0.05))
     return gap >= minimum if side == "LONG" else gap <= -minimum
 
 
@@ -1059,6 +1075,13 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                             continue
                         if ev in ("bounce_res", "bounce_sup") and not _strength_confirms(
                             z.symbol, side, strength or {}
+                        ):
+                            continue
+                        if ev in ("fail_res", "fail_sup") and not _strength_confirms(
+                            z.symbol,
+                            side,
+                            strength or {},
+                            float(getattr(cfg, "LEVEL_FALSE_BREAK_MIN_STRENGTH_GAP", 0.05)),
                         ):
                             continue
                         if ev == "new_level" and z.strength < MIN_NOTIFY_STRENGTH:
