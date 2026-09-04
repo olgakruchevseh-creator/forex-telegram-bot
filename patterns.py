@@ -167,11 +167,46 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     if .382 <= ratio_bc <= .886 and .90 <= ratio_cd <= 1.68:
         side = "LONG" if d[2] == "L" else "SHORT"
         last = bars[-1]
+        # Это только первичное подтверждение геометрии. Перед отправкой
+        # harmonic_confirmation() дополнительно проверит H1, M15 и силу.
         confirmed = last.close > last.open if side == "LONG" else last.close < last.open
         if confirmed:
             q = 82 + int(max(0, 8 - abs(1-ratio_cd)*10))
             _add(out, "Гармонический AB=CD", side, tf, q, 80, f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last)
     return out
+
+
+def _directional_break(bars: list[Candle], side: str) -> bool:
+    """Строгое подтверждение закрытой свечой за недавней структурой."""
+    lookback = max(4, int(getattr(cfg, "HARMONIC_CONFIRM_LOOKBACK", 8)))
+    if len(bars) < lookback + 2:
+        return False
+    c = bars[-1]
+    previous = bars[-lookback-1:-1]
+    av = atr(bars, 14) or _range(c)
+    min_body = av * float(getattr(cfg, "HARMONIC_CONFIRM_BODY_ATR", .35))
+    if side == "LONG":
+        return _bull(c) and _body(c) >= min_body and c.close > max(x.high for x in previous)
+    return _bear(c) and _body(c) >= min_body and c.close < min(x.low for x in previous)
+
+
+def _strength_confirms(symbol: str, side: str, strength: dict[str, float]) -> bool:
+    try:
+        base, quote = symbol.split("/")
+        gap = float(strength[base]) - float(strength[quote])
+    except (KeyError, TypeError, ValueError):
+        return False
+    minimum = float(getattr(cfg, "HARMONIC_MIN_STRENGTH_GAP", .05))
+    return gap >= minimum if side == "LONG" else gap <= -minimum
+
+
+def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[str, float]) -> bool:
+    """AB=CD выходит наружу только после согласованных H1 и M15."""
+    if not _strength_confirms(symbol, side, strength):
+        return False
+    h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    m15 = closed_candles(by_tf.get("M15") or [], TF_MINUTES["M15"])
+    return _directional_break(h1, side) and _directional_break(m15, side)
 
 
 def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
@@ -197,7 +232,7 @@ def _fmt(symbol: str, p: Pattern) -> str:
     ])
 
 
-def process_market(market: dict) -> list[str]:
+def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
@@ -205,6 +240,13 @@ def process_market(market: dict) -> list[str]:
     for symbol in cfg.PAIRS:
         try:
             candidates = scan_symbol(symbol, market.get(symbol) or {})
+            by_tf = market.get(symbol) or {}
+            strength = strength or {}
+            candidates = [
+                p for p in candidates
+                if p.name != "Гармонический AB=CD"
+                or harmonic_confirmation(symbol, p.side, by_tf, strength)
+            ]
             if first:
                 # Mark the complete historical snapshot, not only the first
                 # candidate per pair. Otherwise old patterns leak out one by

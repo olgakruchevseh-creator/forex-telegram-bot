@@ -660,7 +660,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
-                for text in patterns.process_market(market):
+                for text in patterns.process_market(market, strength):
                     structural = any(name in text for name in ("BOS", "Двойная", "голова и плечи", "AB=CD"))
                     module_alerts.append((1 if structural else 3, text))
             except Exception:

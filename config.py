@@ -175,3 +175,9 @@ HARMONIC_RATIOS = {
 ABCD_TIME_SYM = 0.45
 PATTERN_MAIN_TFS = ["W1", "D1", "H4", "H1"]
 PATTERN_CONFIRM_TFS = ["M15", "M5"]
+# Гармоническая геометрия сама по себе не является торговым сигналом.
+# Для отправки требуется подтвержденный импульс H1 и слом структуры M15,
+# поддержанные относительной силой валют.
+HARMONIC_MIN_STRENGTH_GAP = 0.05
+HARMONIC_CONFIRM_BODY_ATR = 0.35
+HARMONIC_CONFIRM_LOOKBACK = 8
