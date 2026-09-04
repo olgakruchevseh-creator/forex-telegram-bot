@@ -37,6 +37,7 @@ import accumulation_distribution
 import daily_high_low
 import chain_entries
 import market_schedule
+import master_direction
 try:
     import patterns
 except ImportError:
@@ -447,6 +448,8 @@ def _alert_pair(text: str) -> str:
 
 def _direct_signal_side(text: str) -> str:
     match = re.search(r"(?:^|\n)[🟢🔴]?\s*(LONG|SHORT)\s+[A-Z]{3}/[A-Z]{3}", text or "")
+    if not match:
+        match = re.search(r"Направление:\s*(LONG|SHORT)\b", text or "")
     return match.group(1) if match else ""
 
 
@@ -605,18 +608,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 save_state(state)
 
         module_alerts: list[tuple[int, str]] = []
-        for symbol, by_tf in market.items():
-            stack = build_stack(symbol, by_tf, strength)
-            if not stack:
-                continue
-            side = decide_signal(stack)
-            if not side or not cooldown_ok(state, symbol, side):
-                continue
-            if not signal_allowed_by_h4_zigzag(symbol, by_tf, side):
-                log.info("Сигнал %s %s заблокирован противоположным ZigZag H4", symbol, side)
-                continue
-            # Прямой сигнал участвует в том же часовом бюджете, что и все модули.
-            module_alerts.append((0, format_signal(side, stack, strength)))
 
         if getattr(cfg, "DISBALANCE_ENABLED", True):
             try:
@@ -674,6 +665,35 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1 if structural else 3, text))
             except Exception:
                 log.exception("Ошибка сканера паттернов")
+
+        # Старый упрощённый LONG/SHORT заменён единым итоговым контролёром.
+        if getattr(cfg, "MASTER_DIRECTION_ENABLED", True):
+            try:
+                master_dxy = briefing.collect_extras(
+                    env("TWELVE_DATA_API_KEY"), h1_dt=closed_dt, market=market
+                )
+                master_dxy_bias = briefing.effective_dxy_bias(master_dxy)
+            except Exception:
+                log.exception("DXY для Master Direction")
+                master_dxy_bias = 0
+            try:
+                master_events = newsmod.load_events()
+            except Exception:
+                log.exception("Новости для Master Direction")
+                master_events = []
+            raw_alerts = [text for _priority, text in module_alerts]
+            for text in master_direction.process_market(
+                market,
+                strength,
+                raw_alerts,
+                dxy_bias=master_dxy_bias,
+                events=master_events,
+                now_utc=datetime.now(timezone.utc),
+            ):
+                pair = _alert_pair(text)
+                side = _direct_signal_side(text)
+                if pair and side and cooldown_ok(state, pair, side):
+                    module_alerts.append((-1, text))
 
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
