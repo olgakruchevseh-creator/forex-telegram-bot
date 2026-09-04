@@ -48,9 +48,10 @@ HIGHER_POSITIVE = (
     "cash rate", "bank rate", "refi",
 )
 CONTEXT_DEPENDENT = (
-    "speech", "fomc", "minutes", "statement", "testimony",
+    "speech", "speaks", "fomc", "minutes", "statement", "testimony",
     "press conference", "decision", "auction",
 )
+SPEECH_MARKERS = ("speech", "speaks", "testimony", "press conference")
 
 TITLE_RU = (
     ("nonfarm payrolls", "Занятость вне сельского хозяйства (NFP)"),
@@ -155,6 +156,11 @@ def classify_effect(title: str) -> str:
     if any(k in t for k in HIGHER_POSITIVE):
         return "higher_is_positive"
     return "context_dependent"
+
+
+def is_speech_event(event: NewsEvent) -> bool:
+    title = (event.title or "").lower()
+    return any(marker in title for marker in SPEECH_MARKERS)
 
 
 def _parse_dt(value) -> Optional[datetime]:
@@ -303,6 +309,16 @@ def interpret_print(event: NewsEvent) -> Optional[str]:
 
 
 def scenario_before(event: NewsEvent, ccy_score: float) -> str:
+    if is_speech_event(event):
+        return (
+            f"Для выступления нет числового Actual. Жёсткий тон комментариев может усилить {event.currency}; "
+            f"мягкий тон — ослабить. До подтверждённой реакции цены направление не утверждаем."
+        )
+    if event.economic_effect == "context_dependent":
+        return (
+            f"У события нет однозначного числового сценария. Возможна повышенная волатильность {event.currency}; "
+            f"направление определяем только после подтверждённой реакции цены."
+        )
     weak = ccy_score <= -0.03
     strong = ccy_score >= 0.03
     if weak:

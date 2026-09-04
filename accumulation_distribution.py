@@ -206,7 +206,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     same.touches_low, same.touches_high = phase.touches_low, phase.touches_high
                 else:
                     stored[phase.phase_id] = phase
-                    if not first:
+                    # A range after a prior move is context, not a confirmed
+                    # trading direction. Notify only after a closed-candle exit.
+                    if not first and getattr(cfg, "PHASE_NOTIFY_FORMATION", False):
                         messages.append(format_message(phase, "phase"))
         except Exception:
             log.exception("Накопление/распределение %s", symbol)

@@ -33,6 +33,8 @@ STRENGTH_RANK_JUMP = 2
 # Автосообщение — только когда закрылась новая H1, не чаще раза за эту свечу.
 STRENGTH_REPORT_EVERY_HOURS = 1
 PAIR_STRENGTH_MIN = 0.20
+# Лидер брифинга не выбирается при практически равной силе валют.
+BRIEFING_LEADER_MIN_STRENGTH_GAP = 0.05
 
 SCAN_EVERY_MINUTES = 5
 # Автоматические сканы и уведомления: только понедельник–пятница.
@@ -124,6 +126,8 @@ PHASE_MAX_EFFICIENCY = 0.32
 PHASE_MIN_PRIOR_MOVE_ATR = 1.8
 PHASE_MIN_QUALITY = 74
 PHASE_EXIT_STRENGTH_GAP = 0.05
+# Сам диапазон рассчитывается внутри; наружу идёт только подтверждённый выход.
+PHASE_NOTIFY_FORMATION = False
 DAILY_HIGH_LOW_ENABLED = True
 DAILY_LEVEL_BREAK_BUFFER_ATR = 0.08
 DAILY_LEVEL_TOUCH_ATR = 0.12

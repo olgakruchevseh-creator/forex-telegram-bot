@@ -294,6 +294,13 @@ def leader_confidence(brief: PairBrief) -> int:
         conf -= 8
     elif brief.zigzag_h4_side and ((brief.side == "LONG" and brief.zigzag_h4_side > 0) or (brief.side == "SHORT" and brief.zigzag_h4_side < 0)):
         conf += 4
+    # При умеренной силе техническое согласие допустимо для лидера, но высокая
+    # оценка 88–92% была бы вводящей в заблуждение.
+    gap = abs(brief.gap)
+    if gap < 0.10:
+        conf = min(conf, 82)
+    elif gap < cfg.PAIR_STRENGTH_MIN:
+        conf = min(conf, 86)
     return max(62, min(92, int(round(conf))))
 
 
@@ -500,6 +507,8 @@ def pick_leaders(briefs: list[PairBrief]) -> list[PairBrief]:
         if not b.side:
             continue
         if b.agree_n < 2:
+            continue
+        if abs(b.gap) < float(getattr(cfg, "BRIEFING_LEADER_MIN_STRENGTH_GAP", 0.05)):
             continue
         if b.gap == 0 or (b.side == "LONG" and b.gap <= 0) or (b.side == "SHORT" and b.gap >= 0):
             continue
