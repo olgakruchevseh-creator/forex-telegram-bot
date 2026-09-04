@@ -655,7 +655,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
-                for text in levels.process_market(market):
+                for text in levels.process_market(market, strength):
                     module_alerts.append((0, text))
             except Exception:
                 log.exception("Ошибка модуля уровней")

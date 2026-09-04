@@ -13,7 +13,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import config as cfg
-from analysis import Candle, atr, closed_candles
+from analysis import Candle, atr, closed_candles, split_pair
 
 try:
     from analysis import TF_MINUTES
@@ -93,6 +93,9 @@ class Zone:
     retest_dt: str = ""
     original_kind: str = ""
     counted_beyond_dts: list[str] = field(default_factory=list)
+    pending_bounce_side: str = ""
+    pending_bounce_dt: str = ""
+    pending_bounce_close: float = 0.0
 
     @property
     def width(self) -> float:
@@ -178,6 +181,9 @@ def zone_from_dict(raw: dict) -> Zone:
     data.setdefault("closes_beyond", 0)
     data.setdefault("counted_beyond_dts", [])
     data.setdefault("sent_events", [])
+    data.setdefault("pending_bounce_side", "")
+    data.setdefault("pending_bounce_dt", "")
+    data.setdefault("pending_bounce_close", 0.0)
     return Zone(**{k: data[k] for k in Zone.__dataclass_fields__ if k != "width"})
 
 
@@ -539,6 +545,9 @@ def attach_existing(old: dict[str, Zone], fresh: list[Zone]) -> list[Zone]:
             z.retest_dt = match.retest_dt
             z.original_kind = match.original_kind or match.kind
             z.counted_beyond_dts = list(match.counted_beyond_dts or [])
+            z.pending_bounce_side = match.pending_bounce_side
+            z.pending_bounce_dt = match.pending_bounce_dt
+            z.pending_bounce_close = match.pending_bounce_close
             z.kind = match.kind if match.state in ("роль изменена", "ретест подтверждён") else z.kind
             z.reactions = max(z.reactions, match.reactions)
             z.strength = max(0, min(100, z.strength - absorb_penalty(z)))
@@ -755,6 +764,38 @@ def detect_events(
     if not zone.original_kind:
         zone.original_kind = zone.kind
 
+    # The first rejection candle is kept internally. A notification is created
+    # only when the next closed working-TF candle continues away from the zone.
+    if getattr(cfg, "LEVEL_BOUNCE_REQUIRE_FOLLOW_THROUGH", True) and zone.pending_bounce_dt:
+        if c1.dt > zone.pending_bounce_dt:
+            if (
+                zone.pending_bounce_side == "SHORT"
+                and c1.close < zone.low
+                and c1.close < zone.pending_bounce_close
+                and c1.close < c1.open
+            ):
+                zone.state = "отбой подтверждён"
+                events.append((
+                    "bounce_res",
+                    f"После теста сопротивления следующая закрытая {work}-свеча продолжила снижение. Отбой подтверждён двумя закрытыми свечами.",
+                    "SHORT",
+                ))
+            elif (
+                zone.pending_bounce_side == "LONG"
+                and c1.close > zone.high
+                and c1.close > zone.pending_bounce_close
+                and c1.close > c1.open
+            ):
+                zone.state = "отбой подтверждён"
+                events.append((
+                    "bounce_sup",
+                    f"После теста поддержки следующая закрытая {work}-свеча продолжила рост. Отбой подтверждён двумя закрытыми свечами.",
+                    "LONG",
+                ))
+            zone.pending_bounce_side = ""
+            zone.pending_bounce_dt = ""
+            zone.pending_bounce_close = 0.0
+
     # ложный прокол
     if wick_in_zone(c1, zone) and not (
         closed_beyond(c1, zone, "up", buf) or closed_beyond(c1, zone, "down", buf)
@@ -765,33 +806,42 @@ def detect_events(
             zone.false_wicks += 1
 
     # отбой
-    if zone.state in ("активна", "протестирована", "отбой подтверждён", "ослаблена"):
+    bounce_just_confirmed = any(ev in ("bounce_res", "bounce_sup") for ev, _fact, _side in events)
+    if not bounce_just_confirmed and zone.state in ("активна", "протестирована", "отбой подтверждён", "ослаблена"):
         if zone.kind == "resistance" and closed_back(c1, zone, "resistance") and reaction_size(c1, zone, atr_v):
             if c1.high >= zone.low:
                 zone.tests_recent += 1
                 zone.last_test_ts = _now()
                 zone.last_touch_dt = c1.dt
-                zone.state = "отбой подтверждён"
-                events.append(
-                    (
+                if getattr(cfg, "LEVEL_BOUNCE_REQUIRE_FOLLOW_THROUGH", True):
+                    if not zone.pending_bounce_dt:
+                        zone.pending_bounce_side = "SHORT"
+                        zone.pending_bounce_dt = c1.dt
+                        zone.pending_bounce_close = c1.close
+                else:
+                    zone.state = "отбой подтверждён"
+                    events.append((
                         "bounce_res",
                         f"Цена протестировала сопротивление и закрылась ниже зоны. Отбой подтверждён закрытой {work}-свечой.",
                         "SHORT",
-                    )
-                )
+                    ))
         elif zone.kind == "support" and closed_back(c1, zone, "support") and reaction_size(c1, zone, atr_v):
             if c1.low <= zone.high:
                 zone.tests_recent += 1
                 zone.last_test_ts = _now()
                 zone.last_touch_dt = c1.dt
-                zone.state = "отбой подтверждён"
-                events.append(
-                    (
+                if getattr(cfg, "LEVEL_BOUNCE_REQUIRE_FOLLOW_THROUGH", True):
+                    if not zone.pending_bounce_dt:
+                        zone.pending_bounce_side = "LONG"
+                        zone.pending_bounce_dt = c1.dt
+                        zone.pending_bounce_close = c1.close
+                else:
+                    zone.state = "отбой подтверждён"
+                    events.append((
                         "bounce_sup",
                         f"Цена протестировала поддержку и закрылась выше зоны. Отбой подтверждён закрытой {work}-свечой.",
                         "LONG",
-                    )
-                )
+                    ))
 
     # A breakout is a crossing event, not merely a candle that happens to be
     # beyond an old zone. The previous closed candle must still be on/before
@@ -951,7 +1001,14 @@ def candle_changed(store: dict, symbol: str, last_map: dict[str, str]) -> bool:
     return changed
 
 
-def process_market(market: dict) -> list[str]:
+def _strength_confirms(symbol: str, side: str, strength: dict[str, float]) -> bool:
+    base, quote = split_pair(symbol)
+    gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
+    minimum = float(getattr(cfg, "LEVEL_BOUNCE_MIN_STRENGTH_GAP", 0.05))
+    return gap >= minimum if side == "LONG" else gap <= -minimum
+
+
+def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
     """Считает уровни по уже полученному рынку. Возвращает тексты новых фактов."""
     store = load_store()
     if not acquire(store):
@@ -999,6 +1056,10 @@ def process_market(market: dict) -> list[str]:
                         if already_sent(store, z, ev, cdt):
                             continue
                         if semantic_recent(store, z, ev, side, cdt):
+                            continue
+                        if ev in ("bounce_res", "bounce_sup") and not _strength_confirms(
+                            z.symbol, side, strength or {}
+                        ):
                             continue
                         if ev == "new_level" and z.strength < MIN_NOTIFY_STRENGTH:
                             continue
