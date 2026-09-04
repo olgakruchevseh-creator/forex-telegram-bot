@@ -138,12 +138,13 @@ def load_store() -> dict:
                 data.setdefault("last_closed", {})
                 data.setdefault("semantic_sent", {})
                 data.setdefault("semantic_candles", {})
+                data.setdefault("last_pair_direction", {})
                 data.setdefault("bootstrapped", False)
                 data.setdefault("lock", 0)
                 return data
         except Exception:
             log.exception("Не прочитался levels_state.json")
-    return {"zones": {}, "sent": {}, "last_closed": {}, "semantic_sent": {}, "semantic_candles": {}, "bootstrapped": False, "lock": 0}
+    return {"zones": {}, "sent": {}, "last_closed": {}, "semantic_sent": {}, "semantic_candles": {}, "last_pair_direction": {}, "bootstrapped": False, "lock": 0}
 
 
 def save_store(store: dict) -> None:
@@ -701,6 +702,7 @@ def build_message(
     close_price: float | None = None,
     quality: int | None = None,
     confidence: int | None = None,
+    cancelled_side: str = "",
 ) -> str:
     lines = [
         "━━━━━━━━━━━━━━━━━━",
@@ -728,6 +730,8 @@ def build_message(
     if side:
         icon = "🟢" if side == "LONG" else "🔴"
         lines.append(f"{icon} Направление реакции: {side}")
+    if cancelled_side:
+        lines.append(f"⚠️ Предыдущее подтверждённое направление {cancelled_side} отменено.")
     if confirmation_tf:
         lines.append(f"🕯 Подтверждение реакции: закрытая {confirmation_tf}-свеча")
     if close_price is not None:
@@ -739,6 +743,26 @@ def build_message(
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
+
+
+def direction_to_cancel(store: dict, symbol: str, new_side: str) -> str:
+    """Возвращает только свежее противоположное направление этой пары."""
+    if new_side not in ("LONG", "SHORT"):
+        return ""
+    previous = (store.get("last_pair_direction") or {}).get(symbol) or {}
+    old_side = previous.get("side") or ""
+    age = _now() - float(previous.get("ts") or 0)
+    max_age = max(1, int(getattr(cfg, "LEVEL_DIRECTION_MEMORY_HOURS", 12))) * 3600
+    if old_side in ("LONG", "SHORT") and old_side != new_side and 0 <= age <= max_age:
+        return old_side
+    return ""
+
+
+def remember_pair_direction(store: dict, symbol: str, side: str, event: str) -> None:
+    if side in ("LONG", "SHORT"):
+        store.setdefault("last_pair_direction", {})[symbol] = {
+            "side": side, "event": event, "ts": _now(),
+        }
 
 
 def detect_events(
@@ -1116,13 +1140,16 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     candle = work_bars[-1] if work_bars else None
                     av = atr_map.get(work, z.width)
                     quality, confidence = reaction_metrics(z, candle, av, ev)
+                    cancelled_side = direction_to_cancel(store, z.symbol, side)
                     messages.append(build_message(
                         z, ev, fact, side,
                         confirmation_tf=work if ev != "new_level" else "",
                         close_price=candle.close if candle and ev != "new_level" else None,
                         quality=quality if ev != "new_level" else None,
                         confidence=confidence if ev != "new_level" else None,
+                        cancelled_side=cancelled_side,
                     ))
+                    remember_pair_direction(store, z.symbol, side, ev)
             except Exception:
                 log.exception("Уровни %s", symbol)
         store["zones"] = {k: {kk: vv for kk, vv in asdict(z).items() if kk != "post_bootstrap"} for k, z in new_map.items()}
