@@ -56,6 +56,8 @@ def _evidence_name(text: str) -> str:
         return "подтверждён дисбаланс"
     if "ИМБАЛАНС" in upper or "FVG" in upper:
         return "подтверждён имбаланс/FVG"
+    if "ФИБОНАЧЧИ" in upper:
+        return "подтверждена реакция из зоны Фибоначчи 50–61.8%"
     if "МАКСИМУМ" in upper or "МИНИМУМ" in upper:
         return "подтверждена реакция дневного уровня"
     if "ZIGZAG" in upper or "СТРУКТУР" in upper:

@@ -36,6 +36,7 @@ import imbalance
 import accumulation_distribution
 import daily_high_low
 import chain_entries
+import fibonacci_grid
 import market_schedule
 import master_direction
 try:
@@ -643,6 +644,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля Chain Entries")
+
+        if getattr(cfg, "FIBONACCI_ENABLED", True):
+            try:
+                for text in fibonacci_grid.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля сетки Фибоначчи")
 
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
