@@ -321,20 +321,22 @@ def scenario_before(event: NewsEvent, ccy_score: float) -> str:
         )
     weak = ccy_score <= -0.03
     strong = ccy_score >= 0.03
-    if weak:
-        return (
-            f"{event.currency} сейчас слабая. Сильный Actual — риск отскока вверх. "
-            f"Слабый Actual — подтверждение слабости."
-        )
-    if strong:
-        return (
-            f"{event.currency} сейчас сильная. Сильный Actual — продолжение силы. "
-            f"Слабый Actual — риск коррекции вниз."
-        )
-    return (
+    current = (
+        f"{event.currency} сейчас слабая. " if weak else
+        f"{event.currency} сейчас сильная. " if strong else
         f"{event.currency} в середине рейтинга. "
-        f"Существенный сюрприз может задать тон сессии, направление до Actual не утверждаем."
     )
+    if event.economic_effect == "higher_is_negative":
+        scenario = (
+            f"Факт выше прогноза — отрицательно для {event.currency}; "
+            f"факт ниже прогноза — положительно для {event.currency}."
+        )
+    else:
+        scenario = (
+            f"Факт выше прогноза — положительно для {event.currency}; "
+            f"факт ниже прогноза — отрицательно для {event.currency}."
+        )
+    return current + scenario + " Направление подтверждаем только после публикации и реакции цены."
 
 
 def pair_pressure(currency: str, usd_positive: bool) -> list[str]:
