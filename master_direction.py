@@ -44,6 +44,8 @@ def _evidence_name(text: str) -> str:
     upper = text.upper()
     if "POWER OF THREE" in upper or "AMD /" in upper:
         return "подтверждена модель AMD / Power of Three"
+    if "СНЯТИЕ ЛИКВИДНОСТИ" in upper:
+        return "подтверждено снятие ликвидности и CHOCH/BOS"
     if "ВЫХОД ИЗ ФАЗЫ" in upper:
         return "подтверждён выход из накопления/распределения"
     if "CHAIN" in upper or "ЦЕПОЧ" in upper:

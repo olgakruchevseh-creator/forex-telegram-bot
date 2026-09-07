@@ -36,6 +36,7 @@ import imbalance
 import accumulation_distribution
 import amd_power_of_three
 import movement_progress
+import liquidity_sweep
 import daily_high_low
 import chain_entries
 import fibonacci_grid
@@ -646,6 +647,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((2, text))
             except Exception:
                 log.exception("Ошибка модуля прогресса движения")
+
+        if getattr(cfg, "LIQUIDITY_SWEEP_ENABLED", True):
+            try:
+                for text in liquidity_sweep.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля снятия ликвидности")
 
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
