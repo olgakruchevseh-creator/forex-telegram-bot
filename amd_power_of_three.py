@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -154,8 +155,14 @@ def format_message(event: dict) -> str:
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
+    if int(state.get("logic_version") or 0) != 2:
+        # Раньше событие могло попасть в sent ещё до отбора и доставки Telegram.
+        state["sent"] = {}
+        state["pending"] = {}
+        state["logic_version"] = 2
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
+    pending = {}
     messages = []
     for symbol in cfg.PAIRS:
         try:
@@ -166,13 +173,29 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             event = detect_amd(symbol, h1, h4, m15, strength)
             if not event or event["key"] in sent:
                 continue
-            sent[event["key"]] = event["key"]
+            text = format_message(event)
+            digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+            pending[digest] = {"key": event["key"]}
             if not first:
-                messages.append(format_message(event))
+                messages.append(text)
         except Exception:
             log.exception("AMD %s", symbol)
     state["bootstrapped"] = True
+    state["pending"] = pending
     if len(sent) > 600:
         state["sent"] = dict(list(sent.items())[-450:])
     _save(state)
     return messages
+
+
+def mark_delivered(text: str) -> bool:
+    """Помечает AMD отправленным только после успешной доставки в Telegram."""
+    state = _load()
+    digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    item = (state.get("pending") or {}).get(digest)
+    if not item:
+        return False
+    state.setdefault("sent", {})[item["key"]] = item["key"]
+    state["pending"].pop(digest, None)
+    _save(state)
+    return True

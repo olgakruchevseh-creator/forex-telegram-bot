@@ -640,7 +640,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
             try:
                 for text in amd_power_of_three.process_market(market, strength):
-                    module_alerts.append((1, text))
+                    # Полная AMD-последовательность редкая и уже прошла строгие фильтры.
+                    module_alerts.append((0, text))
             except Exception:
                 log.exception("Ошибка модуля AMD / Power of Three")
 
@@ -762,6 +763,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
+            if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
+                try:
+                    amd_power_of_three.mark_delivered(text)
+                except Exception:
+                    log.exception("Фиксация доставленного AMD")
             if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
                 try:
                     movement_progress.mark_delivered(text)
