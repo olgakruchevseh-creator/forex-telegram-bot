@@ -40,6 +40,7 @@ import liquidity_sweep
 import order_block
 import daily_high_low
 import chain_entries
+import retest_confirmation
 import fibonacci_grid
 import market_schedule
 import master_direction
@@ -676,6 +677,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля Chain Entries")
+
+        if getattr(cfg, "RETEST_CONFIRMATION_ENABLED", True):
+            try:
+                for text in retest_confirmation.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля структурного ретеста")
 
         if getattr(cfg, "FIBONACCI_ENABLED", True):
             try:
