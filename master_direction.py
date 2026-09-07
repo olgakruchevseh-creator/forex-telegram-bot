@@ -78,7 +78,8 @@ def _module_evidence(symbol: str, side: int, alerts: list[str]) -> tuple[list[st
         upper = text.upper()
         # Прогресс пути — предупреждение о зрелости движения, а не новый
         # входной триггер и не противоположный торговый сигнал.
-        if "ПРОГРЕСС ДВИЖЕНИЯ" in upper or "ДВИЖЕНИЕ БЛИЗКО К ЦЕЛИ" in upper:
+        if ("ПРОГРЕСС ДВИЖЕНИЯ" in upper or "ДВИЖЕНИЕ БЛИЗКО К ЦЕЛИ" in upper
+                or "НАВИГАТОР" in upper):
             continue
         if _pair(text) != symbol:
             continue

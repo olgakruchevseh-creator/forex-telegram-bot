@@ -91,7 +91,8 @@ def _local_date(raw: str) -> str:
 def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
     """Записывает только уже успешно отправленное пользователю сообщение."""
     # Это информационное сообщение об удалении старого уровня, а не новая сделка.
-    if "УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН" in (text or "").upper():
+    upper = (text or "").upper()
+    if "УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН" in upper or "НАВИГАТОР" in upper or "ПРОГРЕСС ДВИЖЕНИЯ" in upper:
         return False
     symbol, side = _pair(text), _side(text)
     bars = _h1(market.get(symbol) or {}) if symbol else []

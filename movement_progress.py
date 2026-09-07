@@ -63,14 +63,26 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
     if min(len(d1), len(h4), len(h1), len(m15)) < 20:
         return None
     h4_view, h1_view, m15_view = _view("H4", h4), _view("H1", h1), _view("M15", m15)
-    if not h4_view or not h1_view or h4_view.bias == 0 or h4_view.bias != h1_view.bias:
+    if not h4_view or not h1_view or not m15_view or h1_view.bias == 0:
         return None
     direction = h1_view.bias
-    if m15_view and m15_view.bias == -direction:
+    # Для регулярного навигатора H1 задаёт путь, а M15 обязан его подтвердить.
+    if m15_view.bias != direction:
         return None
     side = "LONG" if direction > 0 else "SHORT"
-    strength_ok, gap = _strength_ok(symbol, side, strength)
-    if not strength_ok:
+    _strength_confirmed, gap = _strength_ok(symbol, side, strength)
+    directed_gap = gap * direction
+    if h4_view.bias == direction:
+        mode = "IMPULSE"
+        min_gap = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .03))
+    elif h4_view.bias == 0:
+        mode = "LOCAL"
+        min_gap = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .03))
+    else:
+        mode = "PULLBACK"
+        # Откат часто идёт против старшей силы, но сильный встречный разрыв блокируем.
+        min_gap = -float(getattr(cfg, "MOVEMENT_PULLBACK_MAX_OPPOSITE_STRENGTH", .03))
+    if directed_gap < min_gap:
         return None
 
     h1_swings = _swings("H1", h1)
@@ -102,9 +114,7 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
         return None
     progress = max(0.0, min(100.0, passed / total * 100.0))
     remaining = max(0.0, 100.0-progress)
-    thresholds = sorted(int(x) for x in getattr(cfg, "MOVEMENT_PROGRESS_THRESHOLDS", (75, 90)))
-    stage = max((x for x in thresholds if progress >= x), default=0)
-    if not stage:
+    if progress < float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_REPORT_PCT", 15)):
         return None
     anchor_dt = h1[anchor_swing.index].dt
     return {
@@ -112,7 +122,8 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
         "key": f"{symbol}|{side}|{anchor_dt}",
         "symbol": symbol, "side": side, "anchor": anchor, "target": target,
         "target_tf": target_tf, "current": current, "progress": int(round(progress)),
-        "remaining": int(round(remaining)), "stage": stage, "gap": gap,
+        "remaining": int(round(remaining)), "mode": mode, "gap": gap,
+        "h1_dt": h1[-1].dt,
     }
 
 
@@ -121,59 +132,76 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(event: dict) -> str:
-    near = event["stage"] >= 90
-    title = "⚠️ ДВИЖЕНИЕ БЛИЗКО К ЦЕЛИ" if near else "🛣 ПРОГРЕСС ДВИЖЕНИЯ"
-    status = (
-        "Большая часть расчётного пути пройдена; риск коррекции повышен."
-        if near else
-        "Основная часть пути пройдена; до структурной цели остаётся ограниченное расстояние."
-    )
+    near = event["progress"] >= 90
+    mode_names = {
+        "IMPULSE": "ОСНОВНОЙ ИМПУЛЬС", "LOCAL": "ЛОКАЛЬНОЕ ДВИЖЕНИЕ",
+        "PULLBACK": "ПОДТВЕРЖДЁННЫЙ ОТКАТ",
+    }
+    title = "⚠️ НАВИГАТОР — БЛИЗКО К ЦЕЛИ" if near else "🧭 НАВИГАТОР ДВИЖЕНИЯ"
+    status = "Риск остановки или коррекции повышен." if near else "Путь остаётся активным по закрытой H1."
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {event['symbol']}", f"Направление: {event['side']}",
-        f"Начало импульса H1: {_price(event['symbol'], event['anchor'])}",
+        f"Режим: {mode_names.get(event['mode'], event['mode'])}",
+        f"Начало маршрута H1: {_price(event['symbol'], event['anchor'])}",
         f"Текущая цена: {_price(event['symbol'], event['current'])}",
         f"Ближайшая структурная цель {event['target_tf']}: {_price(event['symbol'], event['target'])}",
         f"Пройдено расчётного пути: {event['progress']}%",
         f"Осталось до цели: {event['remaining']}%",
         f"Разница силы валют: {event['gap']:+.2f}", "",
-        f"⚠️ Оценка: {status}",
-        "Факт: процент рассчитан до ближайшего подтверждённого структурного уровня; точку разворота он не гарантирует.",
+        f"Оценка: {status}",
+        "Факт: процент показывает расстояние до ближайшего подтверждённого структурного уровня H4/D1, а не гарантирует продолжение или точку разворота.",
     ])
 
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
-    if int(state.get("logic_version") or 0) != 2:
+    if int(state.get("logic_version") or 0) != 3:
         # Старые этапы могли быть отмечены ещё до фактической доставки Telegram.
         state["stages"] = {}
         state["pending"] = {}
-        state["logic_version"] = 2
+        state["delivered"] = {}
+        state["logic_version"] = 3
     first = not bool(state.get("bootstrapped"))
-    stages = state.setdefault("stages", {})
+    delivered = state.setdefault("delivered", {})
     pending = {}
-    messages = []
+    candidates = []
     for symbol in cfg.PAIRS:
         try:
             event = analyze_progress(symbol, market.get(symbol) or {}, strength)
             if not event:
                 continue
-            old_stage = int(stages.get(event["key"]) or 0)
-            if event["stage"] <= old_stage:
+            old = delivered.get(event["key"]) or {}
+            if state.get("last_report_h1") == event["h1_dt"]:
+                continue
+            if old.get("h1_dt") == event["h1_dt"]:
+                continue
+            change = abs(int(event["progress"]) - int(old.get("progress") or -999))
+            mode_changed = bool(old) and old.get("mode") != event["mode"]
+            if old and not mode_changed and change < int(getattr(cfg, "MOVEMENT_PROGRESS_MIN_CHANGE_PCT", 8)):
                 continue
             text = format_message(event)
             digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-            pending[digest] = {"key": event["key"], "stage": event["stage"]}
-            if not first:
-                messages.append(text)
+            pending[digest] = {
+                "key": event["key"], "progress": event["progress"],
+                "h1_dt": event["h1_dt"], "mode": event["mode"],
+            }
+            score = (
+                3 if event["mode"] == "IMPULSE" else (2 if event["mode"] == "PULLBACK" else 1),
+                abs(event["gap"]), event["progress"],
+            )
+            candidates.append((score, text, digest))
         except Exception:
             log.exception("Прогресс движения %s", symbol)
     state["bootstrapped"] = True
     state["pending"] = pending
-    if len(stages) > 700:
-        state["stages"] = dict(list(stages.items())[-500:])
+    if len(delivered) > 700:
+        state["delivered"] = dict(list(delivered.items())[-500:])
     _save(state)
-    return messages
+    if first or not candidates:
+        return []
+    # Один самый чистый маршрут на одну закрытую H1, отдельно от торгового лимита.
+    return [max(candidates, key=lambda item: item[0])[1]]
 
 
 def mark_delivered(text: str) -> bool:
@@ -183,8 +211,10 @@ def mark_delivered(text: str) -> bool:
     item = (state.get("pending") or {}).get(digest)
     if not item:
         return False
-    stages = state.setdefault("stages", {})
-    stages[item["key"]] = max(int(stages.get(item["key"]) or 0), int(item["stage"]))
+    state.setdefault("delivered", {})[item["key"]] = {
+        "progress": int(item["progress"]), "h1_dt": item["h1_dt"], "mode": item["mode"],
+    }
+    state["last_report_h1"] = item["h1_dt"]
     state["pending"].pop(digest, None)
     _save(state)
     return True

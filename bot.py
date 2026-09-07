@@ -645,14 +645,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля AMD / Power of Three")
 
-        if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
-            try:
-                for text in movement_progress.process_market(market, strength):
-                    # 50/75% — спокойная информация; 90% — важное предупреждение у цели.
-                    module_alerts.append((0 if "ДВИЖЕНИЕ БЛИЗКО К ЦЕЛИ" in text else 2, text))
-            except Exception:
-                log.exception("Ошибка модуля прогресса движения")
-
         if getattr(cfg, "LIQUIDITY_SWEEP_ENABLED", True):
             try:
                 for text in liquidity_sweep.process_market(market, strength):
@@ -768,11 +760,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     amd_power_of_three.mark_delivered(text)
                 except Exception:
                     log.exception("Фиксация доставленного AMD")
-            if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
-                try:
-                    movement_progress.mark_delivered(text)
-                except Exception:
-                    log.exception("Фиксация доставленного этапа прогресса")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)
@@ -787,6 +774,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 bucket["pairs"].append(pair)
         # One small current-H1 record is enough; old budgets cannot affect new hours.
         state["module_alert_buckets"] = {bucket_key: bucket}
+
+        # Навигатор имеет отдельное место: максимум один отчёт на закрытую H1.
+        if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
+            try:
+                for text in movement_progress.process_market(market, strength):
+                    await _send_parts(context.application, int(chat_id), text)
+                    movement_progress.mark_delivered(text)
+            except Exception:
+                log.exception("Отправка навигатора движения")
 
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
