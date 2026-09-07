@@ -37,6 +37,7 @@ import accumulation_distribution
 import amd_power_of_three
 import movement_progress
 import liquidity_sweep
+import order_block
 import daily_high_low
 import chain_entries
 import fibonacci_grid
@@ -654,6 +655,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля снятия ликвидности")
+
+        if getattr(cfg, "ORDER_BLOCK_ENABLED", True):
+            try:
+                for text in order_block.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля Order Block")
 
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:

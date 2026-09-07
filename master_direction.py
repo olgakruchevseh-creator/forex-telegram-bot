@@ -46,6 +46,8 @@ def _evidence_name(text: str) -> str:
         return "подтверждена модель AMD / Power of Three"
     if "СНЯТИЕ ЛИКВИДНОСТИ" in upper:
         return "подтверждено снятие ликвидности и CHOCH/BOS"
+    if "ORDER BLOCK" in upper:
+        return "подтверждён ретест Order Block"
     if "ВЫХОД ИЗ ФАЗЫ" in upper:
         return "подтверждён выход из накопления/распределения"
     if "CHAIN" in upper or "ЦЕПОЧ" in upper:
