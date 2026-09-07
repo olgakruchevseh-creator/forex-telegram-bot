@@ -34,6 +34,7 @@ import zigzag_scanner
 import disbalance
 import imbalance
 import accumulation_distribution
+import amd_power_of_three
 import daily_high_low
 import chain_entries
 import fibonacci_grid
@@ -630,6 +631,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля накопления/распределения")
+
+        if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
+            try:
+                for text in amd_power_of_three.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля AMD / Power of Three")
 
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
