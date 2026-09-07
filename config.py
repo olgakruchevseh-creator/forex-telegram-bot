@@ -80,6 +80,12 @@ SIGNAL_COOLDOWN_HOURS = 6
 # Единый бюджет для всех торговых модулей после одной закрытой H1.
 # Часовой брифинг и новостные сообщения в этот лимит не входят.
 MAX_MODULE_ALERTS_PER_H1 = 2
+SIGNAL_JOURNAL_ENABLED = True
+JOURNAL_TARGET_ATR = 1.0
+JOURNAL_INVALIDATION_ATR = 0.75
+# Время Europe/Amsterdam; скан отправит отчёт в ближайший 5-минутный запуск.
+JOURNAL_DAILY_REPORT_HM = (22, 15)
+JOURNAL_WEEKLY_REPORT_HM = (22, 30)
 MASTER_DIRECTION_ENABLED = True
 MASTER_STRENGTH_MIN_GAP = 0.08
 MASTER_MIN_QUALITY = 82

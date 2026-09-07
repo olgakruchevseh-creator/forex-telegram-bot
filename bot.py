@@ -44,6 +44,7 @@ import retest_confirmation
 import fibonacci_grid
 import market_schedule
 import master_direction
+import signal_journal
 try:
     import patterns
 except ImportError:
@@ -753,8 +754,18 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             limit=remaining,
             blocked_pairs=set(bucket.get("pairs") or []),
         ) if remaining else []
+        if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
+            try:
+                signal_journal.update_market(market)
+            except Exception:
+                log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
+            if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
+                try:
+                    signal_journal.record_sent(text, market, closed_dt)
+                except Exception:
+                    log.exception("Запись отправленного сигнала в журнал")
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
             if pair and direct_side:
@@ -764,6 +775,14 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 bucket["pairs"].append(pair)
         # One small current-H1 record is enough; old budgets cannot affect new hours.
         state["module_alert_buckets"] = {bucket_key: bucket}
+
+        if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
+            try:
+                for report_id, report_text in signal_journal.pending_reports(datetime.now(timezone.utc)):
+                    await _send_parts(context.application, int(chat_id), report_text)
+                    signal_journal.mark_report_sent(report_id)
+            except Exception:
+                log.exception("Отправка отчёта журнала")
 
         save_state(state)
         log.info("Скан %s OK top=%s", datetime.now(timezone.utc).strftime("%H:%M"), rank[0][0] if rank else "-")
