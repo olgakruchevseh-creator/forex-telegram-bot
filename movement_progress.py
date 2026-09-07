@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -107,7 +108,8 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
         return None
     anchor_dt = h1[anchor_swing.index].dt
     return {
-        "key": f"{symbol}|{side}|{anchor_dt}|{target:.6f}",
+        # Цель может немного уточняться, но это остаётся одним движением от одного anchor.
+        "key": f"{symbol}|{side}|{anchor_dt}",
         "symbol": symbol, "side": side, "anchor": anchor, "target": target,
         "target_tf": target_tf, "current": current, "progress": int(round(progress)),
         "remaining": int(round(remaining)), "stage": stage, "gap": gap,
@@ -142,8 +144,14 @@ def format_message(event: dict) -> str:
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
+    if int(state.get("logic_version") or 0) != 2:
+        # Старые этапы могли быть отмечены ещё до фактической доставки Telegram.
+        state["stages"] = {}
+        state["pending"] = {}
+        state["logic_version"] = 2
     first = not bool(state.get("bootstrapped"))
     stages = state.setdefault("stages", {})
+    pending = {}
     messages = []
     for symbol in cfg.PAIRS:
         try:
@@ -153,13 +161,30 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             old_stage = int(stages.get(event["key"]) or 0)
             if event["stage"] <= old_stage:
                 continue
-            stages[event["key"]] = event["stage"]
+            text = format_message(event)
+            digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+            pending[digest] = {"key": event["key"], "stage": event["stage"]}
             if not first:
-                messages.append(format_message(event))
+                messages.append(text)
         except Exception:
             log.exception("Прогресс движения %s", symbol)
     state["bootstrapped"] = True
+    state["pending"] = pending
     if len(stages) > 700:
         state["stages"] = dict(list(stages.items())[-500:])
     _save(state)
     return messages
+
+
+def mark_delivered(text: str) -> bool:
+    """Фиксирует этап только после успешной отправки выбранного сообщения."""
+    state = _load()
+    digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    item = (state.get("pending") or {}).get(digest)
+    if not item:
+        return False
+    stages = state.setdefault("stages", {})
+    stages[item["key"]] = max(int(stages.get(item["key"]) or 0), int(item["stage"]))
+    state["pending"].pop(digest, None)
+    _save(state)
+    return True

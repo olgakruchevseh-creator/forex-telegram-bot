@@ -647,7 +647,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
             try:
                 for text in movement_progress.process_market(market, strength):
-                    module_alerts.append((2, text))
+                    # 50/75% — спокойная информация; 90% — важное предупреждение у цели.
+                    module_alerts.append((0 if "ДВИЖЕНИЕ БЛИЗКО К ЦЕЛИ" in text else 2, text))
             except Exception:
                 log.exception("Ошибка модуля прогресса движения")
 
@@ -761,6 +762,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
+            if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
+                try:
+                    movement_progress.mark_delivered(text)
+                except Exception:
+                    log.exception("Фиксация доставленного этапа прогресса")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)
