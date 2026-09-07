@@ -71,6 +71,11 @@ def _module_evidence(symbol: str, side: int, alerts: list[str]) -> tuple[list[st
     aligned: list[str] = []
     opposite = False
     for text in alerts:
+        upper = text.upper()
+        # Прогресс пути — предупреждение о зрелости движения, а не новый
+        # входной триггер и не противоположный торговый сигнал.
+        if "ПРОГРЕСС ДВИЖЕНИЯ" in upper or "ДВИЖЕНИЕ БЛИЗКО К ЦЕЛИ" in upper:
+            continue
         if _pair(text) != symbol:
             continue
         found = _side(text)

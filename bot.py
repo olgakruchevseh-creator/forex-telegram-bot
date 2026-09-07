@@ -35,6 +35,7 @@ import disbalance
 import imbalance
 import accumulation_distribution
 import amd_power_of_three
+import movement_progress
 import daily_high_low
 import chain_entries
 import fibonacci_grid
@@ -638,6 +639,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля AMD / Power of Three")
+
+        if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
+            try:
+                for text in movement_progress.process_market(market, strength):
+                    module_alerts.append((2, text))
+            except Exception:
+                log.exception("Ошибка модуля прогресса движения")
 
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
