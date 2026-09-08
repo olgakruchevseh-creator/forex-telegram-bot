@@ -341,6 +341,7 @@ def _pattern_allowed(p: Pattern, context_side: str) -> bool:
 
 def _fmt(symbol: str, p: Pattern, context_side: str = "") -> str:
     price = f"{p.level:.3f}" if "JPY" in symbol else f"{p.level:.5f}"
+    side_icon = "🟢" if p.side == "LONG" else "🔴"
     if p.name in CANDLE_PATTERN_NAMES and context_side and p.side != context_side:
         meaning = (f"возможный локальный откат {p.side} против основной структуры {context_side}. "
                    "Разворот основной структуры ещё не подтверждён")
@@ -354,7 +355,7 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "") -> str:
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "🧩 ПАТТЕРН ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {symbol}", f"Паттерн: {p.name}", f"Таймфрейм: {p.tf} ({TF_LABEL[p.tf]})",
-        f"Направление: {p.side}", f"Качество: {p.quality}/100", f"Вероятность: {p.confidence}%",
+        f"Направление: {p.side} {side_icon}", f"Качество: {p.quality}/100", f"Вероятность: {p.confidence}%",
         f"Ключевой уровень: {price}", "", f"Факт: {p.fact}", f"Что означает: {meaning}."
     ])
 

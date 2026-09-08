@@ -133,15 +133,17 @@ def _price(symbol: str, value: float) -> str:
 
 def format_message(event: dict) -> str:
     near = event["progress"] >= 90
+    side_icon = "🟢" if event["side"] == "LONG" else "🔴"
     mode_names = {
         "IMPULSE": "ОСНОВНОЙ ИМПУЛЬС", "LOCAL": "ЛОКАЛЬНОЕ ДВИЖЕНИЕ",
         "PULLBACK": "ПОДТВЕРЖДЁННЫЙ ОТКАТ",
     }
     title = "⚠️ НАВИГАТОР — БЛИЗКО К ЦЕЛИ" if near else "🧭 НАВИГАТОР ДВИЖЕНИЯ"
-    status = "Риск остановки или коррекции повышен." if near else "Путь остаётся активным по закрытой H1."
+    status = (f"{side_icon} Риск остановки или коррекции повышен." if near else
+              f"{side_icon} Путь {event['side']} остаётся активным по закрытой H1.")
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
-        f"💱 Пара: {event['symbol']}", f"Направление: {event['side']}",
+        f"💱 Пара: {event['symbol']}", f"Направление: {event['side']} {side_icon}",
         f"Режим: {mode_names.get(event['mode'], event['mode'])}",
         f"Начало маршрута H1: {_price(event['symbol'], event['anchor'])}",
         f"Текущая цена: {_price(event['symbol'], event['current'])}",
