@@ -432,6 +432,21 @@ def dxy_context(usd_score: float, dxy: Optional[IndexView]) -> str:
     if not dxy or not dxy.available:
         return "DXY нет в данных, смотрим только относительную силу USD"
     dxy_bias = effective_dxy_bias(dxy)
+    structure = (dxy.structure or "").lower()
+    structure_side = 0
+    if "быч" in structure or ("hh" in structure and "hl" in structure):
+        structure_side = 1
+    elif "медвеж" in structure or ("lh" in structure and "ll" in structure):
+        structure_side = -1
+    if structure_side and dxy_bias and structure_side != dxy_bias:
+        if dxy.change_pct > 0.005:
+            last_move = "растёт"
+        elif dxy.change_pct < -0.005:
+            last_move = "снижается"
+        else:
+            last_move = "почти не изменилась"
+        return (f"смешанный контекст — расчётное направление {_dir_word(dxy_bias)}, "
+                f"но структура {_dir_word(structure_side)}; последняя H1 DXY {last_move}")
     if usd_score < -0.03 and dxy_bias < 0:
         return "доллар ослабевает, DXY подтверждает"
     if usd_score > 0.03 and dxy_bias > 0:
