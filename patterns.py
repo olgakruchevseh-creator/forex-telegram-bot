@@ -114,6 +114,19 @@ def _pivots(bars: list[Candle], n: int = 3) -> list[tuple[int, float, str]]:
     return sorted(out, key=lambda x: x[0])[-12:]
 
 
+def _alternating_pivots(pivots: list[tuple[int, float, str]]) -> list[tuple[int, float, str]]:
+    """Убирает соседние экстремумы одного типа, сохраняя более сильный."""
+    out: list[tuple[int, float, str]] = []
+    for pivot in pivots:
+        if not out or out[-1][2] != pivot[2]:
+            out.append(pivot)
+            continue
+        stronger = pivot[1] >= out[-1][1] if pivot[2] == "H" else pivot[1] <= out[-1][1]
+        if stronger:
+            out[-1] = pivot
+    return out
+
+
 def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     if len(bars) < 30:
         return []
@@ -155,11 +168,82 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     return out
 
 
+def pattern_123(tf: str, bars: list[Candle]) -> list[Pattern]:
+    """Подтверждённый зеркальный паттерн 1-2-3 с пробоем точки 2."""
+    out: list[Pattern] = []
+    n = cfg.PATTERN_PIVOT.get(tf, 3)
+    piv = _alternating_pivots(_pivots(bars, n))
+    if len(piv) < 3:
+        return out
+    p1, p2, p3 = piv[-3:]
+    if p3[0] < len(bars) - (n + 6):
+        return out
+    leg, retrace = abs(p2[1] - p1[1]), abs(p3[1] - p2[1])
+    if leg <= 0 or not .30 <= retrace / leg <= .85:
+        return out
+    prev, last = bars[-2], bars[-1]
+    if (p1[2], p2[2], p3[2]) == ("L", "H", "L") and p3[1] > p1[1]:
+        if prev.close <= p2[1] < last.close and _bull(last):
+            _add(out, "Паттерн 1-2-3", "LONG", tf, 86, 82,
+                 "Точка 3 удержалась выше точки 1; закрытая свеча пробила точку 2 вверх.", p2[1], last)
+    elif (p1[2], p2[2], p3[2]) == ("H", "L", "H") and p3[1] < p1[1]:
+        if prev.close >= p2[1] > last.close and _bear(last):
+            _add(out, "Паттерн 1-2-3", "SHORT", tf, 86, 82,
+                 "Точка 3 удержалась ниже точки 1; закрытая свеча пробила точку 2 вниз.", p2[1], last)
+    return out
+
+
+def _inside(value: float, limits: tuple[float, float], tol: float) -> bool:
+    lo, hi = sorted((float(limits[0]), float(limits[1])))
+    return lo - tol <= value <= hi + tol
+
+
+def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
+    """Геометрия XABCD для заявленных в настройках гармонических фигур."""
+    out: list[Pattern] = []
+    n = cfg.PATTERN_PIVOT.get(tf, 3)
+    piv = _alternating_pivots(_pivots(bars, n))
+    if len(piv) < 5:
+        return out
+    x, a, b, c, d = piv[-5:]
+    if d[0] < len(bars) - (n + 6):
+        return out
+    xa, ab, bc, cd = (abs(a[1]-x[1]), abs(b[1]-a[1]),
+                      abs(c[1]-b[1]), abs(d[1]-c[1]))
+    if min(xa, ab, bc, cd) <= 0:
+        return out
+    ratios = {"xb": ab/xa, "ac": bc/ab, "bd": cd/bc,
+              "xd": abs(d[1]-a[1])/xa, "cd": cd/bc}
+    last = bars[-1]
+    side = "LONG" if d[2] == "L" else "SHORT"
+    if not (_bull(last) if side == "LONG" else _bear(last)):
+        return out
+    labels = {
+        "gartley": "Гартли", "bat": "Летучая мышь", "alt_bat": "Альтернативная летучая мышь",
+        "butterfly": "Бабочка", "crab": "Краб", "deep_crab": "Глубокий краб",
+        "shark": "Акула", "cypher": "Сайфер", "five_o": "5-0",
+    }
+    tol = float(getattr(cfg, "FIB_TOL", .06))
+    for key, label in labels.items():
+        rules = getattr(cfg, "HARMONIC_RATIOS", {}).get(key) or {}
+        if rules and all(name in ratios and _inside(ratios[name], limits, tol)
+                         for name, limits in rules.items()):
+            details = ", ".join(f"{name.upper()}={ratios[name]:.2f}" for name in rules)
+            _add(out, f"Гармонический паттерн {label}", side, tf, 88, 83,
+                 f"Завершена зеркальная структура XABCD ({details}); закрытая свеча подтвердила реакцию от точки D.",
+                 d[1], last)
+    return out
+
+
 def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
-    out, piv = [], _pivots(bars, cfg.PATTERN_PIVOT.get(tf, 3))
+    out = []
+    n = cfg.PATTERN_PIVOT.get(tf, 3)
+    piv = _alternating_pivots(_pivots(bars, n))
     if len(piv) < 4:
         return out
     a, b, c, d = piv[-4:]
+    if d[0] < len(bars) - (n + 6):
+        return out
     ab, bc, cd = abs(b[1]-a[1]), abs(c[1]-b[1]), abs(d[1]-c[1])
     if min(ab, bc, cd) <= 0 or b[2] == c[2] or c[2] == d[2]:
         return out
@@ -201,12 +285,12 @@ def _strength_confirms(symbol: str, side: str, strength: dict[str, float]) -> bo
 
 
 def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[str, float]) -> bool:
-    """AB=CD выходит наружу только после согласованных H1 и M15."""
+    """Гармоника выходит наружу при силе валют и пробое на H1 либо M15."""
     if not _strength_confirms(symbol, side, strength):
         return False
     h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
     m15 = closed_candles(by_tf.get("M15") or [], TF_MINUTES["M15"])
-    return _directional_break(h1, side) and _directional_break(m15, side)
+    return _directional_break(h1, side) or _directional_break(m15, side)
 
 
 def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
@@ -217,7 +301,9 @@ def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
         bars = bars[-lookback:]
         found.extend(candlestick_patterns(tf, bars))
         found.extend(structural_patterns(tf, bars))
+        found.extend(pattern_123(tf, bars))
         found.extend(harmonic_abcd(tf, bars))
+        found.extend(harmonic_xabcd(tf, bars))
     return sorted(found, key=lambda p: (p.quality, p.confidence), reverse=True)
 
 
@@ -244,7 +330,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             strength = strength or {}
             candidates = [
                 p for p in candidates
-                if p.name != "Гармонический AB=CD"
+                if not p.name.startswith("Гармонический")
                 or harmonic_confirmation(symbol, p.side, by_tf, strength)
             ]
             if first:
