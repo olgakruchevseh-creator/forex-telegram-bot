@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 import config as cfg
@@ -117,14 +118,17 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         view = views.get(tf)
         return _side(view.structure, view.phase) if view else 0
 
-    d1, h4, h1 = direction("D1"), direction("H4"), direction("H1")
+    d1, h4, h1, m15 = (direction("D1"), direction("H4"),
+                        direction("H1"), direction("M15"))
     main = d1 if d1 and d1 == h4 else h4 if h4 else d1
     event, side = "", 0
-    if main and h1 and h1 != main:
+    # No Repaint: решение строится только по уже закрытым свечам и
+    # подтверждённым pivot-точкам. M15 подтверждает H1 либо остаётся RANGE.
+    if main and h1 and h1 != main and (not m15 or m15 == h1):
         event, side = "ОТКАТ", main
-    elif d1 and h4 and h1 and d1 == h4 == h1:
+    elif d1 and h4 and h1 and d1 == h4 == h1 and (not m15 or m15 == h1):
         event, side = "СТРУКТУРА", d1
-    elif h4 and h1 and h4 == h1:
+    elif h4 and h1 and h4 == h1 and (not m15 or m15 == h1):
         event, side = "СТРУКТУРА", h4
 
     # Показываем старший ТФ, на котором уже есть читаемая последовательность.
@@ -152,6 +156,13 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
             for tf in views
         },
         "sequences": {tf: _sequence(swings_by_tf.get(tf) or []) for tf in views},
+        "extrema": {
+            tf: {
+                "high": next((x.price for x in reversed(swings_by_tf.get(tf) or []) if x.kind == "high"), 0.0),
+                "low": next((x.price for x in reversed(swings_by_tf.get(tf) or []) if x.kind == "low"), 0.0),
+            }
+            for tf in views
+        },
         "last_dt": max((bars[-1].dt for bars in bars_by_tf.values() if bars), default=""),
     }
 
@@ -195,29 +206,84 @@ def format_message(s: dict) -> str:
         lines.append(f"Последний максимум: {_fmt_price(s['symbol'], s['high'])}")
     if s.get("low"):
         lines.append(f"Последний минимум: {_fmt_price(s['symbol'], s['low'])}")
-    if s["event"] == "ОТКАТ":
+    if s["event"] in ("ОТКАТ", "ОТКАТ ПРОДОЛЖАЕТСЯ"):
         lines.append(f"Факт: H1 идёт против основной структуры. Приоритет остаётся {side}.")
+    elif s["event"] == "ОТКАТ ЗАВЕРШЁН":
+        lines.append(f"Факт: H1 вернулся в сторону основной структуры; откат завершён. Приоритет {side}.")
+    elif s["event"] == "СТРУКТУРА ПРОДОЛЖЕНА":
+        lines.append(f"Факт: сформирован новый подтверждённый экстремум в направлении {side}.")
     else:
         lines.append(f"Факт: направление подтверждено минимум двумя рабочими таймфреймами.")
     return "\n".join(lines)
 
 
+def _fingerprint(snap: dict) -> str:
+    """Меняется только после подтверждённого события или нового H1-экстремума."""
+    sequences = snap.get("sequences") or {}
+    extrema = (snap.get("extrema") or {}).get("H1") or {}
+    return "|".join([
+        str(snap.get("event") or ""), str(snap.get("side") or 0),
+        str(sequences.get("H4") or ""), str(sequences.get("H1") or ""),
+        f"{float(extrema.get('high') or 0):.8f}", f"{float(extrema.get('low') or 0):.8f}",
+    ])
+
+
+def mark_delivered(text: str) -> None:
+    """Отмечает ZigZag обработанным только после успешной отправки Telegram."""
+    if "↕️ ZIGZAG —" not in (text or ""):
+        return
+    match = re.search(r"(?:^|\n)Пара:\s*([A-Z]{3}/[A-Z]{3})", text)
+    if not match:
+        return
+    symbol = match.group(1)
+    state = _load()
+    pending = state.setdefault("pending", {})
+    item = pending.pop(symbol, None)
+    if isinstance(item, dict) and item.get("fingerprint"):
+        state.setdefault("delivered", {})[symbol] = item["fingerprint"]
+        _save(state)
+
+
 def process_market(market: dict) -> list[str]:
     state = _load()
-    first = not bool(state.get("bootstrapped"))
-    saved = state.setdefault("signals", {})
+    # Новая схема запускается тихо, чтобы после обновления не прислать историю.
+    first = not bool(state.get("bootstrapped")) or state.get("schema_version") != 2
+    # Миграция старого состояния: ранее найденное ошибочно считалось доставленным.
+    delivered = state.setdefault("delivered", dict(state.get("signals") or {}))
+    pending = state.setdefault("pending", {})
+    observed = state.setdefault("observed", {})
     messages = []
     for symbol in cfg.PAIRS:
         try:
             snap = analyze_symbol(symbol, market.get(symbol) or {})
             if not snap["event"] or not snap["side"]:
                 continue
-            fingerprint = f"{snap['event']}|{snap['side']}|{snap['tf']}|{snap['structure']}"
-            if not first and saved.get(symbol) != fingerprint:
-                messages.append(format_message(snap))
-            saved[symbol] = fingerprint
+            fingerprint = _fingerprint(snap)
+            base_event = snap["event"]
+            previous = observed.get(symbol) or {}
+            previous_event = previous.get("event") if isinstance(previous, dict) else ""
+            previous_fp = previous.get("fingerprint") if isinstance(previous, dict) else ""
+            observed[symbol] = {"event": base_event, "fingerprint": fingerprint}
+            if first:
+                delivered[symbol] = fingerprint
+                pending.pop(symbol, None)
+                continue
+            if delivered.get(symbol) != fingerprint:
+                display_event = base_event
+                if previous_event == "ОТКАТ" and base_event == "СТРУКТУРА":
+                    display_event = "ОТКАТ ЗАВЕРШЁН"
+                elif previous_event == base_event == "ОТКАТ" and previous_fp != fingerprint:
+                    display_event = "ОТКАТ ПРОДОЛЖАЕТСЯ"
+                elif previous_event == base_event == "СТРУКТУРА" and previous_fp != fingerprint:
+                    display_event = "СТРУКТУРА ПРОДОЛЖЕНА"
+                snap["event"] = display_event
+                current = pending.get(symbol) if isinstance(pending.get(symbol), dict) else {}
+                if current.get("fingerprint") != fingerprint:
+                    pending[symbol] = {"fingerprint": fingerprint, "message": format_message(snap)}
+                messages.append(pending[symbol]["message"])
         except Exception:
             log.exception("ZigZag %s", symbol)
     state["bootstrapped"] = True
+    state["schema_version"] = 2
     _save(state)
     return messages

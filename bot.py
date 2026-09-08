@@ -755,6 +755,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
+            if "↕️ ZIGZAG —" in text:
+                try:
+                    zigzag_scanner.mark_delivered(text)
+                except Exception:
+                    log.exception("Фиксация доставленного ZigZag")
             if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
                 try:
                     amd_power_of_three.mark_delivered(text)
@@ -787,15 +792,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
                 for report_id, report_text in signal_journal.pending_reports(datetime.now(timezone.utc)):
-                    if not signal_journal.claim_report(report_id):
-                        log.info("Повтор журнала пропущен: %s", report_id)
-                        continue
-                    try:
-                        await _send_parts(context.application, int(chat_id), report_text)
-                        signal_journal.mark_report_sent(report_id)
-                    except Exception:
-                        signal_journal.release_report(report_id)
-                        raise
+                    await _send_parts(context.application, int(chat_id), report_text)
+                    signal_journal.mark_report_sent(report_id)
             except Exception:
                 log.exception("Отправка отчёта журнала")
 
