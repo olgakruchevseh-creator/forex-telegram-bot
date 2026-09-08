@@ -567,19 +567,31 @@ def _impact_ru(impact: str) -> str:
 
 
 def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float], now_utc: datetime) -> list[str]:
-    highs = [e for e in events if e.impact in ("HIGH", "MEDIUM")]
-    highs = [e for e in highs if e.impact == "HIGH"] or highs[:4]
+    high = [e for e in events if e.impact == "HIGH"]
+    watched_low = [e for e in events if newsmod.is_briefing_low_watch(e)]
+    medium = [e for e in events if e.impact == "MEDIUM"]
+    # HIGH и отслеживаемый Trade Balance не теряются; MEDIUM заполняют остаток.
+    selected = high + watched_low
+    selected.extend(medium[:max(0, 8-len(selected))])
+    selected = sorted(selected[:8], key=lambda event: event.dt_utc)
     lines = ["", "📰 НОВОСТИ ЭТОЙ СЕССИИ", ""]
-    if not highs:
+    status = newsmod.calendar_status()
+    if status == "live":
+        lines.append("Источник календаря: актуальный")
+    elif status == "cache":
+        lines.append("Источник календаря: резервная копия")
+    if not selected:
         if newsmod.calendar_status() == "unavailable":
             lines.append("Источник календаря временно недоступен, подтверждённых данных о событиях нет")
         else:
-            lines.append("Важных событий до следующей сессии нет")
+            lines.append("Событий высокой и средней важности до следующей сессии нет")
         return lines
-    for e in highs[:8]:
+    lines.append("")
+    for e in selected:
         left = newsmod.minutes_left(e, now_utc)
         when = "уже вышла" if left < 0 else f"через {left} мин"
-        lines.append(f"🔴 {e.local_hm} · {e.currency} · {_impact_ru(e.impact)}")
+        icon = "🔴" if e.impact == "HIGH" else ("🟠" if e.impact == "MEDIUM" else "⚪")
+        lines.append(f"{icon} {e.local_hm} · {e.currency} · {_impact_ru(e.impact)}")
         lines.append(newsmod.translate_title(e.title))
         lines.append(f"Предыдущее: {e.previous}")
         lines.append(f"Прогноз: {e.forecast}")
@@ -588,6 +600,8 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
         touched = newsmod.pairs_touched(e.currency)
         if touched:
             lines.append("Затрагивает: " + ", ".join(touched))
+        if newsmod.is_briefing_low_watch(e):
+            lines.append("Низкая важность по календарю; возможна локальная реакция при заметном отклонении факта.")
         score = strength.get(e.currency, 0.0)
         if left < 0 and newsmod.is_speech_event(e):
             lines.append("Выступление состоялось; числовой Actual для него не предусмотрен. Направление оцениваем только по реакции цены.")

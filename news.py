@@ -57,6 +57,7 @@ CONTEXT_DEPENDENT = (
     "press conference", "decision", "auction",
 )
 SPEECH_MARKERS = ("speech", "speaks", "testimony", "press conference")
+BRIEFING_LOW_WATCH_MARKERS = ("trade balance", "balance of trade")
 
 TITLE_RU = (
     ("nonfarm payrolls", "Занятость вне сельского хозяйства (NFP)"),
@@ -233,6 +234,12 @@ def classify_effect(title: str) -> str:
 def is_speech_event(event: NewsEvent) -> bool:
     title = (event.title or "").lower()
     return any(marker in title for marker in SPEECH_MARKERS)
+
+
+def is_briefing_low_watch(event: NewsEvent) -> bool:
+    """LOW-события, которые полезно видеть в брифинге без торговой блокировки."""
+    title = (event.title or "").lower()
+    return event.impact == "LOW" and any(marker in title for marker in BRIEFING_LOW_WATCH_MARKERS)
 
 
 def _parse_dt(value) -> Optional[datetime]:
