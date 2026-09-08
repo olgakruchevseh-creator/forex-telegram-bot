@@ -8,11 +8,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config as cfg
-from analysis import Candle, atr, closed_candles
+from analysis import Candle, analyze_tf, atr, closed_candles
 
 log = logging.getLogger("fxbot.patterns")
 TF_MINUTES = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 TF_LABEL = {"W1": "неделя", "D1": "день", "H4": "4 часа", "H1": "час", "M15": "15 минут", "M5": "5 минут"}
+CANDLE_PATTERN_NAMES = {
+    "Бычье поглощение", "Медвежье поглощение",
+    "Молот / бычий Pin Bar", "Падающая звезда / медвежий Pin Bar",
+    "Утренняя звезда", "Вечерняя звезда",
+    "Три белых солдата", "Три чёрные вороны",
+    "Бычий Belt Hold", "Медвежий Belt Hold",
+}
 
 
 @dataclass
@@ -307,14 +314,48 @@ def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
     return sorted(found, key=lambda p: (p.quality, p.confidence), reverse=True)
 
 
-def _fmt(symbol: str, p: Pattern) -> str:
+def _market_context_side(by_tf: dict) -> str:
+    """Основное направление по большинству закрытых D1/H4/H1."""
+    biases = []
+    for tf in ("D1", "H4", "H1"):
+        bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+        if len(bars) < 20:
+            continue
+        view = analyze_tf(tf, tf, bars)
+        if view and view.bias:
+            biases.append(view.bias)
+    up, down = sum(x > 0 for x in biases), sum(x < 0 for x in biases)
+    if up >= 2 and up > down:
+        return "LONG"
+    if down >= 2 and down > up:
+        return "SHORT"
+    return ""
+
+
+def _pattern_allowed(p: Pattern, context_side: str) -> bool:
+    """Мелкие свечные реакции выходят наружу только по основному направлению."""
+    if p.name not in CANDLE_PATTERN_NAMES:
+        return True
+    return bool(context_side) and p.side == context_side
+
+
+def _fmt(symbol: str, p: Pattern, context_side: str = "") -> str:
     price = f"{p.level:.3f}" if "JPY" in symbol else f"{p.level:.5f}"
-    meaning = "преимущество покупателей" if p.side == "LONG" else "преимущество продавцов"
+    if p.name in CANDLE_PATTERN_NAMES and context_side and p.side != context_side:
+        meaning = (f"возможный локальный откат {p.side} против основной структуры {context_side}. "
+                   "Разворот основной структуры ещё не подтверждён")
+    elif p.name in CANDLE_PATTERN_NAMES and context_side == p.side:
+        meaning = f"закрытая свечная реакция поддерживает основное направление {context_side}"
+    elif p.name in CANDLE_PATTERN_NAMES:
+        meaning = f"локальная свечная реакция {p.side}. Основное направление пока не подтверждено"
+    else:
+        advantage = "преимущество покупателей" if p.side == "LONG" else "преимущество продавцов"
+        meaning = f"{advantage} после подтверждения закрытой свечой"
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "🧩 ПАТТЕРН ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {symbol}", f"Паттерн: {p.name}", f"Таймфрейм: {p.tf} ({TF_LABEL[p.tf]})",
         f"Направление: {p.side}", f"Качество: {p.quality}/100", f"Вероятность: {p.confidence}%",
-        f"Ключевой уровень: {price}", "", f"Факт: {p.fact}", f"Что означает: {meaning} после подтверждения закрытой свечой."
+        f"Ключевой уровень: {price}", "", f"Факт: {p.fact}", f"Что означает: {meaning}."
     ])
 
 
@@ -327,12 +368,14 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
         try:
             candidates = scan_symbol(symbol, market.get(symbol) or {})
             by_tf = market.get(symbol) or {}
+            context_side = _market_context_side(by_tf)
             strength = strength or {}
             candidates = [
                 p for p in candidates
                 if not p.name.startswith("Гармонический")
                 or harmonic_confirmation(symbol, p.side, by_tf, strength)
             ]
+            candidates = [p for p in candidates if _pattern_allowed(p, context_side)]
             if first:
                 # Mark the complete historical snapshot, not only the first
                 # candidate per pair. Otherwise old patterns leak out one by
@@ -345,7 +388,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 if key in sent:
                     continue
                 sent[key] = p.dt
-                messages.append(_fmt(symbol, p))
+                messages.append(_fmt(symbol, p, context_side))
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:
             log.exception("Паттерны %s", symbol)
