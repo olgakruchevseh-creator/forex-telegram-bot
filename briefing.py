@@ -69,6 +69,10 @@ class PairBrief:
     confidence: int = 0
     zigzag_h4_side: int = 0
     zigzag_h4_mixed: bool = False
+    w1: str = "нет данных"
+    m5: str = "нет данных"
+    position: str = "ФАЗА НЕ ПОДТВЕРЖДЕНА"
+    amd: str = "ФАЗА НЕ ПОДТВЕРЖДЕНА"
 
 
 def now_local() -> datetime:
@@ -304,6 +308,35 @@ def leader_confidence(brief: PairBrief) -> int:
     return max(62, min(92, int(round(conf))))
 
 
+def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0) -> str:
+    """Старший маршрут против текущего движения; ZigZag защищает от ложного ярлыка отката."""
+    if not stack:
+        return "НЕТ ДАННЫХ"
+
+    def consensus(keys: tuple[str, ...]) -> int:
+        values = [_tf_bias(stack, key) for key in keys]
+        up, down = sum(v > 0 for v in values), sum(v < 0 for v in values)
+        if up >= 2 and up > down:
+            return 1
+        if down >= 2 and down > up:
+            return -1
+        return 0
+
+    primary = consensus(("W1", "D1", "H4"))
+    local = consensus(("H1", "M15", "M5"))
+    if primary and zigzag_h4_side == -primary:
+        return f"ПЕРЕХОД: ZIGZAG H4 ПРОТИВ ОСНОВНОГО {_dir_word(primary)}"
+    if primary and local == primary:
+        return f"ОСНОВНОЙ ИМПУЛЬС {_dir_word(primary)}"
+    if primary and local == -primary:
+        return f"ОТКАТ {_dir_word(local)} ВНУТРИ {_dir_word(primary)}"
+    if primary:
+        return f"ОСНОВНОЙ {_dir_word(primary)} · ЛОКАЛЬНОЕ ДВИЖЕНИЕ НЕ ПОДТВЕРЖДЕНО"
+    if local:
+        return f"ЛОКАЛЬНЫЙ ИМПУЛЬС {_dir_word(local)} · СТАРШИЙ ТРЕНД НЕ ПОДТВЕРЖДЁН"
+    return "RANGE / ПЕРЕХОДНАЯ ФАЗА"
+
+
 def effective_dxy_bias(dxy: Optional[IndexView]) -> int:
     """Сильный подтверждённый импульс не становится NEUTRAL из-за сжатия ZigZag."""
     if not dxy or not dxy.available:
@@ -450,6 +483,12 @@ def build_pair_briefs(
             zigzag_h4_mixed = bool(h4_sequence and not zigzag_h4_side)
         except Exception:
             log.exception("ZigZag для брифинга %s", symbol)
+        amd_status = "ФАЗА НЕ ПОДТВЕРЖДЕНА"
+        try:
+            import amd_power_of_three
+            amd_status = amd_power_of_three.briefing_status(symbol, market.get(symbol) or {}, strength)
+        except Exception:
+            log.exception("AMD для брифинга %s", symbol)
         brief = PairBrief(
             symbol=symbol,
             stack=stack,
@@ -467,6 +506,10 @@ def build_pair_briefs(
             news_near=news_near,
             zigzag_h4_side=zigzag_h4_side,
             zigzag_h4_mixed=zigzag_h4_mixed,
+            w1=_tf_label(stack, "W1"),
+            m5=_tf_label(stack, "M5"),
+            position=current_position(stack, zigzag_h4_side),
+            amd=amd_status,
         )
         technical_side = technical_pair_side(brief)
         brief.side = pair_side(brief)
@@ -624,8 +667,10 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         else:
             force = f"сила почти равная ({b.gap:+.2f})"
         lines.append(b.symbol)
-        lines.append(f"D1 {b.d1} · H4 {b.h4} · H1 {b.h1} · M15 {b.m15}")
+        lines.append(f"W1 {b.w1} · D1 {b.d1} · H4 {b.h4} · H1 {b.h1} · M15 {b.m15} · M5 {b.m5}")
         lines.append(f"ZigZag: {b.zigzag}")
+        lines.append(f"Текущее положение: {b.position}")
+        lines.append(f"AMD: {b.amd}")
         lines.append(f"Согласие: {b.agree}")
         lines.append(f"Сила: {force}")
         lines.append(f"Состояние: {b.state}")

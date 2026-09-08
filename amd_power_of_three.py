@@ -153,6 +153,48 @@ def format_message(event: dict) -> str:
     ])
 
 
+def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str:
+    """Текущая подтверждённая стадия AMD для информационной строки брифинга."""
+    h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    h4 = closed_candles(by_tf.get("H4") or [], TF_MINUTES["H4"])
+    m15 = closed_candles(by_tf.get("M15") or [], TF_MINUTES["M15"])
+    range_n = int(getattr(cfg, "AMD_RANGE_BARS", 20))
+    max_age = int(getattr(cfg, "AMD_MAX_MANIPULATION_AGE_BARS", 6))
+    if len(h1) < range_n + 2:
+        return "ФАЗА НЕ ПОДТВЕРЖДЕНА"
+
+    # Полная модель имеет высший приоритет: накопление -> sweep -> выход.
+    completed = detect_amd(symbol, h1, h4, m15, strength)
+    if completed:
+        return f"ИМПУЛЬСНОЕ РАСПРЕДЕЛЕНИЕ {completed['side']} ПОСЛЕ МАНИПУЛЯЦИИ"
+
+    av = atr(h1, 14)
+    if av <= 0:
+        return "ФАЗА НЕ ПОДТВЕРЖДЕНА"
+    sweep_buffer = av * float(getattr(cfg, "AMD_MIN_SWEEP_ATR", .08))
+    manipulations = []
+    first_j = max(range_n, len(h1)-max_age)
+    for j in range(first_j, len(h1)):
+        box = h1[j-range_n:j]
+        valid, low, high, *_rest = _range_stats(box, av)
+        if not valid:
+            continue
+        candle = h1[j]
+        swept_low = candle.low < low-sweep_buffer and candle.close >= low
+        swept_high = candle.high > high+sweep_buffer and candle.close <= high
+        if swept_low != swept_high:
+            side = "LONG" if swept_low else "SHORT"
+            edge = "НИЖНЯЯ" if swept_low else "ВЕРХНЯЯ"
+            manipulations.append((j, f"МАНИПУЛЯЦИЯ: СНЯТА {edge} ГРАНИЦА · СЦЕНАРИЙ {side} ЕЩЁ НЕ ПОДТВЕРЖДЁН"))
+    if manipulations:
+        return max(manipulations, key=lambda item: item[0])[1]
+
+    valid, *_rest = _range_stats(h1[-range_n:], av)
+    if valid:
+        return "НАКОПЛЕНИЕ H1 · НАПРАВЛЕННЫЙ ВЫХОД ЕЩЁ НЕ ПОДТВЕРЖДЁН"
+    return "ФАЗА НЕ ПОДТВЕРЖДЕНА"
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     if int(state.get("logic_version") or 0) != 2:
