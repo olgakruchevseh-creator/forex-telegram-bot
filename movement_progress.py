@@ -58,12 +58,24 @@ def _strength_ok(symbol: str, side: str, strength: dict[str, float]) -> tuple[bo
     return (gap >= need if side == "LONG" else gap <= -need), gap
 
 
+def _movement_mode(direction: int, d1_bias: int, h4_bias: int) -> str:
+    """D1 защищает старший маршрут от ошибочной подписи «основной импульс»."""
+    if d1_bias and d1_bias != direction:
+        return "PULLBACK"
+    if h4_bias == direction:
+        return "IMPULSE"
+    if h4_bias == 0:
+        return "LOCAL"
+    return "PULLBACK"
+
+
 def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     d1, h4, h1, m15 = (_bars(by_tf, tf) for tf in ("D1", "H4", "H1", "M15"))
     if min(len(d1), len(h4), len(h1), len(m15)) < 20:
         return None
-    h4_view, h1_view, m15_view = _view("H4", h4), _view("H1", h1), _view("M15", m15)
-    if not h4_view or not h1_view or not m15_view or h1_view.bias == 0:
+    d1_view, h4_view = _view("D1", d1), _view("H4", h4)
+    h1_view, m15_view = _view("H1", h1), _view("M15", m15)
+    if not d1_view or not h4_view or not h1_view or not m15_view or h1_view.bias == 0:
         return None
     direction = h1_view.bias
     # Для регулярного навигатора H1 задаёт путь, а M15 обязан его подтвердить.
@@ -72,14 +84,12 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
     side = "LONG" if direction > 0 else "SHORT"
     _strength_confirmed, gap = _strength_ok(symbol, side, strength)
     directed_gap = gap * direction
-    if h4_view.bias == direction:
-        mode = "IMPULSE"
+    mode = _movement_mode(direction, d1_view.bias, h4_view.bias)
+    if mode == "IMPULSE":
         min_gap = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .03))
-    elif h4_view.bias == 0:
-        mode = "LOCAL"
+    elif mode == "LOCAL":
         min_gap = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .03))
     else:
-        mode = "PULLBACK"
         # Откат часто идёт против старшей силы, но сильный встречный разрыв блокируем.
         min_gap = -float(getattr(cfg, "MOVEMENT_PULLBACK_MAX_OPPOSITE_STRENGTH", .03))
     if directed_gap < min_gap:
