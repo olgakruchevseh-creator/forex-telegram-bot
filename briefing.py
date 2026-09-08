@@ -682,8 +682,13 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             position_icon = "🟡"
         else:
             position_icon = "⚪"
-        amd_upper = (b.amd or "").upper()
-        if "МАНИПУЛЯЦ" in amd_upper:
+        amd_text = (b.amd or "").replace(
+            "ИМПУЛЬСНОЕ РАСПРЕДЕЛЕНИЕ", "НАПРАВЛЕННЫЙ ВЫХОД"
+        )
+        amd_upper = amd_text.upper()
+        if "НАПРАВЛЕННЫЙ ВЫХОД" in amd_upper and "ЕЩЁ НЕ ПОДТВЕРЖДЁН" not in amd_upper:
+            amd_icon = "⚡"
+        elif "МАНИПУЛЯЦ" in amd_upper:
             amd_icon = "🧹"
         elif "НАКОПЛЕНИ" in amd_upper:
             amd_icon = "📦"
@@ -693,7 +698,7 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             amd_icon = "⚪"
         lines.append(f"ZigZag: {zz_icon} {b.zigzag}")
         lines.append(f"Текущее положение: {position_icon} {b.position}")
-        lines.append(f"AMD: {amd_icon} {b.amd}")
+        lines.append(f"AMD: {amd_icon} {amd_text}")
         lines.append(f"Согласие: {b.agree}")
         lines.append(f"Сила: {force}")
         lines.append(f"Состояние: {b.state}")
