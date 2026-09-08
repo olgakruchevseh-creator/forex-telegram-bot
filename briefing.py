@@ -433,8 +433,12 @@ def dxy_context(usd_score: float, dxy: Optional[IndexView]) -> str:
     if usd_score > 0.03 and dxy_bias > 0:
         return "доллар усиливается, DXY подтверждает"
     if usd_score < -0.03 and dxy_bias > 0:
+        if dxy.change_pct < 0:
+            return "USD в корзине слабый; последняя H1 DXY снижается, но структура ещё LONG"
         return "USD в корзине слабый, рост DXY — локальная коррекция, не смена силы"
     if usd_score > 0.03 and dxy_bias < 0:
+        if dxy.change_pct > 0:
+            return "USD в корзине сильный; последняя H1 DXY растёт, но структура ещё SHORT"
         return "USD в корзине сильный, просадка DXY — локальная коррекция"
     return "DXY и корзина USD без явного подтверждения"
 
@@ -668,9 +672,28 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             force = f"сила почти равная ({b.gap:+.2f})"
         lines.append(b.symbol)
         lines.append(f"W1 {b.w1} · D1 {b.d1} · H4 {b.h4} · H1 {b.h1} · M15 {b.m15} · M5 {b.m5}")
-        lines.append(f"ZigZag: {b.zigzag}")
-        lines.append(f"Текущее положение: {b.position}")
-        lines.append(f"AMD: {b.amd}")
+        zz_icon = "🟢" if b.zigzag_h4_side > 0 else ("🔴" if b.zigzag_h4_side < 0 else "🟡")
+        position_upper = (b.position or "").upper()
+        if "SHORT" in position_upper:
+            position_icon = "🔴"
+        elif "LONG" in position_upper:
+            position_icon = "🟢"
+        elif "ПЕРЕХОД" in position_upper:
+            position_icon = "🟡"
+        else:
+            position_icon = "⚪"
+        amd_upper = (b.amd or "").upper()
+        if "МАНИПУЛЯЦ" in amd_upper:
+            amd_icon = "🧹"
+        elif "НАКОПЛЕНИ" in amd_upper:
+            amd_icon = "📦"
+        elif "РАСПРЕДЕЛЕНИ" in amd_upper:
+            amd_icon = "⚡"
+        else:
+            amd_icon = "⚪"
+        lines.append(f"ZigZag: {zz_icon} {b.zigzag}")
+        lines.append(f"Текущее положение: {position_icon} {b.position}")
+        lines.append(f"AMD: {amd_icon} {b.amd}")
         lines.append(f"Согласие: {b.agree}")
         lines.append(f"Сила: {force}")
         lines.append(f"Состояние: {b.state}")
