@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -209,6 +209,14 @@ def _summary(records: list[dict], title: str) -> str:
     ])
 
 
+def _previous_trading_day(day):
+    """Предыдущий будний день: в понедельник возвращает пятницу."""
+    day -= timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
 def pending_reports(now_utc: datetime | None = None) -> list[tuple[str, str]]:
     state = _load()
     now = (now_utc or datetime.now(timezone.utc)).astimezone(
@@ -216,11 +224,18 @@ def pending_reports(now_utc: datetime | None = None) -> list[tuple[str, str]]:
     )
     records = list((state.get("records") or {}).values())
     reports = []
-    daily_h, daily_m = getattr(cfg, "JOURNAL_DAILY_REPORT_HM", (22, 15))
+    # Утром оцениваем предыдущий торговый день: поздним сигналам уже доступны
+    # закрытые H1 для восьмичасового итога. Это окончательный, а не промежуточный отчёт.
+    daily_h, daily_m = getattr(cfg, "JOURNAL_DAILY_REPORT_HM", (9, 10))
     day_key = now.date().isoformat()
-    if now.weekday() < 5 and (now.hour, now.minute) >= (daily_h, daily_m) and state.get("last_daily_report") != day_key:
-        selected = [r for r in records if r.get("local_date") == day_key]
-        reports.append((f"daily:{day_key}", _summary(selected, f"📒 ДНЕВНОЙ ЖУРНАЛ — {day_key}")))
+    report_day = _previous_trading_day(now.date()).isoformat()
+    if (now.weekday() < 5 and (now.hour, now.minute) >= (daily_h, daily_m)
+            and state.get("last_daily_final_report") != report_day):
+        selected = [r for r in records if r.get("local_date") == report_day]
+        reports.append((
+            f"daily_final:{report_day}",
+            _summary(selected, f"📒 ОКОНЧАТЕЛЬНЫЙ ДНЕВНОЙ ЖУРНАЛ — {report_day}"),
+        ))
     week_h, week_m = getattr(cfg, "JOURNAL_WEEKLY_REPORT_HM", (22, 30))
     iso = now.isocalendar()
     week_key = f"{iso.year}-W{iso.week:02d}"
@@ -234,5 +249,8 @@ def pending_reports(now_utc: datetime | None = None) -> list[tuple[str, str]]:
 def mark_report_sent(report_id: str) -> None:
     state = _load()
     kind, key = report_id.split(":", 1)
-    state["last_daily_report" if kind == "daily" else "last_weekly_report"] = key
+    if kind in ("daily", "daily_final"):
+        state["last_daily_final_report"] = key
+    else:
+        state["last_weekly_report"] = key
     _save(state)

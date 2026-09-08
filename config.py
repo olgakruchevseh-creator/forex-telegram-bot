@@ -84,7 +84,8 @@ SIGNAL_JOURNAL_ENABLED = True
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
 # Время Europe/Amsterdam; скан отправит отчёт в ближайший 5-минутный запуск.
-JOURNAL_DAILY_REPORT_HM = (22, 15)
+# Один окончательный отчёт утром за предыдущий торговый день (Europe/Amsterdam).
+JOURNAL_DAILY_REPORT_HM = (9, 10)
 JOURNAL_WEEKLY_REPORT_HM = (22, 30)
 MASTER_DIRECTION_ENABLED = True
 MASTER_STRENGTH_MIN_GAP = 0.08
