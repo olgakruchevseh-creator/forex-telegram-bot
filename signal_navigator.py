@@ -294,6 +294,7 @@ def _scenario_from_card(text: str) -> dict:
         "target": targets[0]["price"] if targets else 0.0,
         "target_tf": targets[0]["tf"] if targets else "", "targets": targets,
         "sources": sources, "start_h1": "", "last_h1": "",
+        "last_target_dt": "",
         "last_progress": _route_progress_from_card(text),
         "reached_count": 0, "near_for": 0,
         "near_sent": False, "status": "ACTIVE", "created_at": time.time(),
@@ -380,7 +381,7 @@ def _continuation_check(item: dict, by_tf: dict, strength: dict[str, float]) -> 
 
 
 def process_lifecycle(market: dict, strength: dict[str, float] | None = None) -> list[str]:
-    """Готовит только важные этапы активного сценария; состояние меняется после доставки."""
+    """Следит за целями по M5, а отмену подтверждает только по закрытым H1/M15."""
     state = _load()
     pending = state.setdefault("pending_lifecycle", {})
     messages = []
@@ -389,9 +390,23 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             continue
         by_tf = market.get(symbol) or {}
         h1 = movement_progress.closed_candles(by_tf.get("H1") or [], 60)
-        if not h1 or h1[-1].dt == item.get("last_h1"):
+        if not h1:
             continue
-        current_bar = h1[-1]
+        h1_bar = h1[-1]
+        new_h1 = h1_bar.dt != item.get("last_h1")
+
+        # Цель является объективным касанием цены, поэтому ждать закрытия H1
+        # нельзя: за один час цена способна пройти сразу TR1 и TR2. Берём все
+        # уже закрытые M5 после последней доставленной стадии маршрута. Новая
+        # H1 остаётся запасной проверкой, если M5 временно недоступен.
+        m5 = movement_progress.closed_candles(by_tf.get("M5") or [], 5)
+        checkpoint = item.get("last_target_dt") or item.get("last_h1") or item.get("start_h1") or ""
+        target_bars = [bar for bar in m5 if not checkpoint or bar.dt > checkpoint]
+        if new_h1:
+            target_bars.append(h1_bar)
+        if not target_bars and not new_h1:
+            continue
+        current_bar = target_bars[-1] if target_bars else h1_bar
         targets = item.get("targets") or [{"name": "TR1", "tf": item.get("target_tf"), "price": item.get("target")}]
         reached_before = int(item.get("reached_count") or 0)
         if reached_before >= len(targets):
@@ -406,13 +421,16 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         highest_reached = reached_before
         for index in range(reached_before, len(targets)):
             price = float(targets[index]["price"])
-            touched = current_bar.high >= price if direction > 0 else current_bar.low <= price
+            touched = (any(bar.high >= price for bar in target_bars) if direction > 0
+                       else any(bar.low <= price for bar in target_bars))
             if touched:
                 highest_reached = index + 1
             else:
                 break
         reached = highest_reached > reached_before
-        invalid = current_bar.close <= anchor if direction > 0 else current_bar.close >= anchor
+        # Касание цели фиксируется быстро по M5, но отмена маршрута никогда не
+        # принимается по внутрисвечному шуму — только по новой закрытой H1.
+        invalid = new_h1 and (h1_bar.close <= anchor if direction > 0 else h1_bar.close >= anchor)
         reached_names = [targets[index]["name"] for index in range(reached_before, highest_reached)]
         next_target = targets[highest_reached] if highest_reached < len(targets) else targets[-1]
         problems = []
@@ -423,7 +441,7 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                 problems = _continuation_check(item, by_tf, strength or {})
                 action = "TARGET_RISK" if problems else "TARGET_CLEAR"
         else:
-            action = "CANCEL" if (invalid or _opposite_confirmed(item["side"], by_tf)) else ""
+            action = "CANCEL" if (new_h1 and (invalid or _opposite_confirmed(item["side"], by_tf))) else ""
         if (getattr(cfg, "SIGNAL_NEAR_TARGET_ALERTS", False) and not action
                 and progress >= int(getattr(cfg, "SIGNAL_NEAR_TARGET_PCT", 85))
                 and int(item.get("near_for") or 0) != reached_before + 1):
@@ -434,7 +452,8 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         message = _lifecycle_message(item, action, current_bar.close, progress,
                                      reached_names, next_target, problems)
         digest = hashlib.sha256(message.encode()).hexdigest()[:20]
-        pending[digest] = {"symbol": symbol, "action": action, "h1_dt": current_bar.dt,
+        pending[digest] = {"symbol": symbol, "action": action, "h1_dt": h1_bar.dt,
+                           "target_dt": current_bar.dt,
                            "progress": progress, "reached_count": highest_reached,
                            "near_for": reached_before + 1}
         messages.append(message)
@@ -453,6 +472,7 @@ def mark_lifecycle_delivered(text: str) -> bool:
     item = active.get(event["symbol"])
     if item:
         item["last_h1"] = event["h1_dt"]
+        item["last_target_dt"] = event.get("target_dt") or item.get("last_target_dt", "")
         item["last_progress"] = event["progress"]
         if event["action"] == "NEAR":
             item["near_for"] = event["near_for"]
