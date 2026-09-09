@@ -125,6 +125,117 @@ def _scale_route(route: dict) -> dict:
     return scaled
 
 
+def _source_number(text: str, label: str, default: int) -> int:
+    match = re.search(rf"^{re.escape(label)}:\s*(\d+)", text or "", re.M | re.I)
+    return int(match.group(1)) if match else default
+
+
+def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dict | None:
+    """Строит маршрут от цены свежего модульного события без повторного veto."""
+    h1 = movement_progress._bars(by_tf, "H1")
+    if len(h1) < 20:
+        return None
+    direction = 1 if side == "LONG" else -1
+    h1_close = float(h1[-1].close)
+    source_close = _float_line(source_text, "Цена закрытия")
+    # У M15-события цена подтверждения свежее последней закрытой H1. Маршрут
+    # начинается именно от факта сигнала, поэтому первая карточка честно имеет
+    # 0% пройденного пути, а не считает старую H1-цену движением назад/вперёд.
+    anchor = source_close if source_close > 0 else h1_close
+    current = anchor
+    av = movement_progress.atr(h1, 14)
+    if av <= 0:
+        return None
+
+    candidates = []
+    target_kind = "high" if direction > 0 else "low"
+    for tf in ("H4", "D1"):
+        bars = movement_progress._bars(by_tf, tf)
+        if len(bars) < 20:
+            continue
+        for swing in movement_progress._swings(tf, bars):
+            if swing.kind == target_kind and ((direction > 0 and swing.price > current) or
+                                               (direction < 0 and swing.price < current)):
+                candidates.append((abs(swing.price-current), float(swing.price), tf))
+    candidates.sort(key=lambda item: item[0])
+    targets = []
+    tolerance = av * float(getattr(cfg, "MOVEMENT_TARGET_MERGE_ATR", .15))
+    for _distance, price, tf in candidates:
+        if any(abs(price-item["price"]) <= tolerance for item in targets):
+            continue
+        targets.append({"price": price, "tf": tf})
+        if len(targets) == 3:
+            break
+
+    # Если впереди недостаточно готовых H4/D1-экстремумов, недостающие этапы
+    # рассчитываются от волатильности H1. Это сохраняет TR1–TR3 для каждого
+    # принятого события, не выдавая арифметическую цель за структурный уровень.
+    step = .75
+    distance = step
+    while len(targets) < 3:
+        price = anchor + direction * av * distance
+        if ((direction > 0 and price > current) or (direction < 0 and price < current)) and not any(
+                abs(price-item["price"]) <= tolerance for item in targets):
+            targets.append({"price": price, "tf": "H1 ATR"})
+        distance += step
+    targets.sort(key=lambda item: abs(float(item["price"]) - anchor))
+    targets = targets[:3]
+
+    d1 = movement_progress._bars(by_tf, "D1")
+    h4 = movement_progress._bars(by_tf, "H4")
+    d1_view = movement_progress._view("D1", d1)
+    h4_view = movement_progress._view("H4", h4)
+    gap = movement_progress._strength_ok(symbol, side, {})[1]
+    return {
+        "key": f"{symbol}|{side}|{h1[-1].dt}|trigger", "symbol": symbol, "side": side,
+        "anchor": anchor, "current": current, "target": targets[0]["price"],
+        "target_tf": targets[0]["tf"], "targets": targets,
+        "progress": 0, "remaining": 100,
+        "mode": movement_progress._movement_mode(
+            direction, d1_view.bias if d1_view else 0, h4_view.bias if h4_view else 0),
+        "gap": gap, "h1_dt": h1[-1].dt,
+    }
+
+
+def build_source_companion(source_text: str, market: dict, strength: dict) -> tuple[str, list[str]] | None:
+    """Немедленно принимает доставляемый модульный сигнал на сопровождение."""
+    symbol, side = _pair(source_text), _side(source_text)
+    if not symbol or not side:
+        return None
+    by_tf = market.get(symbol) or {}
+    route = _trigger_route(symbol, side, by_tf, source_text)
+    if not route:
+        return None
+    direction = 1 if side == "LONG" else -1
+    views = {}
+    for tf in ("D1", "H4", "H1", "M15", "M5"):
+        minutes = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}[tf]
+        bars = movement_progress.closed_candles(by_tf.get(tf) or [], minutes)
+        views[tf] = analyze_tf(tf, tf, bars).bias if len(bars) >= 20 else 0
+    try:
+        base, quote = symbol.split("/")
+        gap = float(strength.get(base, 0)) - float(strength.get(quote, 0))
+    except (TypeError, ValueError):
+        gap = 0.0
+    try:
+        zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+        zz_side = int((zz.get("zigzag_directions") or {}).get("H4", 0))
+        zz_text = "LONG" if zz_side > 0 else ("SHORT" if zz_side < 0 else "RANGE")
+    except Exception:
+        zz_text = "RANGE"
+    master = {
+        "symbol": symbol, "side": side,
+        "quality": _source_number(source_text, "💪 Качество", _source_number(source_text, "Качество", 75)),
+        "confidence": _source_number(source_text, "📈 Вероятность", _source_number(source_text, "Вероятность", 70)),
+        "gap": gap,
+        "senior_n": sum(views[tf] == direction for tf in ("D1", "H4", "H1")),
+        "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
+        "zigzag_h4": zz_text, "evidence": ["исходный модуль подтвердил событие"],
+        "source_accepted": True,
+    }
+    return format_confirmed(master, _scale_route(route), [source_text]), [source_text]
+
+
 def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bool = False) -> str:
     side = master["side"]
     icon = "🟢" if side == "LONG" else "🔴"
@@ -137,8 +248,10 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     next_pivot = master.get("next_pivot")
     source_names = list(dict.fromkeys(_source_name(text) for text in sources))
     local_early = bool(master.get("local_early"))
-    title = ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
-             ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР"))
+    source_accepted = bool(master.get("source_accepted"))
+    title = ("🧭 НАВИГАТОР СОПРОВОЖДАЕТ СИГНАЛ" if source_accepted else
+             ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
+              ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР")))
     zz_h4 = master.get("zigzag_h4", side)
     zz_line = ("• Старший тренд ещё не подтверждён полностью" if local_early else
                ("• ZigZag H4: нейтрален" if zz_h4 == "RANGE" else
@@ -165,9 +278,11 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     if next_pivot:
         lines.append(f"• 🎯 Следующий pivot: {next_pivot_projection.compact_line(next_pivot)}")
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
-    final_fact = ("Факт: завершённый AMD, закрытые M15/M5, сила валют и структурная цель подтверждают раннее локальное движение."
+    final_fact = ("Факт: подтверждённое событие исходного модуля принято Навигатором; таймфреймы, сила валют и ZigZag показаны как контекст сопровождения, а не как повторный запрет."
+                  if source_accepted else
+                  ("Факт: завершённый AMD, закрытые M15/M5, сила валют и структурная цель подтверждают раннее локальное движение."
                   if local_early else
-                  "Факт: исходный модуль, большинство H1/M15/M5, сила валют и структурная цель подтверждены; старший контекст, ZigZag и DXY учтены в режиме и качестве.")
+                  "Факт: исходный модуль, большинство H1/M15/M5, сила валют и структурная цель подтверждены; старший контекст, ZigZag и DXY учтены в режиме и качестве."))
     lines.extend([
         "", f"Начало маршрута H1: {movement_progress._price(master['symbol'], route['anchor'])}",
         f"Текущая цена: {movement_progress._price(master['symbol'], route['current'])}",
@@ -183,7 +298,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"Осталось до TR1: {route['remaining']}%", "",
         f"Оценка: {icon} направление {side} подтверждено по закрытой H1-свече.",
         final_fact,
-        "Процент показывает расстояние до цели H4/D1, а не гарантирует продолжение движения.",
+        "Процент показывает расстояние до структурной цели H4/D1 либо расчётной цели H1 ATR, а не гарантирует продолжение движения.",
         "", "━━━━━━━━━━━━━━━━━━",
     ])
     return "\n".join(lines)
@@ -285,7 +400,7 @@ def _route_progress_from_card(text: str) -> int:
 
 def _scenario_from_card(text: str) -> dict:
     symbol, side = _pair(text), _side(text)
-    target_matches = re.findall(r"^•\s*TR([123])\s*\((H4|D1)\):\s*([0-9.]+)", text or "", re.M)
+    target_matches = re.findall(r"^•\s*TR([123])\s*\(([^)]+)\):\s*([0-9.]+)", text or "", re.M)
     targets = [{"name": f"TR{number}", "tf": tf, "price": float(price)}
                for number, tf, price in target_matches]
     # Совместимость с одной целью из предыдущей версии.

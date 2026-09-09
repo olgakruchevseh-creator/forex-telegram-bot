@@ -787,7 +787,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     navigator_sources[text] = sources
                     signal_navigator.register_card(text, sources, closed_dt)
 
-        module_alerts = merge_navigator_with_sources(source_alerts, confirmed_alerts)
+        # Часовой лимит считает исходные торговые события. Навигатор является
+        # обязательным сопровождением выбранного события и этот лимит не тратит.
+        module_alerts = source_alerts
 
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
@@ -806,7 +808,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
-            delivered_sources = navigator_sources.get(text, []) or [text]
+            delivered_sources = [text]
             for source_text in delivered_sources:
                 if "↕️ ZIGZAG —" in source_text:
                     try:
@@ -818,9 +820,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         amd_power_of_three.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного AMD")
-            is_navigator = text in navigator_sources
-            if is_navigator:
-                signal_navigator.mark_delivered(text)
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)
@@ -831,11 +830,28 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Шестичасовой cooldown относится к итоговой торговой карточке.
             # Исходное событие не должно мешать Навигатору прислать последующее
             # подтверждение и сопровождение этого же сценария.
-            if is_navigator and pair and direct_side:
-                state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
             bucket["count"] = int(bucket.get("count") or 0) + 1
             if pair and pair not in bucket.setdefault("pairs", []):
                 bucket["pairs"].append(pair)
+
+            # Сразу после исходного события отправляется связанная карточка
+            # Навигатора. Строгая версия используется, если уже готова; иначе
+            # строится маршрут от цены самого свежего модульного подтверждения.
+            key = (pair, direct_side)
+            companion = next((
+                (card, navigator_sources[card]) for _p, card in confirmed_alerts
+                if (_alert_pair(card), _direct_signal_side(card)) == key
+            ), None)
+            if companion is None:
+                companion = signal_navigator.build_source_companion(text, market, strength)
+                if companion:
+                    signal_navigator.register_card(companion[0], companion[1], closed_dt)
+            if companion:
+                nav_text, _nav_sources = companion
+                await _send_parts(context.application, int(chat_id), nav_text)
+                signal_navigator.mark_delivered(nav_text)
+                if pair and direct_side:
+                    state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
         # One small current-H1 record is enough; old budgets cannot affect new hours.
         state["module_alert_buckets"] = {bucket_key: bucket}
 
