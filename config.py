@@ -92,6 +92,15 @@ MASTER_STRENGTH_MIN_GAP = 0.08
 MASTER_MIN_QUALITY = 82
 MASTER_REQUIRE_MODULE_TRIGGER = True
 MASTER_MAX_SIGNALS_PER_H1 = 2
+# Echo — историческая проекция, только внутренний фильтр Master Direction.
+ECHO_ENABLED = True
+ECHO_HORIZONS_H1 = (1, 2, 4, 8)
+ECHO_MIN_ANALOGS = 30
+ECHO_MAX_ANALOGS = 50
+ECHO_MAX_DISTANCE = 2.6
+ECHO_MIN_CONFIDENCE = 0.60
+# Только уверенная противоположная проекция блокирует торговую карточку.
+ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.68
 # Ранний локальный сценарий: только завершённый AMD, подтверждённые M15/M5
 # и ещё не более 45% уже пройденного структурного маршрута.
 LOCAL_AMD_EARLY_ENABLED = True

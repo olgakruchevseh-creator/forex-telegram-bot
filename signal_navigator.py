@@ -106,6 +106,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         "PULLBACK": "ПОДТВЕРЖДЁННЫЙ ОТКАТ",
     }
     evidence = list(master.get("evidence") or [])[:3]
+    echo = master.get("echo")
     source_names = list(dict.fromkeys(_source_name(text) for text in sources))
     local_early = bool(master.get("local_early"))
     title = ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
@@ -124,6 +125,10 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"• Сила валют: {master['gap']:+.2f}",
     ]
     lines.extend(f"• {item}" for item in evidence)
+    if echo:
+        horizons = echo.get("horizons") or {}
+        forecast = " · ".join(f"{h}ч {horizons.get(str(h), 0)}%" for h in (1, 2, 4, 8))
+        lines.append(f"• 🔭 Echo: {echo['side']} {echo['confidence']}% · {forecast} · аналогов {echo['sample']}")
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     final_fact = ("Факт: завершённый AMD, закрытые M15/M5, сила валют и структурная цель подтверждают раннее локальное движение."
                   if local_early else

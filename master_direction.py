@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import config as cfg
 import news as newsmod
 import zigzag_scanner
+import echo_projection
 from analysis import PairStack, build_stack, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
@@ -139,6 +140,12 @@ def analyze_symbol(
     if (side > 0 and gap < minimum_gap) or (side < 0 and gap > -minimum_gap):
         return None
 
+    echo = echo_projection.analyze(symbol, by_tf) if getattr(cfg, "ECHO_ENABLED", True) else None
+    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .68))*100))
+    wanted_name = "LONG" if side > 0 else "SHORT"
+    if echo and echo["side"] != wanted_name and echo["confidence"] >= echo_block:
+        return None
+
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     if not h4_zz or h4_zz != side:
@@ -161,6 +168,8 @@ def analyze_symbol(
     quality = 56 + (12 if senior_n == 3 else 8) + (10 if junior_n == 3 else 7) + 10
     quality += min(10, max(3, int(abs(gap) * 40)))
     quality += min(10, 7 + max(0, len(aligned) - 1) * 3)
+    if echo and echo["side"] == wanted_name:
+        quality += 3
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
     quality = min(94, quality)
@@ -178,6 +187,7 @@ def analyze_symbol(
         "junior_n": junior_n,
         "evidence": aligned,
         "dxy_bias": dxy_bias,
+        "echo": echo,
     }
 
 
@@ -219,6 +229,11 @@ def analyze_local_amd_symbol(
     minimum_gap = float(getattr(cfg, "LOCAL_AMD_MIN_STRENGTH_GAP", 0.08))
     if gap * side < minimum_gap:
         return None
+    echo = echo_projection.analyze(symbol, by_tf) if getattr(cfg, "ECHO_ENABLED", True) else None
+    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .68))*100))
+    side_name = "LONG" if side > 0 else "SHORT"
+    if echo and echo["side"] != side_name and echo["confidence"] >= echo_block:
+        return None
     # Старые кандидаты других модулей могут описывать предыдущий откат.
     # Для ранней ветки источником является только завершённая AMD-модель.
     aligned = ["подтверждена модель AMD / Power of Three"]
@@ -239,6 +254,7 @@ def analyze_local_amd_symbol(
         "evidence": aligned,
         "dxy_bias": 0,
         "local_early": True,
+        "echo": echo,
     }
 
 
