@@ -492,6 +492,27 @@ def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pa
     return chosen
 
 
+def merge_navigator_with_sources(
+    raw_items: list[tuple[int, str]], confirmed_items: list[tuple[int, str]]
+) -> list[tuple[int, str]]:
+    """Навигатор улучшает исходный сигнал, но больше не блокирует его доставку.
+
+    Если по той же паре и направлению уже готова карточка Навигатора, она
+    заменяет исходную карточку. Остальные сработавшие модули остаются в очереди
+    и могут быть отправлены в пределах общего часового бюджета.
+    """
+    replaced = {
+        (_alert_pair(text), _direct_signal_side(text))
+        for _priority, text in confirmed_items
+        if _alert_pair(text) and _direct_signal_side(text)
+    }
+    fallback = [
+        item for item in raw_items
+        if (_alert_pair(item[1]), _direct_signal_side(item[1])) not in replaced
+    ]
+    return list(confirmed_items) + fallback
+
+
 async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Выход до чтения API-ключа и запросов: в выходные нет расхода кредитов.
     if not market_schedule.automatic_jobs_allowed():
@@ -715,8 +736,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка сканера паттернов")
 
-        # Все модули работают как внутренние датчики. Наружу проходит только
-        # единая карточка после Master Direction и расчёта маршрута Навигатора.
+        # Навигатор сопровождает модульные события, но не имеет права полностью
+        # блокировать их доставку. Готовая карточка Навигатора заменит исходную
+        # карточку той же пары/направления; неподтверждённый им сигнал всё равно
+        # останется доступен для отправки.
+        source_alerts = list(module_alerts)
         raw_alerts = [text for _priority, text in module_alerts]
         # События, не подтверждённые в эту H1, не теряются: они остаются
         # внутренними кандидатами ограниченное число часов.
@@ -763,8 +787,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     navigator_sources[text] = sources
                     signal_navigator.register_card(text, sources, closed_dt)
 
-        # Исходные паттерны/уровни/AMD/ZigZag отдельно в Telegram не уходят.
-        module_alerts = confirmed_alerts
+        module_alerts = merge_navigator_with_sources(source_alerts, confirmed_alerts)
 
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
@@ -783,7 +806,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
-            for source_text in navigator_sources.get(text, []):
+            delivered_sources = navigator_sources.get(text, []) or [text]
+            for source_text in delivered_sources:
                 if "↕️ ZIGZAG —" in source_text:
                     try:
                         zigzag_scanner.mark_delivered(source_text)
@@ -794,7 +818,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         amd_power_of_three.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного AMD")
-            signal_navigator.mark_delivered(text)
+            is_navigator = text in navigator_sources
+            if is_navigator:
+                signal_navigator.mark_delivered(text)
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)
@@ -802,7 +828,10 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Запись отправленного сигнала в журнал")
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
-            if pair and direct_side:
+            # Шестичасовой cooldown относится к итоговой торговой карточке.
+            # Исходное событие не должно мешать Навигатору прислать последующее
+            # подтверждение и сопровождение этого же сценария.
+            if is_navigator and pair and direct_side:
                 state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
             bucket["count"] = int(bucket.get("count") or 0) + 1
             if pair and pair not in bucket.setdefault("pairs", []):
