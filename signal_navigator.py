@@ -116,7 +116,11 @@ def _scale_route(route: dict) -> dict:
         item["route_pct"] = max(0, min(100, int(round(abs(float(item["price"]) - anchor) / total * 100))))
     scaled["targets"] = targets
     scaled["progress"] = progress
-    scaled["remaining"] = max(0, int(targets[0]["route_pct"]) - progress)
+    tr1_total = abs(float(targets[0]["price"]) - anchor)
+    tr1_progress = (100 if tr1_total <= 0 else
+                    max(0, min(100, int(round(abs(current-anchor) / tr1_total * 100)))))
+    scaled["tr1_progress"] = tr1_progress
+    scaled["remaining"] = max(0, 100 - tr1_progress)
     scaled["final_target_name"] = f"TR{len(targets)}"
     return scaled
 
@@ -175,7 +179,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     )
     lines.extend([
         f"Пройдено общего пути до {route.get('final_target_name', 'TR1')}: {route['progress']}%",
-        f"Осталось до TR1: {route['remaining']}% общего пути", "",
+        f"Пройдено пути до TR1: {route.get('tr1_progress', route['progress'])}%",
+        f"Осталось до TR1: {route['remaining']}%", "",
         f"Оценка: {icon} направление {side} подтверждено по закрытой H1-свече.",
         final_fact,
         "Процент показывает расстояние до цели H4/D1, а не гарантирует продолжение движения.",
@@ -205,7 +210,9 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
             continue
         route = _scale_route(route)
         max_initial = int(getattr(cfg, "SIGNAL_INITIAL_MAX_PROGRESS_PCT", 35))
-        if route.get("progress", 100) > max_initial:
+        # Новый вход оценивается относительно ближайшей цели, а не далёкой
+        # TR3: нельзя выдавать сигнал, когда почти вся TR1 уже пройдена.
+        if route.get("tr1_progress", route.get("progress", 100)) > max_initial:
             continue
         if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
             result = dict(result)

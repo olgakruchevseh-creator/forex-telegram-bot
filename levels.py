@@ -472,10 +472,12 @@ def reaction_size(c: Candle, zone: Zone, atr_v: float) -> bool:
 
 
 def pick_work_tf(zone: Zone) -> str:
-    """W1/D1/H4 сохраняют происхождение, реакция подтверждается закрытой H1."""
+    """Происхождение уровня сохраняется, реакция подтверждается без ожидания H1."""
     tfs = set(zone.tfs or [])
     if tfs & {"W1", "D1", "H4", "H1"}:
-        return "H1"
+        # Две закрытые M15 (реакция + follow-through) дают подтверждение за
+        # 15–30 минут и затем всё равно проходят общий фильтр Навигатора.
+        return "M15"
     if "M15" in tfs and "M5" in tfs:
         return "M15"
     if "M15" in tfs:
@@ -778,6 +780,9 @@ def detect_events(
         return []
     work = pick_work_tf(zone)
     candles = closed_by_tf.get(work) or []
+    if len(candles) < 2 and work != "H1":
+        work = "H1"
+        candles = closed_by_tf.get(work) or []
     if len(candles) < 2:
         return []
     c0 = candles[-2]

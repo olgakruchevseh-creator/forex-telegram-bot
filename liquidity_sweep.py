@@ -135,7 +135,10 @@ def detect_new_sweep(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[C
 def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: list[Candle], strength: dict[str, float]) -> dict | None:
     if setup.sent or setup.invalid or len(h1) < 20 or not h4 or not m15:
         return None
-    current = h1[-1]
+    # Снятие фиксируется H1, но подтверждающий CHOCH/BOS разрешён по уже
+    # закрытой M15 — ждать ещё одну полную H1 слишком поздно.
+    current = m15[-1] if m15[-1].dt > setup.sweep_dt else h1[-1]
+    confirm_tf = "M15" if current is m15[-1] else "H1"
     if current.dt <= setup.sweep_dt or current.dt == setup.last_dt:
         return None
     setup.last_dt = current.dt
@@ -151,7 +154,9 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
         setup.invalid = True
         return None
     break_buffer = av * float(getattr(cfg, "LIQUIDITY_CHOCH_BUFFER_ATR", .05))
-    body_need = av * float(getattr(cfg, "LIQUIDITY_CONFIRM_BODY_ATR", .35))
+    body_factor = (.18 if confirm_tf == "M15" else
+                   float(getattr(cfg, "LIQUIDITY_CONFIRM_BODY_ATR", .35)))
+    body_need = av * float(getattr(cfg, "LIQUIDITY_M15_CONFIRM_BODY_ATR", body_factor))
     wanted = 1 if setup.side == "LONG" else -1
     if wanted > 0:
         broken = current.close > setup.confirm_level+break_buffer and current.close > current.open
@@ -170,7 +175,7 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
     return {
         "symbol": setup.symbol, "side": setup.side, "source": setup.source,
         "level": setup.level, "sweep_price": setup.sweep_price,
-        "confirm_level": setup.confirm_level, "close": current.close,
+        "confirm_level": setup.confirm_level, "close": current.close, "confirm_tf": confirm_tf,
         "gap": gap, "quality": quality, "confidence": min(90, quality-4),
     }
 
@@ -188,11 +193,11 @@ def format_message(event: dict) -> str:
         f"Ключевой уровень: {_price(event['symbol'], event['level'])}",
         f"Экстремум снятия: {_price(event['symbol'], event['sweep_price'])}",
         f"Уровень подтверждения CHOCH/BOS: {_price(event['symbol'], event['confirm_level'])}",
-        f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
-        "Подтверждение: более поздняя закрытая H1 · M15; H4 не противоречит",
+        f"Цена закрытия {event.get('confirm_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
+        f"Подтверждение: более поздняя закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
-        f"✅ Факт: ликвидность {where} уровня снята, цена вернулась обратно и последующей закрытой H1-свечой подтвердила {event['side']}.",
+        f"✅ Факт: ликвидность {where} уровня снята, цена вернулась обратно и последующей закрытой {event.get('confirm_tf', 'H1')}-свечой подтвердила {event['side']}.",
     ])
 
 

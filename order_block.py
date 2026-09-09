@@ -126,7 +126,9 @@ def _strength(block: OrderBlock, strength: dict[str, float]) -> tuple[bool, floa
 def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: list[Candle], strength: dict[str, float]) -> dict | None:
     if block.retest_sent or block.invalid or len(h1) < 20 or len(h4) < 20 or len(m15) < 20:
         return None
-    current = h1[-1]
+    # Реакция от уже найденного H1/H4 блока подтверждается закрытой M15.
+    current = m15[-1] if m15[-1].dt > block.created_dt else h1[-1]
+    confirm_tf = "M15" if current is m15[-1] else "H1"
     if current.dt <= block.created_dt or current.dt == block.last_dt:
         return None
     block.last_dt = current.dt
@@ -166,7 +168,7 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
         "symbol": block.symbol, "side": block.side, "tf": block.tf,
         "low": block.low, "high": block.high, "bos_level": block.bos_level,
         "close": current.close, "fvg": block.fvg, "gap": gap,
-        "quality": quality, "confidence": min(91, quality-4),
+        "quality": quality, "confidence": min(91, quality-4), "confirm_tf": confirm_tf,
     }
 
 
@@ -182,11 +184,11 @@ def format_message(event: dict) -> str:
         f"Таймфрейм блока: {event['tf']}",
         f"Зона Order Block: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"Пробитый уровень BOS: {_price(event['symbol'], event['bos_level'])}",
-        f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
-        f"Сопутствующий FVG: {fvg}", "Подтверждение реакции: закрытая H1 · M15; H4 не противоречит",
+        f"Цена закрытия {event.get('confirm_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
+        f"Сопутствующий FVG: {fvg}", f"Подтверждение реакции: закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
-        f"✅ Факт: после импульсного BOS цена вернулась в Order Block, удержала зону и закрытой H1-свечой подтвердила {event['side']}.",
+        f"✅ Факт: после импульсного BOS цена вернулась в Order Block, удержала зону и закрытой {event.get('confirm_tf', 'H1')}-свечой подтвердила {event['side']}.",
     ])
 
 

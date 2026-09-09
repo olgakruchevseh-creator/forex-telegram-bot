@@ -188,7 +188,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             by_tf = market.get(symbol) or {}
             # Existing ranges: only a newly crossed boundary can create exit.
             for phase in [p for p in stored.values() if p.symbol == symbol and not p.exit_sent]:
-                if detect_exit(phase, _bars(by_tf, phase.tf), by_tf, strength) and not first:
+                # Граница фазы H1/H4/D1 сохраняется, но сам выход фиксируется
+                # закрытой M15, а не ждёт закрытия старшего таймфрейма.
+                if detect_exit(phase, _bars(by_tf, "M15"), by_tf, strength) and not first:
                     messages.append(format_message(phase, "exit"))
             candidates = []
             for tf in MAIN_TFS:

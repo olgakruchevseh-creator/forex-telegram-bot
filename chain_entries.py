@@ -189,7 +189,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 bars = _bars(by_tf, tf)
                 existing = setups.get(key)
                 if existing:
-                    event = confirm_entry(existing, bars, by_tf, strength)
+                    # BOS остаётся H1/H4, а возврат и удержание контролируются
+                    # закрытой M15, чтобы не отдавать уже прошедший маршрут.
+                    event = confirm_entry(existing, _bars(by_tf, "M15"), by_tf, strength)
                     if event and not first:
                         count_key = f"{symbol}|{existing.side}"
                         opposite = f"{symbol}|{'SHORT' if existing.side == 'LONG' else 'LONG'}"

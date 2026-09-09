@@ -105,10 +105,13 @@ def _strength_gap(setup: RetestSetup, strength: dict[str, float]) -> float:
 
 def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
                    strength: dict[str, float]) -> dict | None:
-    """Требует две разные H1 после BOS: сначала удержание, затем ретест."""
+    """Требует две разные закрытые M15 после BOS: удержание, затем ретест."""
     if setup.sent or setup.invalid or len(h1) < 20:
         return None
-    current = h1[-1]
+    m15 = _bars(by_tf, "M15")
+    use_m15 = len(m15) >= 20 and m15[-1].dt > setup.last_h1_dt
+    current = m15[-1] if use_m15 else h1[-1]
+    confirm_tf = "M15" if use_m15 else "H1"
     if current.dt <= setup.bos_dt or current.dt == setup.last_h1_dt:
         return None
     setup.last_h1_dt = current.dt
@@ -150,7 +153,6 @@ def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
     if not reaction or directional_body < min_body:
         return None
 
-    m15 = _bars(by_tf, "M15")
     h4 = _bars(by_tf, "H4")
     if _bias("M15", m15) != wanted or _bias("H4", h4) == -wanted:
         return None
@@ -165,7 +167,7 @@ def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
     return {
         "symbol": setup.symbol, "side": setup.side, "tf": setup.tf,
         "level": setup.level, "close": current.close, "gap": gap,
-        "quality": quality, "confidence": min(90, quality - 4),
+        "quality": quality, "confidence": min(90, quality - 4), "confirm_tf": confirm_tf,
     }
 
 
@@ -180,12 +182,12 @@ def format_message(event: dict) -> str:
         f"💱 Пара: {event['symbol']}", f"🧭 Направление: {event['side']}",
         f"📊 Таймфрейм структуры: {event['tf']}",
         f"📍 Пробитый уровень BOS: {_price(event['symbol'], event['level'])}",
-        "🕯 Удержание: отдельная закрытая H1-свеча",
-        "✅ Подтверждение ретеста: следующая закрытая H1-свеча · M15",
+        f"🕯 Удержание: отдельная закрытая {event.get('confirm_tf', 'H1')}-свеча",
+        f"✅ Подтверждение ретеста: следующая закрытая {event.get('confirm_tf', 'H1')}-свеча",
         f"💵 Цена закрытия: {_price(event['symbol'], event['close'])}",
         f"💪 Разница силы валют: {event['gap']:+.2f}",
         f"⭐ Качество: {event['quality']}/100", f"📈 Вероятность: {event['confidence']}%", "",
-        f"Факт: после BOS цена отдельной H1-свечой удержалась {direction} уровня, затем вернулась к нему и закрылась с подтверждением {event['side']}.",
+        f"Факт: после BOS цена отдельной {event.get('confirm_tf', 'H1')}-свечой удержалась {direction} уровня, затем вернулась к нему и закрылась с подтверждением {event['side']}.",
     ])
 
 
