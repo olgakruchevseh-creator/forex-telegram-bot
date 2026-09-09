@@ -10,6 +10,7 @@ from pathlib import Path
 
 import config as cfg
 import movement_progress
+import zigzag_scanner
 from analysis import analyze_tf
 
 
@@ -121,12 +122,19 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"• Сила валют: {master['gap']:+.2f}",
     ]
     lines.extend(f"• {item}" for item in evidence)
+    targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     lines.extend([
         "", f"Начало маршрута H1: {movement_progress._price(master['symbol'], route['anchor'])}",
         f"Текущая цена: {movement_progress._price(master['symbol'], route['current'])}",
-        f"Ближайшая структурная цель {route['target_tf']}: {movement_progress._price(master['symbol'], route['target'])}",
+        "", "🎯 Цели маршрута:",
+    ])
+    lines.extend(
+        f"• TR{index} ({item['tf']}): {movement_progress._price(master['symbol'], item['price'])}"
+        for index, item in enumerate(targets, 1)
+    )
+    lines.extend([
         f"Пройдено расчётного пути: {route['progress']}%",
-        f"Осталось до цели: {route['remaining']}%", "",
+        f"Осталось до TR1: {route['remaining']}%", "",
         f"Оценка: {icon} направление {side} подтверждено по закрытой H1-свече.",
         "Факт: уведомление отправлено только после согласования исходного модуля, мультитаймфреймов, ZigZag, силы валют, DXY и структурной цели.",
         "Процент показывает расстояние до цели H4/D1, а не гарантирует продолжение движения.",
@@ -207,30 +215,53 @@ def _float_line(text: str, label: str) -> float:
 
 def _scenario_from_card(text: str) -> dict:
     symbol, side = _pair(text), _side(text)
-    target_match = re.search(r"^Ближайшая структурная цель\s+(H4|D1):\s*([0-9.]+)", text or "", re.M)
+    target_matches = re.findall(r"^•\s*TR([123])\s*\((H4|D1)\):\s*([0-9.]+)", text or "", re.M)
+    targets = [{"name": f"TR{number}", "tf": tf, "price": float(price)}
+               for number, tf, price in target_matches]
+    # Совместимость с одной целью из предыдущей версии.
+    if not targets:
+        old = re.search(r"^Ближайшая структурная цель\s+(H4|D1):\s*([0-9.]+)", text or "", re.M)
+        if old:
+            targets = [{"name": "TR1", "tf": old.group(1), "price": float(old.group(2))}]
     sources = _line(text, "Источники модулей")
     return {
         "key": f"{symbol}|{side}|{_line(text, 'Начало маршрута H1')}",
         "symbol": symbol, "side": side,
         "anchor": _float_line(text, "Начало маршрута H1"),
-        "target": float(target_match.group(2)) if target_match else 0.0,
-        "target_tf": target_match.group(1) if target_match else "",
+        "target": targets[0]["price"] if targets else 0.0,
+        "target_tf": targets[0]["tf"] if targets else "", "targets": targets,
         "sources": sources, "start_h1": "", "last_h1": "",
         "last_progress": int(_float_line(text, "Пройдено расчётного пути")),
+        "reached_count": 0, "near_for": 0,
         "near_sent": False, "status": "ACTIVE", "created_at": time.time(),
     }
 
 
-def _lifecycle_message(item: dict, action: str, current: float, progress: int) -> str:
+def _lifecycle_message(item: dict, action: str, current: float, progress: int,
+                       reached_names: list[str] | None = None,
+                       next_target: dict | None = None, problems: list[str] | None = None) -> str:
     side, symbol = item["side"], item["symbol"]
     icon = "🟢" if side == "LONG" else "🔴"
     source = item.get("sources") or "подтверждённые модули"
+    reached_names, problems = reached_names or [], problems or []
+    current_target = next_target or ((item.get("targets") or [{}])[-1])
     if action == "NEAR":
-        title = "⚠️ СИГНАЛ БЛИЗОК К ЗАВЕРШЕНИЮ"
-        fact = "Структурная цель ещё не достигнута; риск остановки или коррекции повышен."
+        title = f"⚠️ ПРИБЛИЖЕНИЕ К {current_target.get('name', 'ЦЕЛИ')}"
+        fact = "Цель ещё не достигнута; риск остановки или коррекции постепенно повышается."
+    elif action == "TARGET_CLEAR":
+        passed_word = "ПРОЙДЕН" if len(reached_names) == 1 else "ПРОЙДЕНЫ"
+        title = f"✅ {' И '.join(reached_names)} {passed_word}"
+        fact = (f"Текущие фильтры не мешают продолжению {side}. "
+                f"Маршрут остаётся активным к {next_target['name']}.")
+    elif action == "TARGET_RISK":
+        passed_word = "ПРОЙДЕН" if len(reached_names) == 1 else "ПРОЙДЕНЫ"
+        title = f"⚠️ {' И '.join(reached_names)} {passed_word} — ПРОДОЛЖЕНИЕ ОСЛАБЛЕНО"
+        fact = (f"До {next_target['name']} путь пока не подтверждён полностью. "
+                f"Причина: {'; '.join(problems)}.")
     elif action == "COMPLETE":
-        title = "✅ СЦЕНАРИЙ ОТРАБОТАН"
-        fact = "Расчётная структурная цель достигнута. Это завершение прежнего пути, а не автоматический сигнал разворота."
+        title = "🏆 МАРШРУТ ПОЛНОСТЬЮ ОТРАБОТАН"
+        fact = (f"Достигнута последняя доступная структурная цель {reached_names[-1]}. "
+                "Это завершение прежнего пути, а не автоматический сигнал разворота.")
     else:
         title = "❌ СЦЕНАРИЙ ОТМЕНЁН"
         fact = "Контрольный маршрут нарушен закрытой H1-свечой либо H1 и M15 подтвердили противоположное направление."
@@ -239,7 +270,8 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int) -
         f"💱 Пара: {symbol}", f"Исходное направление: {side} {icon}",
         f"Источники модулей: {source}",
         f"Текущая цена: {movement_progress._price(symbol, current)}",
-        f"Структурная цель {item.get('target_tf')}: {movement_progress._price(symbol, item['target'])}",
+        f"Текущая цель: {current_target.get('name', 'TR')} ({current_target.get('tf', '')}) "
+        f"{movement_progress._price(symbol, float(current_target.get('price') or item.get('target') or 0))}",
         f"Пройдено расчётного пути: {progress}%", "", f"Факт: {fact}", "", "━━━━━━━━━━━━━━━━━━",
     ])
 
@@ -254,7 +286,37 @@ def _opposite_confirmed(side: str, by_tf: dict) -> bool:
     return values == [wanted, wanted]
 
 
-def process_lifecycle(market: dict) -> list[str]:
+def _continuation_check(item: dict, by_tf: dict, strength: dict[str, float]) -> list[str]:
+    wanted = 1 if item["side"] == "LONG" else -1
+    problems = []
+    for tf, mins in (("H4", 240), ("H1", 60), ("M15", 15)):
+        bars = movement_progress.closed_candles(by_tf.get(tf) or [], mins)
+        view = analyze_tf(tf, tf, bars) if len(bars) >= 20 else None
+        bias = view.bias if view else 0
+        if tf == "H4" and bias == -wanted:
+            problems.append("H4 развернулся против маршрута")
+        elif tf in ("H1", "M15") and bias != wanted:
+            problems.append(f"{tf} больше не подтверждает {item['side']}")
+    try:
+        base, quote = item["symbol"].split("/")
+        gap = float(strength.get(base, 0)) - float(strength.get(quote, 0))
+    except (TypeError, ValueError):
+        gap = 0.0
+    minimum = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .03))
+    if gap * wanted < minimum:
+        problems.append("сила валют не поддерживает продолжение")
+    try:
+        zz = zigzag_scanner.analyze_symbol(item["symbol"], by_tf)
+        h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
+        if h4_zz and h4_zz != wanted:
+            problems.append("ZigZag H4 против следующей цели")
+    except Exception:
+        # Недоступный снимок не объявляется препятствием без фактического конфликта.
+        pass
+    return problems
+
+
+def process_lifecycle(market: dict, strength: dict[str, float] | None = None) -> list[str]:
     """Готовит только важные этапы активного сценария; состояние меняется после доставки."""
     state = _load()
     pending = state.setdefault("pending_lifecycle", {})
@@ -267,22 +329,49 @@ def process_lifecycle(market: dict) -> list[str]:
         if not h1 or h1[-1].dt == item.get("last_h1"):
             continue
         current_bar = h1[-1]
-        anchor, target = float(item.get("anchor") or 0), float(item.get("target") or 0)
+        targets = item.get("targets") or [{"name": "TR1", "tf": item.get("target_tf"), "price": item.get("target")}]
+        reached_before = int(item.get("reached_count") or 0)
+        if reached_before >= len(targets):
+            continue
+        anchor = float(item.get("anchor") or 0)
+        target = float(targets[reached_before].get("price") or 0)
         if not anchor or not target or anchor == target:
             continue
         direction = 1 if item["side"] == "LONG" else -1
         total = abs(target - anchor)
         progress = max(0, min(100, int(round(((current_bar.close-anchor) * direction) / total * 100))))
-        reached = current_bar.high >= target if direction > 0 else current_bar.low <= target
+        highest_reached = reached_before
+        for index in range(reached_before, len(targets)):
+            price = float(targets[index]["price"])
+            touched = current_bar.high >= price if direction > 0 else current_bar.low <= price
+            if touched:
+                highest_reached = index + 1
+            else:
+                break
+        reached = highest_reached > reached_before
         invalid = current_bar.close <= anchor if direction > 0 else current_bar.close >= anchor
-        action = "COMPLETE" if reached else "CANCEL" if (invalid or _opposite_confirmed(item["side"], by_tf)) else ""
-        if not action and progress >= int(getattr(cfg, "SIGNAL_NEAR_TARGET_PCT", 85)) and not item.get("near_sent"):
+        reached_names = [targets[index]["name"] for index in range(reached_before, highest_reached)]
+        next_target = targets[highest_reached] if highest_reached < len(targets) else targets[-1]
+        problems = []
+        if reached:
+            if highest_reached >= len(targets):
+                action = "COMPLETE"
+            else:
+                problems = _continuation_check(item, by_tf, strength or {})
+                action = "TARGET_RISK" if problems else "TARGET_CLEAR"
+        else:
+            action = "CANCEL" if (invalid or _opposite_confirmed(item["side"], by_tf)) else ""
+        if not action and progress >= int(getattr(cfg, "SIGNAL_NEAR_TARGET_PCT", 85)) and int(item.get("near_for") or 0) != reached_before + 1:
             action = "NEAR"
+            next_target = targets[reached_before]
         if not action:
             continue
-        message = _lifecycle_message(item, action, current_bar.close, progress)
+        message = _lifecycle_message(item, action, current_bar.close, progress,
+                                     reached_names, next_target, problems)
         digest = hashlib.sha256(message.encode()).hexdigest()[:20]
-        pending[digest] = {"symbol": symbol, "action": action, "h1_dt": current_bar.dt, "progress": progress}
+        pending[digest] = {"symbol": symbol, "action": action, "h1_dt": current_bar.dt,
+                           "progress": progress, "reached_count": highest_reached,
+                           "near_for": reached_before + 1}
         messages.append(message)
     state["pending_lifecycle"] = pending
     _save(state)
@@ -301,7 +390,12 @@ def mark_lifecycle_delivered(text: str) -> bool:
         item["last_h1"] = event["h1_dt"]
         item["last_progress"] = event["progress"]
         if event["action"] == "NEAR":
+            item["near_for"] = event["near_for"]
             item["near_sent"] = True
+        elif event["action"] in ("TARGET_CLEAR", "TARGET_RISK"):
+            item["reached_count"] = event["reached_count"]
+            item["near_for"] = 0
+            item["near_sent"] = False
         else:
             item["status"] = event["action"]
             item["resolved_at"] = time.time()

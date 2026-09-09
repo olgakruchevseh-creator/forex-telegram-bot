@@ -106,6 +106,9 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
     if (direction > 0 and current <= anchor) or (direction < 0 and current >= anchor):
         return None
 
+    av = atr(h1, 14)
+    if av <= 0:
+        return None
     wanted_target = "high" if direction > 0 else "low"
     candidates = []
     for tf, bars in (("H4", h4), ("D1", d1)):
@@ -116,11 +119,21 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
                 candidates.append((abs(swing.price-current), swing.price, tf))
     if not candidates:
         return None
-    _distance, target, target_tf = min(candidates)
+    candidates.sort(key=lambda item: item[0])
+    # Близкие H4/D1 экстремумы считаются одной целью. Реальные уровни не
+    # дорисовываются арифметикой: если есть только два, TR3 не показывается.
+    targets = []
+    tolerance = av * float(getattr(cfg, "MOVEMENT_TARGET_MERGE_ATR", .15))
+    for _distance, price, tf in candidates:
+        if any(abs(price-item["price"]) <= tolerance for item in targets):
+            continue
+        targets.append({"price": price, "tf": tf})
+        if len(targets) == 3:
+            break
+    target, target_tf = targets[0]["price"], targets[0]["tf"]
     total = abs(target-anchor)
     passed = abs(current-anchor)
-    av = atr(h1, 14)
-    if av <= 0 or total < av * float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_TARGET_ATR", 1.5)):
+    if total < av * float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_TARGET_ATR", 1.5)):
         return None
     progress = max(0.0, min(100.0, passed / total * 100.0))
     remaining = max(0.0, 100.0-progress)
@@ -131,7 +144,8 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
         # Цель может немного уточняться, но это остаётся одним движением от одного anchor.
         "key": f"{symbol}|{side}|{anchor_dt}",
         "symbol": symbol, "side": side, "anchor": anchor, "target": target,
-        "target_tf": target_tf, "current": current, "progress": int(round(progress)),
+        "target_tf": target_tf, "targets": targets,
+        "current": current, "progress": int(round(progress)),
         "remaining": int(round(remaining)), "mode": mode, "gap": gap,
         "h1_dt": h1[-1].dt,
     }

@@ -160,6 +160,8 @@ MOVEMENT_PROGRESS_MIN_CHANGE_PCT = 8
 SIGNAL_CANDIDATE_TTL_HOURS = 4
 # Одно предупреждение перед структурной целью; промежуточные проценты не спамят.
 SIGNAL_NEAR_TARGET_PCT = 85
+# Экстремумы H4/D1 ближе этого расстояния объединяются в одну цель TR.
+MOVEMENT_TARGET_MERGE_ATR = 0.15
 LIQUIDITY_SWEEP_ENABLED = True
 LIQUIDITY_MIN_SWEEP_ATR = 0.08
 LIQUIDITY_EQUAL_TOLERANCE_ATR = 0.20

@@ -803,7 +803,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Активные сценарии сопровождаются отдельно от лимита новых сигналов:
         # только близость к цели, завершение либо подтверждённая отмена.
         try:
-            for text in signal_navigator.process_lifecycle(market):
+            for text in signal_navigator.process_lifecycle(market, strength):
                 await _send_parts(context.application, int(chat_id), text)
                 signal_navigator.mark_lifecycle_delivered(text)
         except Exception:
