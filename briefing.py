@@ -211,7 +211,7 @@ def classify_state(stack: Optional[PairStack]) -> str:
     have = [k for k in ("D1", "H4", "H1") if stack.views.get(k)]
     if len(have) < 2:
         return "НЕТ ДАННЫХ"
-    d1, h4, h1, m15 = (_tf_bias(stack, k) for k in ("D1", "H4", "H1", "M15"))
+    d1, h4, h1, m15, m5 = (_tf_bias(stack, k) for k in ("D1", "H4", "H1", "M15", "M5"))
     majors = [d1, h4, h1]
     if d1 and h4 and d1 == h4 == h1:
         return f"ТРЕНД {_dir_word(d1)}"
@@ -225,8 +225,15 @@ def classify_state(stack: Optional[PairStack]) -> str:
         if dv and "смена" in (dv.structure or ""):
             return f"ПОДТВЕРЖДЁННЫЙ РАЗВОРОТ {_dir_word(d1)}"
         return f"ТРЕНД {_dir_word(d1)}"
-    if m15 and not any(majors):
-        return f"ЛОКАЛЬНЫЙ ИМПУЛЬС {_dir_word(m15)}"
+    # Один M15 среди нейтральных H1/M5 — ещё не локальный импульс.
+    # Требуется настоящее большинство двух младших таймфреймов из трёх.
+    lower = (h1, m15, m5)
+    lower_up = sum(value > 0 for value in lower)
+    lower_down = sum(value < 0 for value in lower)
+    if not d1 and not h4 and lower_up >= 2 and lower_up > lower_down:
+        return "ЛОКАЛЬНЫЙ ИМПУЛЬС LONG"
+    if not d1 and not h4 and lower_down >= 2 and lower_down > lower_up:
+        return "ЛОКАЛЬНЫЙ ИМПУЛЬС SHORT"
     flat = 0
     unclear = 0
     for k in ("D1", "H4", "H1"):
@@ -334,6 +341,10 @@ def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0) -> str
     # против него, это фактический откат даже до подтверждения на M15/M5.
     if primary and _tf_bias(stack, "H4") == -primary and _tf_bias(stack, "H1") == -primary:
         return f"ОТКАТ {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)}"
+    # W1/D1 сами по себе не объявляют текущий основной импульс, когда H4 уже
+    # направлен против, а H1/M15/M5 ещё не сформировали большинство.
+    if primary and not local and _tf_bias(stack, "H4") == -primary:
+        return "RANGE / ПЕРЕХОДНАЯ ФАЗА"
     if primary:
         return f"ОСНОВНОЙ {_dir_word(primary)} · ЛОКАЛЬНОЕ ДВИЖЕНИЕ НЕ ПОДТВЕРЖДЕНО"
     if local:
