@@ -103,8 +103,8 @@ ECHO_MIN_CONFIDENCE = 0.60
 ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.75
 # Next Pivot Projection — информационная зона возможного следующего экстремума.
 NEXT_PIVOT_ENABLED = True
-NEXT_PIVOT_MIN_SAMPLES = 8
-NEXT_PIVOT_MIN_PROBABILITY = 60
+NEXT_PIVOT_MIN_SAMPLES = 12
+NEXT_PIVOT_MIN_PROBABILITY = 70
 NEXT_PIVOT_MIN_ZONE_ATR = 0.25
 NEXT_PIVOT_NEAR_ATR = 0.30
 # Ранний локальный сценарий: только завершённый AMD, подтверждённые M15/M5

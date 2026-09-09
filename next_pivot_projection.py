@@ -163,28 +163,44 @@ def compact_line(result: dict | None) -> str:
 
 def format_near(result: dict) -> str:
     icon = "🟢" if result["side"] == "LONG" else "🔴"
+    reaction = "SHORT" if result["side"] == "LONG" else "LONG"
+    reaction_icon = "🔴" if reaction == "SHORT" else "🟢"
     kind = "ВЕРШИНЫ" if result["kind"] == "high" else "ОСНОВАНИЯ"
+    title = ("🔭 ПРИБЛИЖЕНИЕ К ВЕРОЯТНОМУ PIVOT" if result["probability"] >= 75
+             else "🔭 ПРИБЛИЖЕНИЕ К ЗОНЕ ВОЗМОЖНОГО PIVOT")
+    bars_low = max(1, int(result["bars_low"]))
+    bars_high = max(bars_low+2, int(result["bars_high"]))
     return "\n".join([
-        "━━━━━━━━━━━━━━━━━━", "🔭 ПРИБЛИЖЕНИЕ К ВЕРОЯТНОМУ PIVOT", "━━━━━━━━━━━━━━━━━━", "",
+        "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {result['symbol']}", f"Текущее движение: {result['side']} {icon}",
         f"Ожидаемая зона {kind}: {_price(result['symbol'], result['zone_low'])}–{_price(result['symbol'], result['zone_high'])}",
         f"Предполагаемая структура: {result['structure']}",
-        f"Ожидаемое время: через {result['bars_low']}–{result['bars_high']} закрытых H1",
+        f"Ожидаемое окно: в пределах ближайших {bars_low}–{bars_high} закрытых H1",
         f"Исторических сравнений: {result['samples']}", f"Вероятность структуры: {result['probability']}%",
-        f"Согласование проекций: {result['aligned']} из {result['available']} ТФ", "",
+        f"Согласование проекций: {result['aligned']} из {result['available']} ТФ",
+        f"Возможная следующая реакция: {reaction} {reaction_icon} · требует отдельного подтверждения H1/M15", "",
         "⚠️ Факт: цена приблизилась к статистической зоне следующего ZigZag-pivot. Это зона возможного отката или разворота, а не гарантированная точка.",
     ])
 
 
 def process_market(market: dict) -> list[str]:
     state = _load()
-    first = not bool(state.get("bootstrapped"))
+    logic_version = 2
+    first = not bool(state.get("bootstrapped")) or int(state.get("logic_version") or 0) != logic_version
+    if first:
+        # При переходе со старых точных координат зоны не повторяем уже
+        # существующие проекции; текущий снимок становится новым bootstrap.
+        state["delivered"] = {}
     delivered, pending, candidates = state.setdefault("delivered", {}), {}, []
     for symbol in cfg.PAIRS:
         result = analyze_symbol(symbol, market.get(symbol) or {})
-        if not result or not result["near"]:
+        if (not result or not result["near"]
+                or result["samples"] < int(getattr(cfg, "NEXT_PIVOT_MIN_SAMPLES", 12))
+                or result["probability"] < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 70))):
             continue
-        key = f"{symbol}|{result['pivot_dt']}|{result['kind']}|{result['zone_low']:.6f}|{result['zone_high']:.6f}"
+        # Одна исходная pivot-точка — одно уведомление, даже если при следующей
+        # H1 границы статистической зоны немного пересчитались.
+        key = f"{symbol}|{result['pivot_dt']}|{result['kind']}"
         if first:
             delivered[key] = True
             continue
@@ -194,7 +210,7 @@ def process_market(market: dict) -> list[str]:
         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
         pending[digest] = {"key": key}
         candidates.append((result["probability"], result["aligned"], text))
-    state["bootstrapped"], state["pending"] = True, pending
+    state["bootstrapped"], state["logic_version"], state["pending"] = True, logic_version, pending
     if len(delivered) > 500:
         state["delivered"] = dict(list(delivered.items())[-350:])
     _save(state)
