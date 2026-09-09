@@ -181,6 +181,89 @@ def analyze_symbol(
     }
 
 
+def analyze_local_amd_symbol(
+    symbol: str,
+    by_tf: dict,
+    strength: dict[str, float],
+    alerts: list[str],
+    events: list[newsmod.NewsEvent] | None = None,
+    now_utc: datetime | None = None,
+) -> dict | None:
+    """Ранний локальный выход: завершённый AMD + M15/M5 + сила.
+
+    H1 может ещё сохранять прежний средний уклон: сам AMD уже требует
+    закрытого H1-пробоя. Старшее направление здесь не объявляется основным.
+    """
+    if not getattr(cfg, "LOCAL_AMD_EARLY_ENABLED", True):
+        return None
+    stack = build_stack(symbol, by_tf, strength)
+    if not stack:
+        return None
+    amd_sources = [
+        text for text in alerts
+        if _pair(text) == symbol
+        and "AMD / POWER OF THREE" in text.upper()
+        and "ПОДТВЕРЖДЁННЫЙ ВЫХОД" in text.upper()
+        and _side(text)
+    ]
+    if not amd_sources:
+        return None
+    sides = {_side(text) for text in amd_sources}
+    if len(sides) != 1:
+        return None
+    side = sides.pop()
+    # Два закрытых младших ТФ должны одновременно подтверждать выход.
+    if any(k not in stack.views or stack.views[k].bias != side for k in ("M15", "M5")):
+        return None
+    gap = stack.strength_gap
+    minimum_gap = float(getattr(cfg, "LOCAL_AMD_MIN_STRENGTH_GAP", 0.08))
+    if gap * side < minimum_gap:
+        return None
+    # Старые кандидаты других модулей могут описывать предыдущий откат.
+    # Для ранней ветки источником является только завершённая AMD-модель.
+    aligned = ["подтверждена модель AMD / Power of Three"]
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if _news_blocked(symbol, events or [], now_utc):
+        return None
+    senior_n = sum(stack.views[k].bias == side for k in ("D1", "H4", "H1") if k in stack.views)
+    junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
+    quality = min(86, 72 + (6 if junior_n == 3 else 3) + min(6, int(abs(gap) * 30)) + 5)
+    return {
+        "symbol": symbol,
+        "side": "LONG" if side > 0 else "SHORT",
+        "quality": quality,
+        "confidence": max(70, quality - 6),
+        "gap": gap,
+        "senior_n": senior_n,
+        "junior_n": junior_n,
+        "evidence": aligned,
+        "dxy_bias": 0,
+        "local_early": True,
+    }
+
+
+def analyze_local_amd_market(
+    market: dict,
+    strength: dict[str, float],
+    module_alerts: list[str],
+    events: list[newsmod.NewsEvent] | None = None,
+    now_utc: datetime | None = None,
+) -> list[dict]:
+    results = []
+    for symbol in cfg.PAIRS:
+        try:
+            item = analyze_local_amd_symbol(
+                symbol, market.get(symbol) or {}, strength, module_alerts,
+                events=events, now_utc=now_utc,
+            )
+            if item:
+                results.append(item)
+        except Exception:
+            log.exception("Local AMD %s", symbol)
+    results.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
+    return results
+
+
 def format_message(result: dict) -> str:
     side = result["side"]
     icon = "🟢" if side == "LONG" else "🔴"

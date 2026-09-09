@@ -744,6 +744,14 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 events=master_events,
                 now_utc=datetime.now(timezone.utc),
             )
+            strict_pairs = {item["symbol"] for item in master_results}
+            local_results = master_direction.analyze_local_amd_market(
+                market, strength, candidate_alerts,
+                events=master_events, now_utc=datetime.now(timezone.utc),
+            )
+            # Строгий основной сигнал всегда имеет преимущество; локальная
+            # карточка для той же пары в этот час не дублируется.
+            master_results.extend(item for item in local_results if item["symbol"] not in strict_pairs)
             for text, sources in signal_navigator.build_confirmed(
                 master_results, market, strength, candidate_alerts
             ):
@@ -760,7 +768,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
         bucket = buckets.setdefault(bucket_key, {"count": 0, "pairs": []})
-        hourly_limit = max(0, int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 2)))
+        hourly_limit = max(0, int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 3)))
         remaining = max(0, hourly_limit - int(bucket.get("count") or 0))
         selected_alerts = select_trade_alerts(
             module_alerts,

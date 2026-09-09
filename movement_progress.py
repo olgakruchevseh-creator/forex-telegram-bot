@@ -151,6 +151,64 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
     }
 
 
+def analyze_for_side(symbol: str, by_tf: dict, strength: dict[str, float], side: str) -> dict | None:
+    """Структурный маршрут в заданную AMD-сторону до смены среднего уклона H1."""
+    d1, h4, h1, m15 = (_bars(by_tf, tf) for tf in ("D1", "H4", "H1", "M15"))
+    if min(len(d1), len(h4), len(h1), len(m15)) < 20:
+        return None
+    d1_view, h4_view = _view("D1", d1), _view("H4", h4)
+    m15_view = _view("M15", m15)
+    direction = 1 if side == "LONG" else -1
+    if not d1_view or not h4_view or not m15_view or m15_view.bias != direction:
+        return None
+    ok, gap = _strength_ok(symbol, side, strength)
+    minimum_gap = float(getattr(cfg, "LOCAL_AMD_MIN_STRENGTH_GAP", 0.08))
+    if not ok or gap * direction < minimum_gap:
+        return None
+    h1_swings = _swings("H1", h1)
+    anchor_kind = "low" if direction > 0 else "high"
+    anchors = [s for s in h1_swings if s.kind == anchor_kind]
+    if not anchors:
+        return None
+    anchor_swing = anchors[-1]
+    anchor, current = anchor_swing.price, h1[-1].close
+    if (direction > 0 and current <= anchor) or (direction < 0 and current >= anchor):
+        return None
+    av = atr(h1, 14)
+    if av <= 0:
+        return None
+    target_kind = "high" if direction > 0 else "low"
+    candidates = []
+    for tf, bars in (("H4", h4), ("D1", d1)):
+        for swing in _swings(tf, bars):
+            if swing.kind == target_kind and ((direction > 0 and swing.price > current) or
+                                               (direction < 0 and swing.price < current)):
+                candidates.append((abs(swing.price-current), swing.price, tf))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    targets, tolerance = [], av * float(getattr(cfg, "MOVEMENT_TARGET_MERGE_ATR", .15))
+    for _distance, price, tf in candidates:
+        if any(abs(price-item["price"]) <= tolerance for item in targets):
+            continue
+        targets.append({"price": price, "tf": tf})
+        if len(targets) == 3:
+            break
+    target, target_tf = targets[0]["price"], targets[0]["tf"]
+    total = abs(target-anchor)
+    if total < av * float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_TARGET_ATR", .8)):
+        return None
+    progress = max(0.0, min(100.0, abs(current-anchor) / total * 100.0))
+    return {
+        "key": f"{symbol}|{side}|{anchor_swing.dt}", "symbol": symbol, "side": side,
+        "anchor": anchor, "target": target, "target_tf": target_tf, "targets": targets,
+        "current": current, "progress": int(round(progress)),
+        "remaining": int(round(100-progress)),
+        "mode": _movement_mode(direction, d1_view.bias, h4_view.bias),
+        "gap": gap, "h1_dt": h1[-1].dt,
+    }
+
+
 def _price(symbol: str, value: float) -> str:
     return f"{value:.3f}" if "JPY" in symbol else f"{value:.5f}"
 

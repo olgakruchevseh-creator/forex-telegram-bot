@@ -107,7 +107,9 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     }
     evidence = list(master.get("evidence") or [])[:3]
     source_names = list(dict.fromkeys(_source_name(text) for text in sources))
-    title = "🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР"
+    local_early = bool(master.get("local_early"))
+    title = ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
+             ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР"))
     lines = [
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {master['symbol']}", f"Направление: {side} {icon}",
@@ -118,11 +120,14 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         "Подтверждено:",
         f"• D1/H4/H1: {master['senior_n']} из 3",
         f"• H1/M15/M5: {master['junior_n']} из 3",
-        f"• ZigZag H4: {side}",
+        f"• ZigZag H4: {side}" if not local_early else "• Старший тренд ещё не подтверждён полностью",
         f"• Сила валют: {master['gap']:+.2f}",
     ]
     lines.extend(f"• {item}" for item in evidence)
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
+    final_fact = ("Факт: завершённый AMD, закрытые M15/M5, сила валют и структурная цель подтверждают раннее локальное движение."
+                  if local_early else
+                  "Факт: уведомление отправлено только после согласования исходного модуля, мультитаймфреймов, ZigZag, силы валют, DXY и структурной цели.")
     lines.extend([
         "", f"Начало маршрута H1: {movement_progress._price(master['symbol'], route['anchor'])}",
         f"Текущая цена: {movement_progress._price(master['symbol'], route['current'])}",
@@ -136,7 +141,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"Пройдено расчётного пути: {route['progress']}%",
         f"Осталось до TR1: {route['remaining']}%", "",
         f"Оценка: {icon} направление {side} подтверждено по закрытой H1-свече.",
-        "Факт: уведомление отправлено только после согласования исходного модуля, мультитаймфреймов, ZigZag, силы валют, DXY и структурной цели.",
+        final_fact,
         "Процент показывает расстояние до цели H4/D1, а не гарантирует продолжение движения.",
         "", "━━━━━━━━━━━━━━━━━━",
     ])
@@ -152,8 +157,13 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
         sources = matching_sources(symbol, side, alerts)
         if not sources:
             continue
-        route = movement_progress.analyze_progress(symbol, market.get(symbol) or {}, strength)
+        route = (movement_progress.analyze_for_side(symbol, market.get(symbol) or {}, strength, side)
+                 if result.get("local_early") else
+                 movement_progress.analyze_progress(symbol, market.get(symbol) or {}, strength))
         if not route or route.get("side") != side:
+            continue
+        if result.get("local_early") and route.get("progress", 100) > int(
+                getattr(cfg, "LOCAL_AMD_MAX_PROGRESS_PCT", 45)):
             continue
         previous = active.get(symbol) or {}
         reversal = bool(previous and previous.get("side") != side)
