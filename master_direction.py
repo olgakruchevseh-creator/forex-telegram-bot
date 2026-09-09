@@ -220,6 +220,21 @@ def process_market(
     events: list[newsmod.NewsEvent] | None = None,
     now_utc: datetime | None = None,
 ) -> list[str]:
+    return [format_message(item) for item in analyze_market(
+        market, strength, module_alerts, dxy_bias=dxy_bias,
+        events=events, now_utc=now_utc,
+    )]
+
+
+def analyze_market(
+    market: dict,
+    strength: dict[str, float],
+    module_alerts: list[str],
+    dxy_bias: int = 0,
+    events: list[newsmod.NewsEvent] | None = None,
+    now_utc: datetime | None = None,
+) -> list[dict]:
+    """Возвращает подтверждённые результаты без преждевременного форматирования."""
     candidates = []
     for symbol in cfg.PAIRS:
         try:
@@ -233,4 +248,4 @@ def process_market(
             log.exception("Master Direction %s", symbol)
     candidates.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
     limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 2))
-    return [format_message(item) for item in candidates[:limit]]
+    return candidates[:limit]

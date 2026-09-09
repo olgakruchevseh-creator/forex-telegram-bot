@@ -6,9 +6,6 @@ import json
 import logging
 import os
 import re
-import sqlite3
-import time
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,121 +21,20 @@ def _path() -> Path:
     return (Path(root) if root else Path(__file__).resolve().parent) / "signal_journal_state.json"
 
 
-def _backup_path() -> Path:
-    return _path().with_suffix(".backup.json")
-
-
-def _read_json(path: Path) -> dict:
-    value = json.loads(path.read_text())
-    return value if isinstance(value, dict) else {}
-
-
 def _load() -> dict:
     try:
-        return _read_json(_path())
+        value = json.loads(_path().read_text())
+        return value if isinstance(value, dict) else {}
     except (FileNotFoundError, ValueError, OSError):
-        try:
-            recovered = _read_json(_backup_path())
-            log.warning("Журнал восстановлен из резервной копии %s records=%s", _backup_path(), len(recovered.get("records") or {}))
-            return recovered
-        except (FileNotFoundError, ValueError, OSError):
-            return {}
+        return {}
 
 
 def _save(value: dict) -> None:
     dest = _path()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Никогда не теряем записи, если другой процесс сохранил их после нашего чтения.
-    try:
-        previous = _read_json(dest)
-    except (FileNotFoundError, ValueError, OSError):
-        previous = {}
-    if previous:
-        merged_records = dict(previous.get("records") or {})
-        merged_records.update(value.get("records") or {})
-        value["records"] = merged_records
-        for marker in ("last_daily_final_report", "last_weekly_report"):
-            if previous.get(marker) and not value.get(marker):
-                value[marker] = previous[marker]
-        backup_tmp = _backup_path().with_suffix(".tmp")
-        backup_tmp.write_text(json.dumps(previous, ensure_ascii=False, indent=2))
-        backup_tmp.replace(_backup_path())
     tmp = dest.with_suffix(".tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2))
     tmp.replace(dest)
-
-
-@contextmanager
-def _state_lock():
-    """Межпроцессная блокировка чтения-изменения-записи файла журнала."""
-    import fcntl
-    lock_path = _path().with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def _claims_path() -> Path:
-    return _path().with_name("signal_journal_claims.sqlite3")
-
-
-def _claims_db() -> sqlite3.Connection:
-    path = _claims_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=20, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=15000")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS report_claims ("
-        "report_id TEXT PRIMARY KEY, status TEXT NOT NULL, claimed_ts REAL, sent_ts REAL)"
-    )
-    return conn
-
-
-def claim_report(report_id: str, ttl_seconds: int = 900) -> bool:
-    """Только один процесс получает право отправить конкретный отчёт."""
-    now = time.time()
-    conn = _claims_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO report_claims(report_id,status,claimed_ts) VALUES (?, 'claimed', ?)",
-            (report_id, now),
-        )
-        if cur.rowcount == 1:
-            conn.execute("COMMIT")
-            return True
-        row = conn.execute("SELECT status, claimed_ts FROM report_claims WHERE report_id=?", (report_id,)).fetchone()
-        if not row or row[0] == "sent" or now-float(row[1] or 0) < ttl_seconds:
-            conn.execute("COMMIT")
-            return False
-        cur = conn.execute(
-            "UPDATE report_claims SET status='claimed', claimed_ts=? "
-            "WHERE report_id=? AND status!='sent' AND claimed_ts<?",
-            (now, report_id, now-ttl_seconds),
-        )
-        conn.execute("COMMIT")
-        return cur.rowcount == 1
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
-    finally:
-        conn.close()
-
-
-def release_report(report_id: str) -> None:
-    conn = _claims_db()
-    try:
-        conn.execute("DELETE FROM report_claims WHERE report_id=? AND status='claimed'", (report_id,))
-    finally:
-        conn.close()
 
 
 def _h1(by_tf: dict) -> list[Candle]:
@@ -164,6 +60,8 @@ def _number(text: str, label: str) -> int | None:
 
 def _source(text: str) -> str:
     upper = (text or "").upper()
+    if "ПОДТВЕРЖДЁННЫЙ НАВИГАТОР" in upper:
+        return "Confirmed Navigator"
     names = (
         ("MASTER DIRECTION", "Master Direction"), ("ПАТТЕРН", "Patterns"),
         ("CHAIN ENTRY", "Chain Entries"), ("СТРУКТУРНЫЙ РЕТЕСТ", "Retest"),
@@ -196,7 +94,9 @@ def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
     """Записывает только уже успешно отправленное пользователю сообщение."""
     # Это информационное сообщение об удалении старого уровня, а не новая сделка.
     upper = (text or "").upper()
-    if "УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН" in upper or "НАВИГАТОР" in upper or "ПРОГРЕСС ДВИЖЕНИЯ" in upper:
+    if "УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН" in upper or (
+        "НАВИГАТОР" in upper and "ПОДТВЕРЖДЁННЫЙ НАВИГАТОР" not in upper
+    ) or "ПРОГРЕСС ДВИЖЕНИЯ" in upper:
         return False
     symbol, side = _pair(text), _side(text)
     bars = _h1(market.get(symbol) or {}) if symbol else []
@@ -208,25 +108,24 @@ def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
     if av <= 0:
         return False
     digest = hashlib.sha256(f"{symbol}|{side}|{entry_dt}|{_source(text)}|{text}".encode()).hexdigest()[:20]
-    with _state_lock():
-        state = _load()
-        records = state.setdefault("records", {})
-        if digest in records:
-            return False
-        wanted = 1 if side == "LONG" else -1
-        target_atr = float(getattr(cfg, "JOURNAL_TARGET_ATR", 1.0))
-        invalid_atr = float(getattr(cfg, "JOURNAL_INVALIDATION_ATR", 0.75))
-        records[digest] = {
-            "id": digest, "symbol": symbol, "side": side, "source": _source(text),
-            "entry_dt": entry_dt, "local_date": _local_date(entry_dt),
-            "entry": current.close, "atr": av,
-            "target": current.close + wanted * av * target_atr,
-            "invalidation": current.close - wanted * av * invalid_atr,
-            "quality": _number(text, "Качество"), "confidence": _number(text, "Вероятность"),
-            "status": "OPEN", "resolved_dt": "", "horizons": {},
-            "mfe_atr": 0.0, "mae_atr": 0.0,
-        }
-        _save(state)
+    state = _load()
+    records = state.setdefault("records", {})
+    if digest in records:
+        return False
+    wanted = 1 if side == "LONG" else -1
+    target_atr = float(getattr(cfg, "JOURNAL_TARGET_ATR", 1.0))
+    invalid_atr = float(getattr(cfg, "JOURNAL_INVALIDATION_ATR", 0.75))
+    records[digest] = {
+        "id": digest, "symbol": symbol, "side": side, "source": _source(text),
+        "entry_dt": entry_dt, "local_date": _local_date(entry_dt),
+        "entry": current.close, "atr": av,
+        "target": current.close + wanted * av * target_atr,
+        "invalidation": current.close - wanted * av * invalid_atr,
+        "quality": _number(text, "Качество"), "confidence": _number(text, "Вероятность"),
+        "status": "OPEN", "resolved_dt": "", "horizons": {},
+        "mfe_atr": 0.0, "mae_atr": 0.0,
+    }
+    _save(state)
     return True
 
 
@@ -269,17 +168,16 @@ def _update_record(record: dict, bars: list[Candle]) -> None:
 
 
 def update_market(market: dict) -> None:
-    with _state_lock():
-        state = _load()
-        changed = False
-        for record in (state.get("records") or {}).values():
-            bars = _h1(market.get(record.get("symbol")) or {})
-            before = json.dumps(record, sort_keys=True)
-            if bars:
-                _update_record(record, bars)
-            changed = changed or before != json.dumps(record, sort_keys=True)
-        if changed:
-            _save(state)
+    state = _load()
+    changed = False
+    for record in (state.get("records") or {}).values():
+        bars = _h1(market.get(record.get("symbol")) or {})
+        before = json.dumps(record, sort_keys=True)
+        if bars:
+            _update_record(record, bars)
+        changed = changed or before != json.dumps(record, sort_keys=True)
+    if changed:
+        _save(state)
 
 
 def _summary(records: list[dict], title: str) -> str:
@@ -335,15 +233,13 @@ def pending_reports(now_utc: datetime | None = None) -> list[tuple[str, str]]:
     daily_h, daily_m = getattr(cfg, "JOURNAL_DAILY_REPORT_HM", (9, 10))
     day_key = now.date().isoformat()
     report_day = _previous_trading_day(now.date()).isoformat()
-    selected_daily = [r for r in records if r.get("local_date") == report_day]
     if (now.weekday() < 5 and (now.hour, now.minute) >= (daily_h, daily_m)
-            and state.get("last_daily_final_report") != report_day and selected_daily):
+            and state.get("last_daily_final_report") != report_day):
+        selected = [r for r in records if r.get("local_date") == report_day]
         reports.append((
             f"daily_final:{report_day}",
-            _summary(selected_daily, f"📒 ОКОНЧАТЕЛЬНЫЙ ДНЕВНОЙ ЖУРНАЛ — {report_day}"),
+            _summary(selected, f"📒 ОКОНЧАТЕЛЬНЫЙ ДНЕВНОЙ ЖУРНАЛ — {report_day}"),
         ))
-    elif now.weekday() < 5 and (now.hour, now.minute) >= (daily_h, daily_m) and not selected_daily:
-        log.warning("Дневной журнал не отправлен: нет записей date=%s path=%s total_records=%s", report_day, _path(), len(records))
     week_h, week_m = getattr(cfg, "JOURNAL_WEEKLY_REPORT_HM", (22, 30))
     iso = now.isocalendar()
     week_key = f"{iso.year}-W{iso.week:02d}"
@@ -355,20 +251,10 @@ def pending_reports(now_utc: datetime | None = None) -> list[tuple[str, str]]:
 
 
 def mark_report_sent(report_id: str) -> None:
-    conn = _claims_db()
-    try:
-        conn.execute(
-            "INSERT INTO report_claims(report_id,status,claimed_ts,sent_ts) VALUES (?, 'sent', ?, ?) "
-            "ON CONFLICT(report_id) DO UPDATE SET status='sent', sent_ts=excluded.sent_ts",
-            (report_id, time.time(), time.time()),
-        )
-    finally:
-        conn.close()
-    with _state_lock():
-        state = _load()
-        kind, key = report_id.split(":", 1)
-        if kind in ("daily", "daily_final"):
-            state["last_daily_final_report"] = key
-        else:
-            state["last_weekly_report"] = key
-        _save(state)
+    state = _load()
+    kind, key = report_id.split(":", 1)
+    if kind in ("daily", "daily_final"):
+        state["last_daily_final_report"] = key
+    else:
+        state["last_weekly_report"] = key
+    _save(state)

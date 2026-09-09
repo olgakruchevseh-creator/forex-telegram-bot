@@ -44,6 +44,7 @@ import retest_confirmation
 import fibonacci_grid
 import market_schedule
 import master_direction
+import signal_navigator
 import signal_journal
 try:
     import patterns
@@ -709,7 +710,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка сканера паттернов")
 
-        # Старый упрощённый LONG/SHORT заменён единым итоговым контролёром.
+        # Все модули работают как внутренние датчики. Наружу проходит только
+        # единая карточка после Master Direction и расчёта маршрута Навигатора.
+        raw_alerts = [text for _priority, text in module_alerts]
+        navigator_sources: dict[str, list[str]] = {}
+        confirmed_alerts: list[tuple[int, str]] = []
         if getattr(cfg, "MASTER_DIRECTION_ENABLED", True):
             try:
                 master_dxy = briefing.collect_extras(
@@ -724,19 +729,25 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Новости для Master Direction")
                 master_events = []
-            raw_alerts = [text for _priority, text in module_alerts]
-            for text in master_direction.process_market(
+            master_results = master_direction.analyze_market(
                 market,
                 strength,
                 raw_alerts,
                 dxy_bias=master_dxy_bias,
                 events=master_events,
                 now_utc=datetime.now(timezone.utc),
+            )
+            for text, sources in signal_navigator.build_confirmed(
+                master_results, market, strength, raw_alerts
             ):
                 pair = _alert_pair(text)
                 side = _direct_signal_side(text)
                 if pair and side and cooldown_ok(state, pair, side):
-                    module_alerts.append((-1, text))
+                    confirmed_alerts.append((-1, text))
+                    navigator_sources[text] = sources
+
+        # Исходные паттерны/уровни/AMD/ZigZag отдельно в Telegram не уходят.
+        module_alerts = confirmed_alerts
 
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
@@ -755,16 +766,17 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             await _send_parts(context.application, int(chat_id), text)
-            if "↕️ ZIGZAG —" in text:
-                try:
-                    zigzag_scanner.mark_delivered(text)
-                except Exception:
-                    log.exception("Фиксация доставленного ZigZag")
-            if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
-                try:
-                    amd_power_of_three.mark_delivered(text)
-                except Exception:
-                    log.exception("Фиксация доставленного AMD")
+            for source_text in navigator_sources.get(text, []):
+                if "↕️ ZIGZAG —" in source_text:
+                    try:
+                        zigzag_scanner.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного ZigZag")
+                if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
+                    try:
+                        amd_power_of_three.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного AMD")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)
@@ -780,14 +792,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # One small current-H1 record is enough; old budgets cannot affect new hours.
         state["module_alert_buckets"] = {bucket_key: bucket}
 
-        # Навигатор имеет отдельное место: максимум один отчёт на закрытую H1.
-        if getattr(cfg, "MOVEMENT_PROGRESS_ENABLED", True):
-            try:
-                for text in movement_progress.process_market(market, strength):
-                    await _send_parts(context.application, int(chat_id), text)
-                    movement_progress.mark_delivered(text)
-            except Exception:
-                log.exception("Отправка навигатора движения")
+        # Отдельный неподтверждённый Навигатор отключён: его расчёт уже включён
+        # в единую карточку выше.
 
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
