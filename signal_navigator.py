@@ -137,7 +137,9 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
              ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР"))
     zz_h4 = master.get("zigzag_h4", side)
     zz_line = ("• Старший тренд ещё не подтверждён полностью" if local_early else
-               ("• ZigZag H4: нейтрален" if zz_h4 == "RANGE" else f"• ZigZag H4: {side}"))
+               ("• ZigZag H4: нейтрален" if zz_h4 == "RANGE" else
+                (f"• ZigZag H4: {side}" if zz_h4 == side
+                 else f"• ZigZag H4: {zz_h4} · текущее {side} является откатом")))
     lines = [
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {master['symbol']}", f"Направление: {side} {icon}",
@@ -161,7 +163,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     final_fact = ("Факт: завершённый AMD, закрытые M15/M5, сила валют и структурная цель подтверждают раннее локальное движение."
                   if local_early else
-                  "Факт: уведомление отправлено только после согласования исходного модуля, мультитаймфреймов, ZigZag, силы валют, DXY и структурной цели.")
+                  "Факт: исходный модуль, большинство H1/M15/M5, сила валют и структурная цель подтверждены; старший контекст, ZigZag и DXY учтены в режиме и качестве.")
     lines.extend([
         "", f"Начало маршрута H1: {movement_progress._price(master['symbol'], route['anchor'])}",
         f"Текущая цена: {movement_progress._price(master['symbol'], route['current'])}",

@@ -128,10 +128,13 @@ def analyze_symbol(
     stack = build_stack(symbol, by_tf, strength)
     if not stack:
         return None
-    side = _consensus(stack, ("D1", "H4", "H1"), 2)
+    senior_side = _consensus(stack, ("D1", "H4", "H1"), 2)
     ltf = _consensus(stack, ("H1", "M15", "M5"), 2)
-    if not side or ltf != side:
+    # Закрытые H1/M15/M5 определяют текущее торгуемое движение. Старшие ТФ
+    # определяют его режим: основной импульс, откат либо локальное движение.
+    if not ltf:
         return None
+    side = ltf
 
     gap = stack.strength_gap
     minimum_gap = float(getattr(cfg, "MASTER_STRENGTH_MIN_GAP", 0.08))
@@ -144,39 +147,52 @@ def analyze_symbol(
 
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
-    if h4_zz and h4_zz != side:
-        return None
-
     aligned, opposite = _module_evidence(symbol, side, alerts)
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
         return None
-    # Echo alone is a forecast, not a veto.  It blocks only together with a
-    # second, independent opposing module signal.
-    if (echo and echo["side"] != wanted_name
-            and echo["confidence"] >= echo_block and opposite):
-        return None
-
     now_utc = now_utc or datetime.now(timezone.utc)
     if _news_blocked(symbol, events or [], now_utc):
         return None
 
     usd_expected = _usd_expected(symbol, side)
-    if usd_expected and dxy_bias and dxy_bias != usd_expected:
+    higher_conflict = senior_side == -side or h4_zz == -side
+    dxy_conflict = bool(usd_expected and dxy_bias and dxy_bias != usd_expected)
+    forecast_conflict = bool(
+        echo and echo["side"] != wanted_name
+        and echo["confidence"] >= echo_block and opposite
+    )
+    # Старшие ТФ и H4 ZigZag — одна структурная группа. Одиночная группа
+    # задаёт откат/штраф; сигнал блокируют только две независимые группы.
+    conflict_groups = sum((higher_conflict, dxy_conflict, forecast_conflict))
+    if conflict_groups >= 2:
         return None
 
     senior_n = sum(stack.views[k].bias == side for k in ("D1", "H4", "H1") if k in stack.views)
     junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
-    quality = 56 + (12 if senior_n == 3 else 8) + (10 if junior_n == 3 else 7)
-    quality += 10 if h4_zz == side else 4
+    quality = 56 + (12 if senior_n == 3 else (8 if senior_n == 2 else 4))
+    quality += 10 if junior_n == 3 else 7
+    quality += 10 if h4_zz == side else (4 if not h4_zz else 0)
     quality += min(10, max(3, int(abs(gap) * 40)))
     quality += min(10, 7 + max(0, len(aligned) - 1) * 3)
     if echo and echo["side"] == wanted_name:
         quality += 3
-    if opposite:
-        quality -= 5
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
     quality = min(94, quality)
+    # Штрафы применяются после верхнего лимита, чтобы сильная базовая оценка
+    # не скрывала одиночное противоречие за значением 94/100.
+    if opposite:
+        quality -= 5
+    if dxy_conflict:
+        quality -= 4
+    if higher_conflict:
+        quality -= 4
+    elif not h4_zz:
+        quality -= 2
+    if senior_side == -side:
+        quality -= 2
+    if forecast_conflict:
+        quality -= 3
     if quality < int(getattr(cfg, "MASTER_MIN_QUALITY", 82)):
         return None
 
@@ -193,6 +209,8 @@ def analyze_symbol(
         "dxy_bias": dxy_bias,
         "echo": echo,
         "zigzag_h4": "LONG" if h4_zz > 0 else ("SHORT" if h4_zz < 0 else "RANGE"),
+        "senior_side": "LONG" if senior_side > 0 else ("SHORT" if senior_side < 0 else "RANGE"),
+        "conflict_groups": conflict_groups,
     }
 
 
@@ -291,10 +309,13 @@ def analyze_local_amd_market(
 def format_message(result: dict) -> str:
     side = result["side"]
     icon = "🟢" if side == "LONG" else "🔴"
-    dxy = "подтверждает" if result["dxy_bias"] else "нейтрален и не противоречит"
+    expected = _usd_expected(result["symbol"], 1 if side == "LONG" else -1)
+    dxy = ("нейтрален и не противоречит" if not result["dxy_bias"] else
+           ("подтверждает" if result["dxy_bias"] == expected else "не подтверждает локальное движение"))
     zz_h4 = result.get("zigzag_h4", side)
-    zz_line = ("• ZigZag H4 нейтрален" if zz_h4 == "RANGE"
-               else f"• ZigZag H4 подтверждает {side}")
+    zz_line = ("• ZigZag H4 нейтрален" if zz_h4 == "RANGE" else
+               (f"• ZigZag H4 подтверждает {side}" if zz_h4 == side
+                else f"• ZigZag H4 показывает старший {zz_h4}; текущий {side} учитывается как откат"))
     lines = [
         "━━━━━━━━━━━━━━━━━━",
         f"🧭 MASTER DIRECTION — {side}",
