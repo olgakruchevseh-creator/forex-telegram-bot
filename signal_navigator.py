@@ -113,6 +113,9 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     local_early = bool(master.get("local_early"))
     title = ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
              ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР"))
+    zz_h4 = master.get("zigzag_h4", side)
+    zz_line = ("• Старший тренд ещё не подтверждён полностью" if local_early else
+               ("• ZigZag H4: нейтрален" if zz_h4 == "RANGE" else f"• ZigZag H4: {side}"))
     lines = [
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {master['symbol']}", f"Направление: {side} {icon}",
@@ -123,7 +126,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         "Подтверждено:",
         f"• D1/H4/H1: {master['senior_n']} из 3",
         f"• H1/M15/M5: {master['junior_n']} из 3",
-        f"• ZigZag H4: {side}" if not local_early else "• Старший тренд ещё не подтверждён полностью",
+        zz_line,
         f"• Сила валют: {master['gap']:+.2f}",
     ]
     lines.extend(f"• {item}" for item in evidence)
@@ -166,9 +169,14 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
         sources = matching_sources(symbol, side, alerts)
         if not sources:
             continue
-        route = (movement_progress.analyze_for_side(symbol, market.get(symbol) or {}, strength, side)
+        pair_market = market.get(symbol) or {}
+        route = (movement_progress.analyze_for_side(symbol, pair_market, strength, side)
                  if result.get("local_early") else
-                 movement_progress.analyze_progress(symbol, market.get(symbol) or {}, strength))
+                 movement_progress.analyze_progress(symbol, pair_market, strength))
+        # If H1 still lags, use a route explicitly constrained to the already
+        # confirmed Master Direction.  Its M15 structure must still agree.
+        if not result.get("local_early") and (not route or route.get("side") != side):
+            route = movement_progress.analyze_for_side(symbol, pair_market, strength, side)
         if not route or route.get("side") != side:
             continue
         if result.get("local_early") and route.get("progress", 100) > int(

@@ -100,7 +100,7 @@ ECHO_MAX_ANALOGS = 50
 ECHO_MAX_DISTANCE = 2.6
 ECHO_MIN_CONFIDENCE = 0.60
 # Только уверенная противоположная проекция блокирует торговую карточку.
-ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.68
+ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.75
 # Next Pivot Projection — информационная зона возможного следующего экстремума.
 NEXT_PIVOT_ENABLED = True
 NEXT_PIVOT_MIN_SAMPLES = 8

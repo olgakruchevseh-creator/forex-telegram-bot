@@ -18,11 +18,9 @@ def _consensus(stack: PairStack, keys: tuple[str, ...], minimum: int) -> int:
     votes = [stack.views[k].bias for k in keys if k in stack.views]
     up = sum(v > 0 for v in votes)
     down = sum(v < 0 for v in votes)
-    if up and down:
-        return 0
-    if up >= minimum:
+    if up >= minimum and up > down:
         return 1
-    if down >= minimum:
+    if down >= minimum and down > up:
         return -1
     return 0
 
@@ -141,18 +139,21 @@ def analyze_symbol(
         return None
 
     echo = echo_projection.analyze(symbol, by_tf) if getattr(cfg, "ECHO_ENABLED", True) else None
-    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .68))*100))
+    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .75))*100))
     wanted_name = "LONG" if side > 0 else "SHORT"
-    if echo and echo["side"] != wanted_name and echo["confidence"] >= echo_block:
-        return None
 
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
-    if not h4_zz or h4_zz != side:
+    if h4_zz and h4_zz != side:
         return None
 
     aligned, opposite = _module_evidence(symbol, side, alerts)
-    if opposite or (getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned):
+    if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
+        return None
+    # Echo alone is a forecast, not a veto.  It blocks only together with a
+    # second, independent opposing module signal.
+    if (echo and echo["side"] != wanted_name
+            and echo["confidence"] >= echo_block and opposite):
         return None
 
     now_utc = now_utc or datetime.now(timezone.utc)
@@ -165,11 +166,14 @@ def analyze_symbol(
 
     senior_n = sum(stack.views[k].bias == side for k in ("D1", "H4", "H1") if k in stack.views)
     junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
-    quality = 56 + (12 if senior_n == 3 else 8) + (10 if junior_n == 3 else 7) + 10
+    quality = 56 + (12 if senior_n == 3 else 8) + (10 if junior_n == 3 else 7)
+    quality += 10 if h4_zz == side else 4
     quality += min(10, max(3, int(abs(gap) * 40)))
     quality += min(10, 7 + max(0, len(aligned) - 1) * 3)
     if echo and echo["side"] == wanted_name:
         quality += 3
+    if opposite:
+        quality -= 5
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
     quality = min(94, quality)
@@ -188,6 +192,7 @@ def analyze_symbol(
         "evidence": aligned,
         "dxy_bias": dxy_bias,
         "echo": echo,
+        "zigzag_h4": "LONG" if h4_zz > 0 else ("SHORT" if h4_zz < 0 else "RANGE"),
     }
 
 
@@ -230,9 +235,11 @@ def analyze_local_amd_symbol(
     if gap * side < minimum_gap:
         return None
     echo = echo_projection.analyze(symbol, by_tf) if getattr(cfg, "ECHO_ENABLED", True) else None
-    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .68))*100))
+    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .75))*100))
     side_name = "LONG" if side > 0 else "SHORT"
-    if echo and echo["side"] != side_name and echo["confidence"] >= echo_block:
+    _, opposite = _module_evidence(symbol, side, alerts)
+    if (echo and echo["side"] != side_name
+            and echo["confidence"] >= echo_block and opposite):
         return None
     # Старые кандидаты других модулей могут описывать предыдущий откат.
     # Для ранней ветки источником является только завершённая AMD-модель.
@@ -255,6 +262,7 @@ def analyze_local_amd_symbol(
         "dxy_bias": 0,
         "local_early": True,
         "echo": echo,
+        "zigzag_h4": "RANGE",
     }
 
 
@@ -284,6 +292,9 @@ def format_message(result: dict) -> str:
     side = result["side"]
     icon = "🟢" if side == "LONG" else "🔴"
     dxy = "подтверждает" if result["dxy_bias"] else "нейтрален и не противоречит"
+    zz_h4 = result.get("zigzag_h4", side)
+    zz_line = ("• ZigZag H4 нейтрален" if zz_h4 == "RANGE"
+               else f"• ZigZag H4 подтверждает {side}")
     lines = [
         "━━━━━━━━━━━━━━━━━━",
         f"🧭 MASTER DIRECTION — {side}",
@@ -297,7 +308,7 @@ def format_message(result: dict) -> str:
         "Подтверждения:",
         f"• D1/H4/H1: {result['senior_n']} из 3 подтверждают {side}",
         f"• H1/M15/M5: {result['junior_n']} из 3 подтверждают {side}",
-        f"• ZigZag H4 подтверждает {side}",
+        zz_line,
         f"• Разница силы валют: {result['gap']:+.2f}",
         f"• DXY: {dxy}",
     ]
