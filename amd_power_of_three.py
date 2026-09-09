@@ -75,17 +75,20 @@ def detect_amd(
     max_age = int(getattr(cfg, "AMD_MAX_MANIPULATION_AGE_BARS", 6))
     if len(h1) < range_n + max_age + 2 or min(len(h4), len(m15)) < 20:
         return None
-    current = h1[-1]
     av = atr(h1, 14)
     if av <= 0:
         return None
     sweep_buffer = av * float(getattr(cfg, "AMD_MIN_SWEEP_ATR", .08))
     break_buffer = av * float(getattr(cfg, "AMD_BREAK_BUFFER_ATR", .08))
-    body_need = av * float(getattr(cfg, "AMD_BREAK_BODY_ATR", .50))
+    h1_body_need = av * float(getattr(cfg, "AMD_BREAK_BODY_ATR", .50))
+    m15_body_need = av * float(getattr(cfg, "AMD_M15_BREAK_BODY_ATR", .22))
+    max_entry_age = int(getattr(cfg, "AMD_MAX_ENTRY_AGE_H1", 2))
+    max_extension = float(getattr(cfg, "AMD_MAX_ENTRY_EXTENSION_ATR", 1.20))
+    m15_fresh_bars = int(getattr(cfg, "AMD_M15_EXIT_MAX_AGE_BARS", 2))
 
     candidates = []
     first_j = max(range_n, len(h1) - 1 - max_age)
-    for j in range(first_j, len(h1) - 1):
+    for j in range(first_j, len(h1)):
         box = h1[j-range_n:j]
         valid, low, high, touches_low, touches_high, efficiency = _range_stats(box, av)
         if not valid:
@@ -97,15 +100,40 @@ def detect_amd(
             continue
         side = "LONG" if swept_low else "SHORT"
         wanted = 1 if side == "LONG" else -1
+
+        broken = high if side == "LONG" else low
+        sweep_price = manipulation.low if side == "LONG" else manipulation.high
+
+        # Предпочитаем первый свежий закрытый M15-выход после манипуляции. Это
+        # позволяет сообщить о модели до закрытия следующего H1. Закрытая H1
+        # остаётся запасным подтверждением при недоступных/запаздывающих M15.
+        recent_m15 = m15[-max(1, m15_fresh_bars):]
+        after_sweep = [c for c in recent_m15 if c.dt > manipulation.dt]
         if side == "LONG":
-            distributed = current.close > high + break_buffer and current.close > current.open
-            sweep_price = manipulation.low
-            broken = high
+            m15_exits = [c for c in after_sweep
+                         if c.close > high + break_buffer and c.close > c.open
+                         and abs(c.close-c.open) >= m15_body_need]
         else:
-            distributed = current.close < low - break_buffer and current.close < current.open
-            sweep_price = manipulation.high
-            broken = low
-        if not distributed or abs(current.close-current.open) < body_need:
+            m15_exits = [c for c in after_sweep
+                         if c.close < low - break_buffer and c.close < c.open
+                         and abs(c.close-c.open) >= m15_body_need]
+
+        current_h1 = h1[-1]
+        h1_is_after = j < len(h1) - 1
+        if side == "LONG":
+            h1_exit = (h1_is_after and current_h1.close > high + break_buffer
+                       and current_h1.close > current_h1.open
+                       and abs(current_h1.close-current_h1.open) >= h1_body_need)
+        else:
+            h1_exit = (h1_is_after and current_h1.close < low - break_buffer
+                       and current_h1.close < current_h1.open
+                       and abs(current_h1.close-current_h1.open) >= h1_body_need)
+
+        if m15_exits:
+            exit_bar, exit_tf = m15_exits[0], "M15"
+        elif h1_exit:
+            exit_bar, exit_tf = current_h1, "H1"
+        else:
             continue
         # M15 подтверждает выход; H4 может быть нейтральным, но не противоположным.
         if _bias("M15", m15) != wanted or _bias("H4", h4) == -wanted:
@@ -115,20 +143,25 @@ def detect_amd(
             continue
         quality = 74
         quality += min(8, touches_low + touches_high)
-        quality += min(6, int(abs(current.close-current.open) / av * 3))
+        quality += min(6, int(abs(exit_bar.close-exit_bar.open) / av * 3))
         quality += min(5, int(abs(gap) * 30))
         if _bias("H4", h4) == wanted:
             quality += 4
         quality = min(95, quality)
+        age_h1 = max(0, len(h1) - 1 - j)
+        extension_atr = abs(exit_bar.close - broken) / av
+        late = age_h1 > max_entry_age or extension_atr > max_extension
         candidates.append({
             "key": f"{symbol}|{side}|{manipulation.dt}|{low:.6f}|{high:.6f}",
             "symbol": symbol, "side": side, "low": low, "high": high,
             "manipulation": sweep_price, "broken": broken,
-            "close": current.close, "manipulation_dt": manipulation.dt,
+            "close": exit_bar.close, "exit_dt": exit_bar.dt, "exit_tf": exit_tf,
+            "manipulation_dt": manipulation.dt,
             "touches_low": touches_low, "touches_high": touches_high,
             "gap": gap, "quality": quality, "confidence": min(91, quality - 4),
+            "age_h1": age_h1, "extension_atr": extension_atr, "late": late,
         })
-    return max(candidates, key=lambda x: (x["quality"], x["manipulation_dt"]), default=None)
+    return max(candidates, key=lambda x: (not x["late"], x["quality"], x["manipulation_dt"]), default=None)
 
 
 def _price(symbol: str, value: float) -> str:
@@ -145,11 +178,11 @@ def format_message(event: dict) -> str:
         f"📦 Накопление: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"🧹 Манипуляция: снятие {swept} границы до {_price(event['symbol'], event['manipulation'])}",
         f"⚡ Подтверждённый выход: за пределы {opposite} границы {_price(event['symbol'], event['broken'])}",
-        f"💵 Цена закрытия H1: {_price(event['symbol'], event['close'])}",
-        "Согласование: H1 · M15; H4 не противоречит",
+        f"💵 Цена подтверждения {event.get('exit_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
+        "Согласование: закрытая M15/H1; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
-        f"✅ Факт: после накопления цена сняла ликвидность за {swept} границей, вернулась и закрытой H1-свечой подтвердила распределение {event['side']}.",
+        f"✅ Факт: после накопления цена сняла ликвидность за {swept} границей, вернулась и закрытой {event.get('exit_tf', 'H1')}-свечой подтвердила ранний выход {event['side']}.",
     ])
 
 
@@ -166,6 +199,9 @@ def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str
     # Полная модель имеет высший приоритет: накопление -> sweep -> выход.
     completed = detect_amd(symbol, h1, h4, m15, strength)
     if completed:
+        if completed.get("late"):
+            return (f"ПОЗДНЯЯ СТАДИЯ {completed['side']} · ОСНОВНАЯ ЧАСТЬ ИМПУЛЬСА УЖЕ ПРОЙДЕНА · "
+                    "НОВЫЙ ВХОД НЕ ПОДТВЕРЖДЁН")
         return f"ИМПУЛЬСНОЕ РАСПРЕДЕЛЕНИЕ {completed['side']} ПОСЛЕ МАНИПУЛЯЦИИ"
 
     av = atr(h1, 14)
@@ -213,7 +249,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             h4 = closed_candles(by_tf.get("H4") or [], TF_MINUTES["H4"])
             m15 = closed_candles(by_tf.get("M15") or [], TF_MINUTES["M15"])
             event = detect_amd(symbol, h1, h4, m15, strength)
-            if not event or event["key"] in sent:
+            # Запоздалый AMD остаётся информационным статусом брифинга и не
+            # передаётся Навигатору как новая торговая возможность.
+            if not event or event.get("late") or event["key"] in sent:
                 continue
             text = format_message(event)
             digest = hashlib.sha256(text.encode()).hexdigest()[:20]
