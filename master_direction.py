@@ -32,7 +32,7 @@ def _pair(text: str) -> str:
 
 
 def _side(text: str) -> int:
-    match = re.search(r"Направление(?: реакции)?:\s*(LONG|SHORT)", text or "")
+    match = re.search(r"(?:Основное\s+)?направление(?: реакции)?:\s*(LONG|SHORT)", text or "", re.I)
     if not match:
         match = re.search(r"(?:^|\n)[🟢🔴]?\s*(?:MASTER DIRECTION\s*[—-]\s*)?(LONG|SHORT)\b", text or "")
     if not match:

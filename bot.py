@@ -713,6 +713,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Все модули работают как внутренние датчики. Наружу проходит только
         # единая карточка после Master Direction и расчёта маршрута Навигатора.
         raw_alerts = [text for _priority, text in module_alerts]
+        # События, не подтверждённые в эту H1, не теряются: они остаются
+        # внутренними кандидатами ограниченное число часов.
+        candidate_alerts = signal_navigator.remember_candidates(raw_alerts, closed_dt)
         navigator_sources: dict[str, list[str]] = {}
         confirmed_alerts: list[tuple[int, str]] = []
         if getattr(cfg, "MASTER_DIRECTION_ENABLED", True):
@@ -732,19 +735,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             master_results = master_direction.analyze_market(
                 market,
                 strength,
-                raw_alerts,
+                candidate_alerts,
                 dxy_bias=master_dxy_bias,
                 events=master_events,
                 now_utc=datetime.now(timezone.utc),
             )
             for text, sources in signal_navigator.build_confirmed(
-                master_results, market, strength, raw_alerts
+                master_results, market, strength, candidate_alerts
             ):
                 pair = _alert_pair(text)
                 side = _direct_signal_side(text)
                 if pair and side and cooldown_ok(state, pair, side):
                     confirmed_alerts.append((-1, text))
                     navigator_sources[text] = sources
+                    signal_navigator.register_card(text, sources)
 
         # Исходные паттерны/уровни/AMD/ZigZag отдельно в Telegram не уходят.
         module_alerts = confirmed_alerts
@@ -777,6 +781,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         amd_power_of_three.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного AMD")
+            signal_navigator.mark_delivered(text)
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)

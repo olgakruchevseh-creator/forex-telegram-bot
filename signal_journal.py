@@ -61,6 +61,9 @@ def _number(text: str, label: str) -> int | None:
 def _source(text: str) -> str:
     upper = (text or "").upper()
     if "ПОДТВЕРЖДЁННЫЙ НАВИГАТОР" in upper:
+        match = re.search(r"Источники модулей:\s*([^\n]+)", text or "", re.I)
+        if match:
+            return match.group(1).split("·", 1)[0].strip()
         return "Confirmed Navigator"
     names = (
         ("MASTER DIRECTION", "Master Direction"), ("ПАТТЕРН", "Patterns"),

@@ -156,9 +156,8 @@ MOVEMENT_PULLBACK_MAX_OPPOSITE_STRENGTH = 0.03
 MOVEMENT_PROGRESS_MIN_TARGET_ATR = 0.8
 MOVEMENT_PROGRESS_MIN_REPORT_PCT = 15
 MOVEMENT_PROGRESS_MIN_CHANGE_PCT = 8
-# Все модульные события остаются внутренними; пользователю отправляется только
-# согласованный Master Direction + маршрут Навигатора.
-CONFIRMED_NAVIGATOR_ONLY = True
+# Неотправленный модульный сигнал ждёт подтверждения максимум 4 закрытых H1.
+SIGNAL_CANDIDATE_TTL_HOURS = 4
 LIQUIDITY_SWEEP_ENABLED = True
 LIQUIDITY_MIN_SWEEP_ATR = 0.08
 LIQUIDITY_EQUAL_TOLERANCE_ATR = 0.20
