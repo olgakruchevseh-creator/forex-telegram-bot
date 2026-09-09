@@ -99,6 +99,28 @@ def matching_sources(symbol: str, side: str, alerts: list[str]) -> list[str]:
     return [text for text in alerts if _pair(text) == symbol and _side(text) == side]
 
 
+def _scale_route(route: dict) -> dict:
+    """Проценты единой шкалы: anchor=0%, последняя доступная TR=100%."""
+    scaled = dict(route)
+    targets = [dict(item) for item in (route.get("targets") or [])]
+    if not targets:
+        targets = [{"price": route["target"], "tf": route["target_tf"]}]
+    anchor = float(route["anchor"])
+    current = float(route["current"])
+    final = float(targets[-1]["price"])
+    total = abs(final - anchor)
+    if total <= 0:
+        return scaled
+    progress = max(0, min(100, int(round(abs(current - anchor) / total * 100))))
+    for item in targets:
+        item["route_pct"] = max(0, min(100, int(round(abs(float(item["price"]) - anchor) / total * 100))))
+    scaled["targets"] = targets
+    scaled["progress"] = progress
+    scaled["remaining"] = max(0, int(targets[0]["route_pct"]) - progress)
+    scaled["final_target_name"] = f"TR{len(targets)}"
+    return scaled
+
+
 def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bool = False) -> str:
     side = master["side"]
     icon = "🟢" if side == "LONG" else "🔴"
@@ -146,12 +168,12 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         "", "🎯 Цели маршрута:",
     ])
     lines.extend(
-        f"• TR{index} ({item['tf']}): {movement_progress._price(master['symbol'], item['price'])}"
+        f"• TR{index} ({item['tf']}): {movement_progress._price(master['symbol'], item['price'])} · {item.get('route_pct', 100)}% маршрута"
         for index, item in enumerate(targets, 1)
     )
     lines.extend([
-        f"Пройдено расчётного пути: {route['progress']}%",
-        f"Осталось до TR1: {route['remaining']}%", "",
+        f"Пройдено общего пути до {route.get('final_target_name', 'TR1')}: {route['progress']}%",
+        f"Осталось до TR1: {route['remaining']}% общего пути", "",
         f"Оценка: {icon} направление {side} подтверждено по закрытой H1-свече.",
         final_fact,
         "Процент показывает расстояние до цели H4/D1, а не гарантирует продолжение движения.",
@@ -179,8 +201,9 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
             route = movement_progress.analyze_for_side(symbol, pair_market, strength, side)
         if not route or route.get("side") != side:
             continue
-        if result.get("local_early") and route.get("progress", 100) > int(
-                getattr(cfg, "LOCAL_AMD_MAX_PROGRESS_PCT", 45)):
+        route = _scale_route(route)
+        max_initial = int(getattr(cfg, "SIGNAL_INITIAL_MAX_PROGRESS_PCT", 35))
+        if route.get("progress", 100) > max_initial:
             continue
         if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
             result = dict(result)
@@ -244,6 +267,13 @@ def _float_line(text: str, label: str) -> float:
     return float(match.group(0)) if match else 0.0
 
 
+def _route_progress_from_card(text: str) -> int:
+    match = re.search(r"^Пройдено общего пути до TR[123]:\s*(\d+)%", text or "", re.M)
+    if match:
+        return int(match.group(1))
+    return int(_float_line(text, "Пройдено расчётного пути"))
+
+
 def _scenario_from_card(text: str) -> dict:
     symbol, side = _pair(text), _side(text)
     target_matches = re.findall(r"^•\s*TR([123])\s*\((H4|D1)\):\s*([0-9.]+)", text or "", re.M)
@@ -262,7 +292,7 @@ def _scenario_from_card(text: str) -> dict:
         "target": targets[0]["price"] if targets else 0.0,
         "target_tf": targets[0]["tf"] if targets else "", "targets": targets,
         "sources": sources, "start_h1": "", "last_h1": "",
-        "last_progress": int(_float_line(text, "Пройдено расчётного пути")),
+        "last_progress": _route_progress_from_card(text),
         "reached_count": 0, "near_for": 0,
         "near_sent": False, "status": "ACTIVE", "created_at": time.time(),
     }
@@ -365,7 +395,7 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         if reached_before >= len(targets):
             continue
         anchor = float(item.get("anchor") or 0)
-        target = float(targets[reached_before].get("price") or 0)
+        target = float(targets[-1].get("price") or 0)
         if not anchor or not target or anchor == target:
             continue
         direction = 1 if item["side"] == "LONG" else -1
@@ -392,7 +422,9 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                 action = "TARGET_RISK" if problems else "TARGET_CLEAR"
         else:
             action = "CANCEL" if (invalid or _opposite_confirmed(item["side"], by_tf)) else ""
-        if not action and progress >= int(getattr(cfg, "SIGNAL_NEAR_TARGET_PCT", 85)) and int(item.get("near_for") or 0) != reached_before + 1:
+        if (getattr(cfg, "SIGNAL_NEAR_TARGET_ALERTS", False) and not action
+                and progress >= int(getattr(cfg, "SIGNAL_NEAR_TARGET_PCT", 85))
+                and int(item.get("near_for") or 0) != reached_before + 1):
             action = "NEAR"
             next_target = targets[reached_before]
         if not action:

@@ -112,6 +112,12 @@ NEXT_PIVOT_NEAR_ATR = 0.30
 LOCAL_AMD_EARLY_ENABLED = True
 LOCAL_AMD_MIN_STRENGTH_GAP = 0.08
 LOCAL_AMD_MAX_PROGRESS_PCT = 45
+# Новая карточка Навигатора допустима только в ранней части всего маршрута
+# от anchor до последней доступной структурной цели TR3.
+SIGNAL_INITIAL_MAX_PROGRESS_PCT = 35
+# Не присылать предположительные предупреждения о близости к цели:
+# только фактическое достижение TR1/TR2/TR3 или подтверждённая отмена.
+SIGNAL_NEAR_TARGET_ALERTS = False
 MASTER_NEWS_BLOCK_BEFORE_MINUTES = 60
 MASTER_NEWS_BLOCK_AFTER_MINUTES = 30
 
