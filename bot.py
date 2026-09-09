@@ -748,7 +748,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if pair and side and cooldown_ok(state, pair, side):
                     confirmed_alerts.append((-1, text))
                     navigator_sources[text] = sources
-                    signal_navigator.register_card(text, sources)
+                    signal_navigator.register_card(text, sources, closed_dt)
 
         # Исходные паттерны/уровни/AMD/ZigZag отдельно в Telegram не уходят.
         module_alerts = confirmed_alerts
@@ -799,6 +799,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Отдельный неподтверждённый Навигатор отключён: его расчёт уже включён
         # в единую карточку выше.
+
+        # Активные сценарии сопровождаются отдельно от лимита новых сигналов:
+        # только близость к цели, завершение либо подтверждённая отмена.
+        try:
+            for text in signal_navigator.process_lifecycle(market):
+                await _send_parts(context.application, int(chat_id), text)
+                signal_navigator.mark_lifecycle_delivered(text)
+        except Exception:
+            log.exception("Сопровождение активного сценария Навигатора")
 
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
