@@ -11,6 +11,7 @@ from pathlib import Path
 import config as cfg
 import movement_progress
 import zigzag_scanner
+import next_pivot_projection
 from analysis import analyze_tf
 
 
@@ -107,6 +108,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     }
     evidence = list(master.get("evidence") or [])[:3]
     echo = master.get("echo")
+    next_pivot = master.get("next_pivot")
     source_names = list(dict.fromkeys(_source_name(text) for text in sources))
     local_early = bool(master.get("local_early"))
     title = ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
@@ -129,6 +131,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         horizons = echo.get("horizons") or {}
         forecast = " · ".join(f"{h}ч {horizons.get(str(h), 0)}%" for h in (1, 2, 4, 8))
         lines.append(f"• 🔭 Echo: {echo['side']} {echo['confidence']}% · {forecast} · аналогов {echo['sample']}")
+    if next_pivot:
+        lines.append(f"• 🎯 Следующий pivot: {next_pivot_projection.compact_line(next_pivot)}")
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     final_fact = ("Факт: завершённый AMD, закрытые M15/M5, сила валют и структурная цель подтверждают раннее локальное движение."
                   if local_early else
@@ -170,6 +174,10 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
         if result.get("local_early") and route.get("progress", 100) > int(
                 getattr(cfg, "LOCAL_AMD_MAX_PROGRESS_PCT", 45)):
             continue
+        if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
+            result = dict(result)
+            result["next_pivot"] = next_pivot_projection.analyze_symbol(
+                symbol, market.get(symbol) or {})
         previous = active.get(symbol) or {}
         reversal = bool(previous and previous.get("side") != side)
         output.append((format_confirmed(result, route, sources, reversal=reversal), sources))

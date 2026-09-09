@@ -46,6 +46,7 @@ import market_schedule
 import master_direction
 import signal_navigator
 import signal_journal
+import next_pivot_projection
 try:
     import patterns
 except ImportError:
@@ -820,6 +821,16 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 signal_navigator.mark_lifecycle_delivered(text)
         except Exception:
             log.exception("Сопровождение активного сценария Навигатора")
+
+        # Информационное предупреждение о вероятной зоне следующего pivot.
+        # Оно не является новым LONG/SHORT и не расходует торговый лимит H1.
+        if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
+            try:
+                for text in next_pivot_projection.process_market(market):
+                    await _send_parts(context.application, int(chat_id), text)
+                    next_pivot_projection.mark_delivered(text)
+            except Exception:
+                log.exception("Проекция следующего pivot")
 
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
