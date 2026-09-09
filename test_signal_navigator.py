@@ -33,6 +33,26 @@ class SignalNavigatorTests(unittest.TestCase):
         self.assertIn("НАВИГАТОР СОПРОВОЖДАЕТ СИГНАЛ", result[0])
         self.assertIn("TR1 (H1 ATR)", result[0])
 
+    def test_companion_reports_conflict_without_false_h1_confirmation(self):
+        accepted = {**master("LONG"), "source_accepted": True,
+                    "gap": -.15, "senior_n": 2, "junior_n": 1,
+                    "zigzag_h4": "LONG",
+                    "tf_biases": {"D1": 1, "H4": 1, "H1": -1, "M15": 0, "M5": 0}}
+        text = signal_navigator.format_confirmed(
+            accepted, signal_navigator._scale_route(route()), [source()])
+        self.assertIn("ЕСТЬ ВСТРЕЧНЫЕ ФАКТОРЫ", text)
+        self.assertIn("Сила относительно LONG: -0.15", text)
+        self.assertIn("против направления", text)
+        self.assertIn("H1: коррекция против маршрута LONG", text)
+        self.assertNotIn("направление LONG подтверждено по закрытой H1", text)
+
+    def test_route_percent_labels_are_unambiguous(self):
+        text = signal_navigator.format_confirmed(
+            master(), signal_navigator._scale_route(route()), [source()])
+        self.assertIn("на 100% общего маршрута", text)
+        self.assertIn("Общий маршрут до TR1 пройден", text)
+        self.assertIn("Путь от старта до TR1 пройден", text)
+
     def test_builds_one_combined_card_when_everything_agrees(self):
         with patch.object(signal_navigator.movement_progress, "analyze_progress", return_value=route()):
             result = signal_navigator.build_confirmed([master()], {"EUR/USD": {}}, {}, [source()])
@@ -42,7 +62,7 @@ class SignalNavigatorTests(unittest.TestCase):
         self.assertIn("Направление: LONG 🟢", text)
         self.assertIn("Источники модулей: Patterns", text)
         self.assertIn("Качество: 90/100", text)
-        self.assertIn("Пройдено общего пути до TR1: 30%", text)
+        self.assertIn("Общий маршрут до TR1 пройден: 30%", text)
         self.assertEqual([source()], sources)
 
     def test_blocks_when_route_disagrees(self):

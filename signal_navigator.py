@@ -231,7 +231,7 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         "senior_n": sum(views[tf] == direction for tf in ("D1", "H4", "H1")),
         "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
         "zigzag_h4": zz_text, "evidence": ["исходный модуль подтвердил событие"],
-        "source_accepted": True,
+        "source_accepted": True, "tf_biases": views,
     }
     return format_confirmed(master, _scale_route(route), [source_text]), [source_text]
 
@@ -249,6 +249,35 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     source_names = list(dict.fromkeys(_source_name(text) for text in sources))
     local_early = bool(master.get("local_early"))
     source_accepted = bool(master.get("source_accepted"))
+    direction = 1 if side == "LONG" else -1
+    directed_gap = float(master.get("gap") or 0) * direction
+    tf_biases = master.get("tf_biases") or {}
+    h1_bias = int(tf_biases.get("H1") or 0)
+    zz_value = master.get("zigzag_h4")
+    zz_opposite = zz_value not in (None, "", "RANGE", side)
+    if directed_gap >= .03:
+        strength_line = f"• Сила относительно {side}: {directed_gap:+.2f} · 🟢 поддерживает"
+    elif directed_gap <= -.03:
+        strength_line = f"• Сила относительно {side}: {directed_gap:+.2f} · 🔴 против направления"
+    else:
+        strength_line = f"• Сила относительно {side}: {directed_gap:+.2f} · 🟡 почти равная"
+    navigator_status = ""
+    assessment = f"{icon} направление {side} подтверждено по закрытой H1-свече."
+    if source_accepted:
+        conflicts = h1_bias == -direction or directed_gap <= -.03 or zz_opposite
+        fully_confirmed = (int(master.get("senior_n") or 0) >= 2
+                           and int(master.get("junior_n") or 0) >= 2
+                           and h1_bias == direction and directed_gap >= .03
+                           and not zz_opposite)
+        if fully_confirmed:
+            navigator_status = "✅ ПОЛНОСТЬЮ ПОДТВЕРЖДЁН"
+            assessment = f"✅ направление {side} подтверждено закрытыми таймфреймами и принято на сопровождение."
+        elif conflicts:
+            navigator_status = "⚠️ ПРИНЯТ НА СОПРОВОЖДЕНИЕ · ЕСТЬ ВСТРЕЧНЫЕ ФАКТОРЫ"
+            assessment = f"⚠️ сигнал {side} принят на сопровождение, но подтверждение пока частичное."
+        else:
+            navigator_status = "🟡 ПРИНЯТ НА СОПРОВОЖДЕНИЕ · ПОДТВЕРЖДЕНИЕ ЧАСТИЧНОЕ"
+            assessment = f"🟡 сигнал {side} принят на сопровождение; часть таймфреймов пока нейтральна."
     title = ("🧭 НАВИГАТОР СОПРОВОЖДАЕТ СИГНАЛ" if source_accepted else
              ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
               ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР")))
@@ -263,13 +292,18 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"Режим: {mode_names.get(route['mode'], route['mode'])}",
         f"💪 Качество: {master['quality']}/100",
         f"📈 Вероятность: {master['confidence']}%", "",
+        *([f"Статус Навигатора: {navigator_status}", ""] if navigator_status else []),
         f"Источники модулей: {' · '.join(source_names)}",
         "Подтверждено:",
         f"• D1/H4/H1: {master['senior_n']} из 3",
         f"• H1/M15/M5: {master['junior_n']} из 3",
         zz_line,
-        f"• Сила валют: {master['gap']:+.2f}",
+        strength_line,
     ]
+    if source_accepted and h1_bias == -direction:
+        lines.append(f"• H1: коррекция против маршрута {side}")
+    elif source_accepted and h1_bias == 0:
+        lines.append("• H1: нейтральное состояние")
     lines.extend(f"• {item}" for item in evidence)
     if echo:
         horizons = echo.get("horizons") or {}
@@ -289,14 +323,14 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         "", "🎯 Цели маршрута:",
     ])
     lines.extend(
-        f"• TR{index} ({item['tf']}): {movement_progress._price(master['symbol'], item['price'])} · {item.get('route_pct', 100)}% маршрута"
+        f"• TR{index} ({item['tf']}): {movement_progress._price(master['symbol'], item['price'])} · на {item.get('route_pct', 100)}% общего маршрута"
         for index, item in enumerate(targets, 1)
     )
     lines.extend([
-        f"Пройдено общего пути до {route.get('final_target_name', 'TR1')}: {route['progress']}%",
-        f"Пройдено пути до TR1: {route.get('tr1_progress', route['progress'])}%",
+        f"Общий маршрут до {route.get('final_target_name', 'TR1')} пройден: {route['progress']}%",
+        f"Путь от старта до TR1 пройден: {route.get('tr1_progress', route['progress'])}%",
         f"Осталось до TR1: {route['remaining']}%", "",
-        f"Оценка: {icon} направление {side} подтверждено по закрытой H1-свече.",
+        f"Оценка: {assessment}",
         final_fact,
         "Процент показывает расстояние до структурной цели H4/D1 либо расчётной цели H1 ATR, а не гарантирует продолжение движения.",
         "", "━━━━━━━━━━━━━━━━━━",
