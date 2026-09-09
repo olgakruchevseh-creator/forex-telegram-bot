@@ -178,6 +178,25 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(len(blocked), 1)
         self.assertIn("AUD/USD", blocked[0])
 
+    def test_high_confidence_candidate_beats_high_priority_weaker_candidate(self):
+        items = [
+            (0, "💱 Пара: EUR/USD\nНаправление: LONG\nКачество: 76/100\nВероятность: 75%"),
+            (3, "💱 Пара: GBP/USD\nНаправление: LONG\nКачество: 92/100\nВероятность: 90%"),
+            (1, "💱 Пара: USD/JPY\nНаправление: SHORT\nКачество: 85/100\nВероятность: 84%"),
+        ]
+        chosen = bot.select_trade_alerts(items, limit=2)
+        self.assertIn("GBP/USD", chosen[0])
+        self.assertIn("USD/JPY", chosen[1])
+        self.assertFalse(any("EUR/USD" in text for text in chosen))
+
+    def test_best_signal_wins_when_same_pair_has_two_modules(self):
+        items = [
+            (0, "💱 Пара: EUR/USD\nНаправление: LONG\nКачество: 76/100\nВероятность: 75%"),
+            (3, "💱 Пара: EUR/USD\nНаправление: LONG\nКачество: 93/100\nВероятность: 91%"),
+        ]
+        chosen = bot.select_trade_alerts(items, limit=1)
+        self.assertIn("Вероятность: 91%", chosen[0])
+
     def test_navigator_replaces_only_matching_source_and_keeps_other_modules(self):
         raw = [
             (1, "🧩 ПАТТЕРН\n💱 Пара: EUR/USD\nНаправление: LONG"),

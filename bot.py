@@ -476,9 +476,29 @@ def signal_allowed_by_h4_zigzag(symbol: str, by_tf: dict, side: str) -> bool:
     return not h4_side or h4_side == wanted
 
 
+def _alert_metric(text: str, label: str) -> int | None:
+    match = re.search(rf"(?:^|\n)[^\n]*{re.escape(label)}:\s*(\d{{1,3}})(?:/100|%)?", text or "", re.I)
+    return max(0, min(100, int(match.group(1)))) if match else None
+
+
+def _alert_rank(item: tuple[int, str]) -> tuple[float, int, int]:
+    """Качество/вероятность главнее прежнего фиксированного порядка модулей."""
+    priority, text = item
+    quality = _alert_metric(text, "Качество")
+    probability = _alert_metric(text, "Вероятность")
+    # У ZigZag и некоторых структурных событий числовой оценки нет. Для них
+    # сохраняется спокойный базовый балл и прежний приоритет как tie-breaker.
+    default = {0: 78, 1: 75, 2: 70, 3: 68}.get(priority, 70)
+    quality = quality if quality is not None else default
+    probability = probability if probability is not None else quality
+    combined = probability * .65 + quality * .35
+    # sorted() идёт по возрастанию: отрицательные значения ставят лучший факт первым.
+    return (-combined, priority, -probability)
+
+
 def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pairs=None) -> list[str]:
-    """One alert per pair, at most two strongest alerts per market scan."""
-    ranked = sorted(items, key=lambda item: item[0])
+    """Лучшие числовые сигналы, максимум один на пару в часовом бюджете."""
+    ranked = sorted(items, key=_alert_rank)
     chosen, pairs = [], set(blocked_pairs or [])
     for _priority, text in ranked:
         pair = _alert_pair(text)
