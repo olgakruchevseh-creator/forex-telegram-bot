@@ -520,20 +520,24 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 fresh_s = currency_strength(h1_series(fresh_m), cfg.STRENGTH_LOOKBACK)
                 fresh_r = rank_currencies(fresh_s)
                 fresh_dxy = briefing.collect_extras(api_key, market=fresh_m)
-                state["news_warned"][event.event_id] = time.time()
-                save_state(state)
                 await _send_parts(
                     context.application,
                     int(chat_id),
                     briefing.format_news_warning(event, fresh_s, fresh_r, fresh_dxy),
                 )
+                # Фиксируем предупреждение только после подтверждённой отправки.
+                # При ошибке Telegram следующий скан повторит попытку.
+                state["news_warned"][event.event_id] = time.time()
+                save_state(state)
             if newsmod.has_actual(event) and event.event_id not in state["news_actual_sent"]:
                 verdict = newsmod.interpret_print(event)
-                state["news_actual_sent"][event.event_id] = time.time()
-                save_state(state)
                 msg = briefing.format_actual_update(event, verdict, dxy, strength.get("USD", 0.0))
                 if msg:
                     await _send_parts(context.application, int(chat_id), msg)
+                # Пустое обновление считается обработанным; непустое — только
+                # после успешного подтверждения доставки Telegram.
+                state["news_actual_sent"][event.event_id] = time.time()
+                save_state(state)
     except Exception:
         log.exception("Ошибка брифинга")
 

@@ -79,7 +79,7 @@ LTF_MIN_AGREE = 2
 SIGNAL_COOLDOWN_HOURS = 6
 # Единый бюджет для всех торговых модулей после одной закрытой H1.
 # Часовой брифинг и новостные сообщения в этот лимит не входят.
-MAX_MODULE_ALERTS_PER_H1 = 2
+MAX_MODULE_ALERTS_PER_H1 = 3
 SIGNAL_JOURNAL_ENABLED = True
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
