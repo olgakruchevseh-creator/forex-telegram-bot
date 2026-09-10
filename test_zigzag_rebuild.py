@@ -16,6 +16,38 @@ def wave_bars(count=120):
 
 
 class ZigZagRebuildTests(unittest.TestCase):
+    def test_three_strong_closed_m15_candles_form_early_direction(self):
+        bars = wave_bars(40)
+        bars[-3:] = [
+            Candle("a", 1.106, 1.1062, 1.1048, 1.1050),
+            Candle("b", 1.105, 1.1052, 1.1038, 1.1040),
+            Candle("c", 1.104, 1.1042, 1.1028, 1.1030),
+        ]
+        side, start = zigzag_scanner._candle_run(bars, 3, .10)
+        self.assertEqual(-1, side)
+        self.assertEqual("a", start)
+
+    def test_one_opposite_candle_does_not_form_early_direction(self):
+        bars = wave_bars(40)
+        bars[-3:] = [
+            Candle("a", 1.106, 1.1062, 1.1048, 1.1050),
+            Candle("b", 1.105, 1.1062, 1.1048, 1.1060),
+            Candle("c", 1.106, 1.1062, 1.1048, 1.1050),
+        ]
+        self.assertEqual((0, ""), zigzag_scanner._candle_run(bars, 3))
+
+    def test_continuing_run_keeps_original_start(self):
+        bars = wave_bars(36)
+        bars[-4:] = [
+            Candle("start", 1.107, 1.1072, 1.1058, 1.1060),
+            Candle("b", 1.106, 1.1062, 1.1048, 1.1050),
+            Candle("c", 1.105, 1.1052, 1.1038, 1.1040),
+            Candle("d", 1.104, 1.1042, 1.1028, 1.1030),
+        ]
+        side, start = zigzag_scanner._candle_run(bars, 3, .10)
+        self.assertEqual(-1, side)
+        self.assertEqual("start", start)
+
     def test_adaptive_zigzag_builds_completed_swings(self):
         swings = zigzag(wave_bars(), .35, 3)
         self.assertGreaterEqual(len(swings), 4)

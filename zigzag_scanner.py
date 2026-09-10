@@ -11,7 +11,7 @@ import config as cfg
 
 log = logging.getLogger("fxbot.zigzag")
 TF_MINUTES = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
-SCAN_TFS = ("D1", "H4", "H1", "M15")
+SCAN_TFS = ("D1", "H4", "H1", "M15", "M5")
 
 
 def _path() -> Path:
@@ -96,7 +96,33 @@ def _sequence_side(sequence: str) -> int:
     return 0
 
 
-def analyze_symbol(symbol: str, by_tf: dict) -> dict:
+def _candle_run(bars: list, need: int, min_body_atr: float = 0.0) -> tuple[int, str]:
+    """Направление непрерывной серии закрытых свечей и время её начала."""
+    if len(bars) < need:
+        return 0, ""
+    recent = bars[-need:]
+    sides = [1 if b.close > b.open else (-1 if b.close < b.open else 0) for b in recent]
+    if not sides[0] or any(side != sides[0] for side in sides):
+        return 0, ""
+    if min_body_atr > 0:
+        from analysis import atr
+        av = atr(bars, 14)
+        if av <= 0 or sum(abs(b.close-b.open) for b in recent) < av * min_body_atr:
+            return 0, ""
+    # Идентификатор должен оставаться одним и тем же, пока серия продолжается.
+    # Иначе скользящее окно из последних `need` свечей начиналось бы заново на
+    # каждой M15 и создавало повторное уведомление об одном движении.
+    run_start = len(bars) - need
+    while run_start > 0:
+        previous = bars[run_start - 1]
+        previous_side = 1 if previous.close > previous.open else (-1 if previous.close < previous.open else 0)
+        if previous_side != sides[0]:
+            break
+        run_start -= 1
+    return sides[0], bars[run_start].dt
+
+
+def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None = None) -> dict:
     # Lazy import avoids a circular import: analysis uses the same primitives.
     from analysis import analyze_tf, closed_candles, zigzag
 
@@ -118,18 +144,41 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         view = views.get(tf)
         return _side(view.structure, view.phase) if view else 0
 
-    d1, h4, h1, m15 = (direction("D1"), direction("H4"),
-                        direction("H1"), direction("M15"))
+    d1, h4, h1, m15, m5 = (direction("D1"), direction("H4"),
+                            direction("H1"), direction("M15"), direction("M5"))
     main = d1 if d1 and d1 == h4 else h4 if h4 else d1
-    event, side = "", 0
+    event, side, main_side, early_key = "", 0, main, ""
     # No Repaint: решение строится только по уже закрытым свечам и
     # подтверждённым pivot-точкам. M15 подтверждает H1 либо остаётся RANGE.
     if main and h1 and h1 != main and (not m15 or m15 == h1):
-        event, side = "ОТКАТ", main
+        event, side = "ОТКАТ", h1
     elif d1 and h4 and h1 and d1 == h4 == h1 and (not m15 or m15 == h1):
         event, side = "СТРУКТУРА", d1
     elif h4 and h1 and h4 == h1 and (not m15 or m15 == h1):
         event, side = "СТРУКТУРА", h4
+
+    # Раннее событие не ждёт, пока средний уклон H1 выйдет из RANGE. Нужны
+    # минимум три однонаправленные закрытые M15, подтверждение серией M5 и
+    # сила валют в ту же сторону. Одиночная M5-свеча сигнал не создаёт.
+    if not event and main and not h1:
+        m15_bars = bars_by_tf.get("M15") or []
+        m5_bars = bars_by_tf.get("M5") or []
+        early_side, run_dt = _candle_run(
+            m15_bars, int(getattr(cfg, "ZIGZAG_EARLY_M15_BARS", 3)),
+            float(getattr(cfg, "ZIGZAG_EARLY_MIN_BODY_ATR", .45)))
+        m5_side, _ = _candle_run(
+            m5_bars, int(getattr(cfg, "ZIGZAG_EARLY_M5_CONFIRM_BARS", 3)))
+        try:
+            base, quote = symbol.split("/")
+            gap = float((strength or {}).get(base, 0)) - float((strength or {}).get(quote, 0))
+        except (TypeError, ValueError):
+            gap = 0.0
+        min_gap = float(getattr(cfg, "ZIGZAG_EARLY_MIN_STRENGTH_GAP", .05))
+        strength_ok = bool(early_side and gap * early_side >= min_gap)
+        if early_side and m5_side == early_side and strength_ok:
+            side, early_key = early_side, run_dt
+            event = ("РАННИЙ ПОДТВЕРЖДЁННЫЙ ИМПУЛЬС" if early_side == main
+                     else "РАННИЙ ПОДТВЕРЖДЁННЫЙ ОТКАТ")
 
     # Показываем старший ТФ, на котором уже есть читаемая последовательность.
     key_tf = next((tf for tf in ("H4", "D1", "H1", "M15") if _sequence(swings_by_tf.get(tf) or [])), "")
@@ -143,6 +192,8 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict:
         "symbol": symbol,
         "event": event,
         "side": side,
+        "main_side": main_side,
+        "early_key": early_key,
         "tf": key_tf,
         "structure": key_view.structure if key_view else "",
         "phase": key_view.phase if key_view else "",
@@ -189,6 +240,7 @@ def _fmt_price(symbol: str, value: float) -> str:
 
 def format_message(s: dict) -> str:
     side = _word(s["side"])
+    main_side = _word(s.get("main_side", 0))
     dirs = s.get("directions") or {}
     tf_line = " · ".join(f"{tf} {_word(dirs.get(tf, 0)) or 'RANGE'}" for tf in SCAN_TFS if tf in dirs)
     lines = [
@@ -197,8 +249,9 @@ def format_message(s: dict) -> str:
         "━━━━━━━━━━━━━━━━━━",
         "",
         f"Пара: {s['symbol']}",
-        f"Основное направление: {side}",
-        f"Текущий уклон ТФ: {tf_line}",
+        f"Направление: {side}",
+        f"Основное направление: {main_side or side}",
+        f"Таймфреймы: {tf_line}",
         f"Структура {s['tf']}: {s['structure']}",
         f"Фаза: {s['phase']} · ADX {s['adx']}",
     ]
@@ -206,8 +259,12 @@ def format_message(s: dict) -> str:
         lines.append(f"Последний максимум: {_fmt_price(s['symbol'], s['high'])}")
     if s.get("low"):
         lines.append(f"Последний минимум: {_fmt_price(s['symbol'], s['low'])}")
-    if s["event"] in ("ОТКАТ", "ОТКАТ ПРОДОЛЖАЕТСЯ"):
-        lines.append(f"Факт: H1 идёт против основной структуры. Приоритет остаётся {side}.")
+    if s["event"] == "РАННИЙ ПОДТВЕРЖДЁННЫЙ ОТКАТ":
+        lines.append(f"Факт: минимум три закрытые M15-свечи и M5 подтвердили локальный откат {side} внутри основной структуры {main_side}.")
+    elif s["event"] == "РАННИЙ ПОДТВЕРЖДЁННЫЙ ИМПУЛЬС":
+        lines.append(f"Факт: минимум три закрытые M15-свечи и M5 подтвердили раннее продолжение {side}; H1 ещё сохраняет RANGE.")
+    elif s["event"] in ("ОТКАТ", "ОТКАТ ПРОДОЛЖАЕТСЯ"):
+        lines.append(f"Факт: H1 подтвердил откат {side} против основной структуры {main_side}.")
     elif s["event"] == "ОТКАТ ЗАВЕРШЁН":
         lines.append(f"Факт: H1 вернулся в сторону основной структуры; откат завершён. Приоритет {side}.")
     elif s["event"] == "СТРУКТУРА ПРОДОЛЖЕНА":
@@ -223,6 +280,7 @@ def _fingerprint(snap: dict) -> str:
     extrema = (snap.get("extrema") or {}).get("H1") or {}
     return "|".join([
         str(snap.get("event") or ""), str(snap.get("side") or 0),
+        str(snap.get("early_key") or ""),
         str(sequences.get("H4") or ""), str(sequences.get("H1") or ""),
         f"{float(extrema.get('high') or 0):.8f}", f"{float(extrema.get('low') or 0):.8f}",
     ])
@@ -244,7 +302,7 @@ def mark_delivered(text: str) -> None:
         _save(state)
 
 
-def process_market(market: dict) -> list[str]:
+def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
     state = _load()
     # Новая схема запускается тихо, чтобы после обновления не прислать историю.
     first = not bool(state.get("bootstrapped")) or state.get("schema_version") != 2
@@ -255,7 +313,7 @@ def process_market(market: dict) -> list[str]:
     messages = []
     for symbol in cfg.PAIRS:
         try:
-            snap = analyze_symbol(symbol, market.get(symbol) or {})
+            snap = analyze_symbol(symbol, market.get(symbol) or {}, strength)
             if not snap["event"] or not snap["side"]:
                 continue
             fingerprint = _fingerprint(snap)
