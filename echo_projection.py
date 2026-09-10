@@ -76,10 +76,13 @@ def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return math.sqrt(sum(w*(a-b)**2 for a, b, w in zip(left, right, weights)))
 
 
-def analyze(symbol: str, by_tf: dict) -> dict | None:
+def analyze(symbol: str, by_tf: dict, horizons_override=None) -> dict | None:
     """Вернуть проекцию либо None при недостаточной/неубедительной выборке."""
     bars = closed_candles(by_tf.get("H1") or [], 60)
-    horizons = tuple(int(x) for x in getattr(cfg, "ECHO_HORIZONS_H1", (1, 2, 4, 8)))
+    horizons = tuple(int(x) for x in (
+        horizons_override if horizons_override is not None
+        else getattr(cfg, "ECHO_HORIZONS_H1", (1, 2, 4, 8))
+    ))
     if not horizons:
         return None
     max_h = max(horizons)
@@ -117,9 +120,10 @@ def analyze(symbol: str, by_tf: dict) -> dict | None:
         expected[horizon] = median(moves) if moves else 0.0
 
     # Средний вердикт не зависит от одной случайной будущей свечи аналога.
-    horizon_weights = {1: .15, 2: .20, 4: .30, 8: .35}
-    total = sum(horizon_weights.get(h, 1.0) for h in horizons)
-    long_probability = sum(probabilities[h]*horizon_weights.get(h, 1.0) for h in horizons) / total
+    # Чем дальше горизонт, тем больше его вес в итоговом сессионном выводе.
+    horizon_weights = {h: float(index + 1) for index, h in enumerate(horizons)}
+    total = sum(horizon_weights.values())
+    long_probability = sum(probabilities[h]*horizon_weights[h] for h in horizons) / total
     side = "LONG" if long_probability >= .5 else "SHORT"
     confidence = long_probability if side == "LONG" else 1-long_probability
     minimum_confidence = float(getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
@@ -134,7 +138,7 @@ def analyze(symbol: str, by_tf: dict) -> dict | None:
             str(h): int(round((probabilities[h] if side == "LONG" else 1-probabilities[h])*100))
             for h in horizons
         },
-        "expected_atr": round(abs(expected.get(4, expected[horizons[-1]])), 2),
+        "expected_atr": round(abs(expected[horizons[-1]]), 2),
         "expected_by_horizon": {str(h): round(expected[h], 4) for h in horizons},
         "atr": _atr_at(bars, len(bars)-1),
         "current": bars[-1].close,
@@ -155,7 +159,7 @@ def format_alert(result: dict) -> str:
     values = result.get("horizons") or {}
     forecast = " · ".join(f"{h}ч: {values.get(str(h), 0)}%" for h in (1, 2, 4, 8))
     return "\n".join([
-        "━━━━━━━━━━━━━━━━━━", "🔭 ECHO — ВЕРОЯТНОСТНАЯ ПРОЕКЦИЯ", "━━━━━━━━━━━━━━━━━━", "",
+        "━━━━━━━━━━━━━━━━━━", "🔭 ЭХО — ВЕРОЯТНОСТНАЯ ПРОЕКЦИЯ", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {result['symbol']}", f"Направление: {result['side']} {icon}",
         f"Вероятность сценария: {result['confidence']}%",
         f"Горизонты: {forecast}", f"Исторических аналогов: {result['sample']}",
@@ -185,8 +189,8 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
             font = ImageFont.load_default(size=22)
             small = ImageFont.load_default(size=17)
     left, right, top, bottom = 75, 1140, 70, 625
-    horizons = [1, 2, 4, 8]
     expected = result.get("expected_by_horizon") or {}
+    horizons = sorted(int(value) for value in expected) or [1, 2, 4, 8]
     av = float(result.get("atr") or 0)
     current = float(result.get("current") or bars[-1].close)
     projected = [(0, current)] + [(h, current + av*float(expected.get(str(h), 0))) for h in horizons]
@@ -231,7 +235,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     for (h, _), point in zip(projected[1:], points[1:]):
         draw.ellipse((point[0]-6, point[1]-6, point[0]+6, point[1]+6), fill=wave_color)
         draw.text((point[0]-12, bottom+12), f"+{h}h", fill="#c9d1df", font=small)
-    draw.text((left, 22), f"{result['symbol']} · H1 · ECHO {result['side']} {result['confidence']}%", fill="#f1f5fb", font=font)
+    draw.text((left, 22), f"{result['symbol']} · H1 · ЭХО {result['side']} {result['confidence']}%", fill="#f1f5fb", font=font)
     draw.text((left, height-55), f"Аналогов: {result['sample']} · вероятностная проекция, не гарантия", fill="#9aa4b5", font=small)
     output = io.BytesIO()
     output.name = f"echo_{result['symbol'].replace('/', '')}_{result['closed_h1'].replace(':', '-')}.png"

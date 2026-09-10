@@ -109,6 +109,13 @@ ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.75
 ECHO_STANDALONE_ENABLED = True
 ECHO_ALERT_MIN_CONFIDENCE = 0.70
 ECHO_CHART_CANDLES = 40
+# Сессионные Эхо и Next Pivot: по одной карточке на каждую из семи пар.
+# Они не входят в лимит обычных торговых уведомлений.
+SESSION_PROJECTIONS_ENABLED = True
+SESSION_PROJECTIONS_OPEN_WINDOW_MIN = 15
+# Почасовые одиночные карточки отключены, чтобы не дублировать сессионные.
+ECHO_HOURLY_ENABLED = False
+NEXT_PIVOT_HOURLY_ENABLED = False
 # Next Pivot Projection — информационная зона возможного следующего экстремума.
 NEXT_PIVOT_ENABLED = True
 NEXT_PIVOT_MIN_SAMPLES = 8

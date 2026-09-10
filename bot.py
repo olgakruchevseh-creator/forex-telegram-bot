@@ -48,6 +48,7 @@ import signal_navigator
 import signal_journal
 import next_pivot_projection
 import echo_projection
+import session_projection_reports
 try:
     import patterns
 except ImportError:
@@ -943,7 +944,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Информационное предупреждение о вероятной зоне следующего pivot.
         # Оно не является новым LONG/SHORT и не расходует торговый лимит H1.
-        if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
+        if (getattr(cfg, "NEXT_PIVOT_ENABLED", True)
+                and getattr(cfg, "NEXT_PIVOT_HOURLY_ENABLED", True)):
             try:
                 for alert in next_pivot_projection.process_market(market):
                     message = await context.application.bot.send_photo(
@@ -955,7 +957,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Самостоятельный Echo работает вне лимита трёх торговых сигналов и
         # ничего не блокирует. Каждая подходящая пара получает свой PNG-график.
-        if getattr(cfg, "ECHO_STANDALONE_ENABLED", True):
+        if (getattr(cfg, "ECHO_STANDALONE_ENABLED", True)
+                and getattr(cfg, "ECHO_HOURLY_ENABLED", True)):
             try:
                 for alert in echo_projection.process_market(market):
                     message = await context.application.bot.send_photo(
@@ -964,6 +967,37 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     echo_projection.mark_delivered(alert["text"])
             except Exception:
                 log.exception("Самостоятельный модуль Echo")
+
+        # Полные прогнозы от текущей сессии до следующей: семь пар Эхо и
+        # семь пар Next Pivot. Это отдельный информационный поток, который не
+        # расходует лимит торговых кандидатов и не проходит через Навигатор.
+        if getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True):
+            try:
+                window = int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 15))
+                if briefing.just_opened(window_min=window):
+                    session_events = briefing.session_events(newsmod.load_events())
+                    for alert in session_projection_reports.pending_reports(
+                            market, session_events, state):
+                        caption = alert["text"]
+                        long_caption = len(caption) > 1000
+                        if long_caption:
+                            # У Telegram подпись к фото короче обычного сообщения.
+                            # Полный русский разбор отправляем сразу следом, не
+                            # обрезая список относящихся к паре новостей.
+                            module_name = "ЭХО" if "|echo|" in alert["key"] else "СЛЕДУЮЩИЙ PIVOT"
+                            pair = alert["key"].rsplit("|", 1)[-1]
+                            caption = f"🔭 {module_name} · {pair}\nПолный сессионный разбор — следующим сообщением."
+                        message = await context.application.bot.send_photo(
+                            chat_id=int(chat_id), photo=alert["image"], caption=caption)
+                        if long_caption:
+                            await _send_parts(context.application, int(chat_id), alert["text"])
+                        session_projection_reports.mark_delivered(state, alert["key"])
+                        save_state(state)
+                        log.info("session_projection_message_id=%s key=%s pid=%s",
+                                 getattr(message, "message_id", None), alert["key"],
+                                 briefing.instance_id())
+            except Exception:
+                log.exception("Сессионные отчёты Эхо / Next Pivot")
 
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:

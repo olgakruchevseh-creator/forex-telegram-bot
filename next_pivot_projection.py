@@ -289,7 +289,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.text((legend_x, legend_y+62),
               f"После Pivot {reaction} → {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
               fill="#d889ff", font=small)
-    draw.text((left, 22), f"{result['symbol']} · NEXT PIVOT · {result['structure']}", fill="#f1f5fb", font=font)
+    draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']}", fill="#f1f5fb", font=font)
     draw.text((left, height-58), "Сценарии независимы · вероятностная проекция, не торговая гарантия",
               fill="#9aa4b5", font=small)
     output = io.BytesIO()
