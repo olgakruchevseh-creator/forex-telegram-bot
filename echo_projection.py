@@ -238,22 +238,31 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
 
 
 def process_market(market: dict) -> list[dict]:
-    """Все новые Echo-сценарии >= порога; модуль не участвует в торговом лимите."""
+    """Один лучший Echo-кандидат на закрытую H1, вне торгового лимита."""
     state = _load_state()
     delivered = state.setdefault("delivered", {})
-    pending, output = {}, []
+    pending, candidates = {}, []
     threshold = int(round(float(getattr(cfg, "ECHO_ALERT_MIN_CONFIDENCE", .75))*100))
     for symbol in cfg.PAIRS:
         result = analyze(symbol, market.get(symbol) or {})
         if not result or int(result["confidence"]) < threshold:
             continue
+        if state.get("last_sent_h1") == result["closed_h1"]:
+            continue
         key = f"{symbol}|{result['side']}|{result['closed_h1']}"
         if key in delivered:
             continue
+        horizon_floor = min((result.get("horizons") or {"0": 0}).values())
+        rank = (int(result["confidence"]), int(horizon_floor), int(result["sample"]),
+                float(result.get("expected_atr") or 0))
+        candidates.append((rank, key, result, market.get(symbol) or {}))
+    output = []
+    if candidates:
+        _rank, key, result, by_tf = max(candidates, key=lambda item: item[0])
         text = format_alert(result)
         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-        pending[digest] = {"key": key}
-        output.append({"text": text, "image": render_chart(result, market.get(symbol) or {})})
+        pending[digest] = {"key": key, "h1": result["closed_h1"]}
+        output.append({"text": text, "image": render_chart(result, by_tf)})
     state["pending"] = pending
     if len(delivered) > 500:
         state["delivered"] = dict(list(delivered.items())[-350:])
@@ -268,5 +277,6 @@ def mark_delivered(text: str) -> bool:
     if not item:
         return False
     state.setdefault("delivered", {})[item["key"]] = True
+    state["last_sent_h1"] = item.get("h1", "")
     _save_state(state)
     return True

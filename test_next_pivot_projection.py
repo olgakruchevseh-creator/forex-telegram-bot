@@ -27,7 +27,7 @@ def near_result(symbol="EUR/USD"):
             "zone_low": 1.105, "zone_high": 1.106, "bars_low": 2, "bars_high": 5,
             "samples": 18, "probability": 72, "near": True, "distance_atr": .2,
             "pivot_dt": "2026-09-09 10:00:00", "current": 1.1048,
-            "aligned": 2, "available": 3}
+            "aligned": 2, "available": 3, "closed_h1": "2026-09-09 11:00:00"}
 
 
 class NextPivotProjectionTests(unittest.TestCase):
@@ -52,7 +52,7 @@ class NextPivotProjectionTests(unittest.TestCase):
             projection._save({"bootstrapped": True, "logic_version": 2, "delivered": {}})
             with patch.object(projection, "analyze_symbol", side_effect=lambda symbol, _: near_result(symbol)):
                 messages = projection.process_market({pair: {} for pair in projection.cfg.PAIRS})
-                self.assertEqual(len(projection.cfg.PAIRS), len(messages))
+                self.assertEqual(1, len(messages))
                 self.assertEqual({}, projection._load().get("delivered"))
                 self.assertTrue(projection.mark_delivered(messages[0]["text"]))
                 self.assertTrue(projection._load().get("delivered"))
@@ -77,6 +77,20 @@ class NextPivotProjectionTests(unittest.TestCase):
             projection._save({"bootstrapped": True, "logic_version": 2, "delivered": {}})
             with patch.object(projection, "analyze_symbol", return_value=weak):
                 self.assertEqual([], projection.process_market({"EUR/USD": {}}))
+
+    def test_only_best_pivot_candidate_is_sent_per_h1(self):
+        weak = {**near_result("EUR/USD"), "probability": 72}
+        strong = {**near_result("GBP/USD"), "probability": 88}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}), \
+             patch.object(projection.cfg, "PAIRS", ["EUR/USD", "GBP/USD"]):
+            projection._save({"bootstrapped": True, "logic_version": 2, "delivered": {}})
+            with patch.object(projection, "analyze_symbol",
+                              side_effect=lambda symbol, _: weak if symbol == "EUR/USD" else strong):
+                alerts = projection.process_market({"EUR/USD": {}, "GBP/USD": {}})
+                self.assertEqual(1, len(alerts))
+                self.assertIn("GBP/USD", alerts[0]["text"])
+                self.assertTrue(projection.mark_delivered(alerts[0]["text"]))
+                self.assertEqual([], projection.process_market({"EUR/USD": {}, "GBP/USD": {}}))
 
     def test_same_pivot_is_not_repeated_when_zone_edges_move(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):

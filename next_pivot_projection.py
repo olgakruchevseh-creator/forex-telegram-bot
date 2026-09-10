@@ -146,8 +146,9 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict | None:
     available = [item for item in projections.values() if item]
     aligned = sum(item["side"] == primary["side"] for item in available)
     result = dict(primary)
-    result.update({"symbol": symbol, "aligned": aligned, "available": len(available)})
     bars = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    result.update({"symbol": symbol, "aligned": aligned, "available": len(available),
+                   "closed_h1": bars[-1].dt})
     recent = bars[-12:]
     path = sum(abs(b.close-a.close) for a, b in zip(recent, recent[1:]))
     efficiency = abs(recent[-1].close-recent[0].close)/path if len(recent) > 1 and path else 0.0
@@ -307,6 +308,8 @@ def process_market(market: dict) -> list[dict]:
                 or result["samples"] < int(getattr(cfg, "NEXT_PIVOT_MIN_SAMPLES", 12))
                 or result["probability"] < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 70))):
             continue
+        if state.get("last_sent_h1") == result["closed_h1"]:
+            continue
         # Одна исходная pivot-точка — одно уведомление, даже если при следующей
         # H1 границы статистической зоны немного пересчитались.
         key = f"{symbol}|{result['pivot_dt']}|{result['kind']}"
@@ -315,17 +318,22 @@ def process_market(market: dict) -> list[dict]:
             continue
         if key in delivered:
             continue
+        alignment_ratio = float(result["aligned"])/max(1, int(result["available"]))
+        rank = (int(result["probability"]), alignment_ratio, int(result["samples"]),
+                -float(result.get("distance_atr") or 0))
+        candidates.append((rank, key, result, market.get(symbol) or {}))
+    output = []
+    if candidates:
+        _rank, key, result, by_tf = max(candidates, key=lambda item: item[0])
         text = format_near(result)
         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-        pending[digest] = {"key": key}
-        candidates.append((result["probability"], result["aligned"], {
-            "text": text, "image": render_chart(result, market.get(symbol) or {})}))
+        pending[digest] = {"key": key, "h1": result["closed_h1"]}
+        output.append({"text": text, "image": render_chart(result, by_tf)})
     state["bootstrapped"], state["logic_version"], state["pending"] = True, logic_version, pending
     if len(delivered) > 500:
         state["delivered"] = dict(list(delivered.items())[-350:])
     _save(state)
-    # Вне торгового лимита: каждая новая качественная пара получает свою карту.
-    return [item[2] for item in sorted(candidates, key=lambda item: (item[0], item[1]), reverse=True)]
+    return output
 
 
 def mark_delivered(text: str) -> bool:
@@ -335,5 +343,6 @@ def mark_delivered(text: str) -> bool:
     if not item:
         return False
     state.setdefault("delivered", {})[item["key"]] = True
+    state["last_sent_h1"] = item.get("h1", "")
     _save(state)
     return True

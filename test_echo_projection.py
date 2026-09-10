@@ -59,6 +59,20 @@ class EchoProjectionTests(unittest.TestCase):
             self.assertTrue(echo.mark_delivered(first[0]["text"]))
             self.assertEqual([], echo.process_market({"EUR/USD": by_tf}))
 
+    def test_only_best_echo_candidate_is_sent_per_h1(self):
+        base = echo.analyze("EUR/USD", {"H1": rising_bars()})
+        weaker = {**base, "symbol": "EUR/USD", "confidence": 76}
+        stronger = {**base, "symbol": "GBP/USD", "confidence": 88}
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.dict(os.environ, {"STATE_DIR": folder}), \
+             patch.object(echo.cfg, "PAIRS", ["EUR/USD", "GBP/USD"]), \
+             patch.object(echo, "analyze", side_effect=lambda symbol, _: weaker if symbol == "EUR/USD" else stronger):
+            alerts = echo.process_market({"EUR/USD": {}, "GBP/USD": {}})
+            self.assertEqual(1, len(alerts))
+            self.assertIn("GBP/USD", alerts[0]["text"])
+            self.assertTrue(echo.mark_delivered(alerts[0]["text"]))
+            self.assertEqual([], echo.process_market({"EUR/USD": {}, "GBP/USD": {}}))
+
 
 if __name__ == "__main__":
     unittest.main()
