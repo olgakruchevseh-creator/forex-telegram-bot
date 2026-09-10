@@ -3,40 +3,14 @@ from __future__ import annotations
 
 import re
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import config as cfg
 import news as newsmod
 import zigzag_scanner
-import echo_projection
-from analysis import PairStack, build_stack, closed_candles, split_pair
+from analysis import PairStack, build_stack, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
-
-
-def _candle_dt(raw: str) -> datetime | None:
-    try:
-        value = str(raw or "").replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(value)
-        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
-    except (TypeError, ValueError):
-        return None
-
-
-def _lower_timeframes_fresh(by_tf: dict) -> bool:
-    """M15/M5 должны принадлежать последнему закрытому часу, а не старому кэшу."""
-    h1 = closed_candles(by_tf.get("H1") or [], 60)
-    if not h1:
-        return False
-    h1_open = _candle_dt(h1[-1].dt)
-    if not h1_open:
-        return False
-    for tf, minutes, offset in (("M15", 15, 45), ("M5", 5, 55)):
-        bars = closed_candles(by_tf.get(tf) or [], minutes)
-        latest = _candle_dt(bars[-1].dt) if bars else None
-        if not latest or latest < h1_open + timedelta(minutes=offset):
-            return False
-    return True
 
 
 def _consensus(stack: PairStack, keys: tuple[str, ...], minimum: int) -> int:
@@ -56,10 +30,7 @@ def _pair(text: str) -> str:
 
 
 def _side(text: str) -> int:
-    match = re.search(
-        r"(?:Основное\s+)?направление(?: реакции| пробоя)?:\s*(LONG|SHORT)",
-        text or "", re.I,
-    )
+    match = re.search(r"(?:Основное\s+)?направление(?: реакции)?:\s*(LONG|SHORT)", text or "", re.I)
     if not match:
         match = re.search(r"(?:^|\n)[🟢🔴]?\s*(?:MASTER DIRECTION\s*[—-]\s*)?(LONG|SHORT)\b", text or "")
     if not match:
@@ -153,8 +124,6 @@ def analyze_symbol(
     events: list[newsmod.NewsEvent] | None = None,
     now_utc: datetime | None = None,
 ) -> dict | None:
-    if not _lower_timeframes_fresh(by_tf):
-        return None
     stack = build_stack(symbol, by_tf, strength)
     if not stack:
         return None
@@ -171,10 +140,6 @@ def analyze_symbol(
     if (side > 0 and gap < minimum_gap) or (side < 0 and gap > -minimum_gap):
         return None
 
-    echo = echo_projection.analyze(symbol, by_tf) if getattr(cfg, "ECHO_ENABLED", True) else None
-    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .75))*100))
-    wanted_name = "LONG" if side > 0 else "SHORT"
-
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     aligned, opposite = _module_evidence(symbol, side, alerts)
@@ -187,13 +152,9 @@ def analyze_symbol(
     usd_expected = _usd_expected(symbol, side)
     higher_conflict = senior_side == -side or h4_zz == -side
     dxy_conflict = bool(usd_expected and dxy_bias and dxy_bias != usd_expected)
-    forecast_conflict = bool(
-        echo and echo["side"] != wanted_name
-        and echo["confidence"] >= echo_block and opposite
-    )
-    # Старшие ТФ и H4 ZigZag — одна структурная группа. Модульный конфликт,
-    # DXY и Echo считаются независимыми группами. Две группы блокируют вход.
-    conflict_groups = sum((higher_conflict, dxy_conflict, forecast_conflict, opposite))
+    # Старшие ТФ и H4 ZigZag — одна структурная группа. Одиночная группа
+    # задаёт откат/штраф; сигнал блокируют только две независимые группы.
+    conflict_groups = sum((higher_conflict, dxy_conflict))
     if conflict_groups >= 2:
         return None
 
@@ -204,8 +165,6 @@ def analyze_symbol(
     quality += 10 if h4_zz == side else (4 if not h4_zz else 0)
     quality += min(10, max(3, int(abs(gap) * 40)))
     quality += min(10, 7 + max(0, len(aligned) - 1) * 3)
-    if echo and echo["side"] == wanted_name:
-        quality += 3
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
     quality = min(94, quality)
@@ -221,8 +180,6 @@ def analyze_symbol(
         quality -= 2
     if senior_side == -side:
         quality -= 2
-    if forecast_conflict:
-        quality -= 3
     if quality < int(getattr(cfg, "MASTER_MIN_QUALITY", 82)):
         return None
 
@@ -237,7 +194,6 @@ def analyze_symbol(
         "junior_n": junior_n,
         "evidence": aligned,
         "dxy_bias": dxy_bias,
-        "echo": echo,
         "zigzag_h4": "LONG" if h4_zz > 0 else ("SHORT" if h4_zz < 0 else "RANGE"),
         "senior_side": "LONG" if senior_side > 0 else ("SHORT" if senior_side < 0 else "RANGE"),
         "conflict_groups": conflict_groups,
@@ -258,8 +214,6 @@ def analyze_local_amd_symbol(
     закрытого H1-пробоя. Старшее направление здесь не объявляется основным.
     """
     if not getattr(cfg, "LOCAL_AMD_EARLY_ENABLED", True):
-        return None
-    if not _lower_timeframes_fresh(by_tf):
         return None
     stack = build_stack(symbol, by_tf, strength)
     if not stack:
@@ -284,13 +238,6 @@ def analyze_local_amd_symbol(
     minimum_gap = float(getattr(cfg, "LOCAL_AMD_MIN_STRENGTH_GAP", 0.08))
     if gap * side < minimum_gap:
         return None
-    echo = echo_projection.analyze(symbol, by_tf) if getattr(cfg, "ECHO_ENABLED", True) else None
-    echo_block = int(round(float(getattr(cfg, "ECHO_BLOCK_OPPOSITE_CONFIDENCE", .75))*100))
-    side_name = "LONG" if side > 0 else "SHORT"
-    _, opposite = _module_evidence(symbol, side, alerts)
-    if (echo and echo["side"] != side_name
-            and echo["confidence"] >= echo_block and opposite):
-        return None
     # Старые кандидаты других модулей могут описывать предыдущий откат.
     # Для ранней ветки источником является только завершённая AMD-модель.
     aligned = ["подтверждена модель AMD / Power of Three"]
@@ -311,7 +258,6 @@ def analyze_local_amd_symbol(
         "evidence": aligned,
         "dxy_bias": 0,
         "local_early": True,
-        "echo": echo,
         "zigzag_h4": "RANGE",
     }
 
@@ -410,4 +356,5 @@ def analyze_market(
         except Exception:
             log.exception("Master Direction %s", symbol)
     candidates.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
-    return candidates
+    limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 2))
+    return candidates[:limit]

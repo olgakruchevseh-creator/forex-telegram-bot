@@ -47,6 +47,7 @@ import master_direction
 import signal_navigator
 import signal_journal
 import next_pivot_projection
+import echo_projection
 try:
     import patterns
 except ImportError:
@@ -932,6 +933,18 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     next_pivot_projection.mark_delivered(text)
             except Exception:
                 log.exception("Проекция следующего pivot")
+
+        # Самостоятельный Echo работает вне лимита трёх торговых сигналов и
+        # ничего не блокирует. Каждая подходящая пара получает свой PNG-график.
+        if getattr(cfg, "ECHO_STANDALONE_ENABLED", True):
+            try:
+                for alert in echo_projection.process_market(market):
+                    message = await context.application.bot.send_photo(
+                        chat_id=int(chat_id), photo=alert["image"], caption=alert["text"])
+                    log.info("echo_telegram_message_id=%s pid=%s", getattr(message, "message_id", None), briefing.instance_id())
+                    echo_projection.mark_delivered(alert["text"])
+            except Exception:
+                log.exception("Самостоятельный модуль Echo")
 
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
