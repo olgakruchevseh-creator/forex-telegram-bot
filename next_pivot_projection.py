@@ -4,12 +4,15 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 from pathlib import Path
 
 import config as cfg
 from analysis import Swing, atr, closed_candles
+
+log = logging.getLogger(__name__)
 
 TF_MINUTES = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60}
 
@@ -121,8 +124,6 @@ def _tf_projection(tf: str, raw: list) -> dict | None:
     structure = ("HH" if continuation_probability >= .5 else "LH") if target_kind == "high" else (
         "LL" if continuation_probability >= .5 else "HL")
     probability = int(round(max(continuation_probability, 1-continuation_probability)*100))
-    if probability < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 65)):
-        return None
     current = bars[-1].close
     margin = av*float(getattr(cfg, "NEXT_PIVOT_NEAR_ATR", .55))
     distance = max(0.0, zone_low-current) if direction > 0 else max(0.0, current-zone_high)
@@ -319,9 +320,15 @@ def process_market(market: dict) -> list[dict]:
         _save(state)
         return []
     delivered, pending, candidates = state.setdefault("delivered", {}), {}, []
+    analyzed, near_count = [], 0
     for symbol in cfg.PAIRS:
         result = analyze_symbol(symbol, market.get(symbol) or {})
-        if (not result or not result["near"]
+        if not result:
+            continue
+        analyzed.append((symbol, int(result["probability"]), int(result["samples"]), bool(result["near"])))
+        if result["near"]:
+            near_count += 1
+        if (not result["near"]
                 or result["samples"] < int(getattr(cfg, "NEXT_PIVOT_MIN_SAMPLES", 8))
                 or result["probability"] < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 65))):
             continue
@@ -333,7 +340,9 @@ def process_market(market: dict) -> list[dict]:
             continue
         # Одна исходная pivot-точка — одно уведомление, даже если при следующей
         # H1 границы статистической зоны немного пересчитались.
-        key = f"{symbol}|{result['pivot_dt']}|{result['kind']}"
+        # Тот же Pivot разрешено переоценить на следующей закрытой H1: зона,
+        # расстояние и статус могли существенно измениться.
+        key = f"{symbol}|{result['pivot_dt']}|{result['kind']}|{result['closed_h1']}"
         if key in delivered:
             continue
         alignment_ratio = float(result["aligned"])/max(1, int(result["available"]))
@@ -347,6 +356,15 @@ def process_market(market: dict) -> list[dict]:
         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
         pending[digest] = {"key": key, "h1": result["closed_h1"]}
         output.append({"text": text, "image": render_chart(result, by_tf)})
+        log.info("NEXT_PIVOT_CANDIDATE_SELECTED symbol=%s probability=%s samples=%s distance_atr=%s h1=%s",
+                 result["symbol"], result["probability"], result["samples"],
+                 result.get("distance_atr"), result["closed_h1"])
+    elif analyzed:
+        best = max(analyzed, key=lambda item: (item[1], item[2]))
+        log.info("NEXT_PIVOT_NO_ALERT best_symbol=%s best_probability=%s samples=%s near=%s near_candidates=%s reason=FILTER_OR_ALREADY_SENT",
+                 best[0], best[1], best[2], best[3], near_count)
+    else:
+        log.info("NEXT_PIVOT_NO_ALERT reason=NO_STATISTICAL_PROJECTION")
     state["bootstrapped"], state["logic_version"], state["pending"] = True, logic_version, pending
     if len(delivered) > 500:
         state["delivered"] = dict(list(delivered.items())[-350:])

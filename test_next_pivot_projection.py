@@ -127,6 +127,19 @@ class NextPivotProjectionTests(unittest.TestCase):
             ):
                 self.assertEqual([], projection.process_market({"EUR/USD": {}}))
 
+    def test_same_pivot_can_be_updated_on_next_closed_h1(self):
+        first_result = near_result()
+        next_hour = {**first_result, "closed_h1": "2026-09-09 12:00:00", "current": 1.1052}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):
+            projection._save({"bootstrapped": True, "logic_version": 3, "delivered": {}})
+            with patch.object(projection, "analyze_symbol", return_value=first_result):
+                first = projection.process_market({"EUR/USD": {}})
+            self.assertEqual(1, len(first))
+            self.assertTrue(projection.mark_delivered(first[0]["text"]))
+            with patch.object(projection, "analyze_symbol", return_value=next_hour):
+                updated = projection.process_market({"EUR/USD": {}})
+            self.assertEqual(1, len(updated))
+
 
 if __name__ == "__main__":
     unittest.main()

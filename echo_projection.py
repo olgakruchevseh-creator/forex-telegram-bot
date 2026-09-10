@@ -9,12 +9,15 @@ import math
 import hashlib
 import io
 import json
+import logging
 import os
 from pathlib import Path
 from statistics import median
 
 import config as cfg
 from analysis import Candle, closed_candles
+
+log = logging.getLogger(__name__)
 
 
 def _state_path() -> Path:
@@ -243,9 +246,13 @@ def process_market(market: dict) -> list[dict]:
     delivered = state.setdefault("delivered", {})
     pending, candidates = {}, []
     threshold = int(round(float(getattr(cfg, "ECHO_ALERT_MIN_CONFIDENCE", .75))*100))
+    analyzed = []
     for symbol in cfg.PAIRS:
         result = analyze(symbol, market.get(symbol) or {})
-        if not result or int(result["confidence"]) < threshold:
+        if not result:
+            continue
+        analyzed.append((symbol, int(result["confidence"])))
+        if int(result["confidence"]) < threshold:
             continue
         if state.get("last_sent_h1") == result["closed_h1"]:
             continue
@@ -263,6 +270,14 @@ def process_market(market: dict) -> list[dict]:
         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
         pending[digest] = {"key": key, "h1": result["closed_h1"]}
         output.append({"text": text, "image": render_chart(result, by_tf)})
+        log.info("ECHO_CANDIDATE_SELECTED symbol=%s confidence=%s threshold=%s h1=%s",
+                 result["symbol"], result["confidence"], threshold, result["closed_h1"])
+    elif analyzed:
+        symbol, confidence = max(analyzed, key=lambda item: item[1])
+        log.info("ECHO_NO_ALERT best_symbol=%s best_confidence=%s threshold=%s reason=BELOW_THRESHOLD_OR_ALREADY_SENT",
+                 symbol, confidence, threshold)
+    else:
+        log.info("ECHO_NO_ALERT reason=NO_RELIABLE_ANALOG_SAMPLE threshold=%s", threshold)
     state["pending"] = pending
     if len(delivered) > 500:
         state["delivered"] = dict(list(delivered.items())[-350:])

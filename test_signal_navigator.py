@@ -114,12 +114,18 @@ class SignalNavigatorTests(unittest.TestCase):
     def test_confirmed_card_includes_next_pivot_projection(self):
         pivot = {"symbol": "EUR/USD", "kind": "high", "structure": "HH",
                  "zone_low": 1.19, "zone_high": 1.20, "bars_low": 2, "bars_high": 4,
-                 "probability": 70, "aligned": 2, "available": 3}
+                 "probability": 70, "aligned": 2, "available": 3,
+                 "samples": 12, "near": True, "side": "LONG", "current": 1.13}
         with patch.object(signal_navigator.movement_progress, "analyze_progress", return_value=route()), \
              patch.object(signal_navigator.next_pivot_projection, "analyze_symbol", return_value=pivot):
             result = signal_navigator.build_confirmed([master()], {"EUR/USD": {}}, {}, [source()])
         self.assertIn("Следующий pivot", result[0][0])
         self.assertIn("1.19000–1.20000", result[0][0])
+
+    def test_next_pivot_error_never_blocks_navigator(self):
+        with patch.object(signal_navigator.next_pivot_projection, "analyze_symbol",
+                          side_effect=RuntimeError("temporary")):
+            self.assertIsNone(signal_navigator._safe_next_pivot("EUR/USD", {}))
 
     def test_candidate_waits_until_confirmed_card_is_delivered(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):

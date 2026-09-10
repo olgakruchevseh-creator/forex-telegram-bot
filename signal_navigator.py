@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -13,6 +14,26 @@ import movement_progress
 import zigzag_scanner
 import next_pivot_projection
 from analysis import analyze_tf
+
+log = logging.getLogger(__name__)
+
+
+def _safe_next_pivot(symbol: str, by_tf: dict) -> dict | None:
+    """Next Pivot — необязательный контекст, который не может остановить сигнал."""
+    if not getattr(cfg, "NEXT_PIVOT_ENABLED", True):
+        return None
+    try:
+        result = next_pivot_projection.analyze_symbol(symbol, by_tf)
+        if not result:
+            return None
+        if (int(result.get("probability") or 0) < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 65))
+                or int(result.get("samples") or 0) < int(getattr(cfg, "NEXT_PIVOT_MIN_SAMPLES", 8))
+                or not result.get("near")):
+            return None
+        return result
+    except Exception:
+        log.exception("NEXT_PIVOT_CONTEXT_SKIPPED symbol=%s", symbol)
+        return None
 
 
 def _path() -> Path:
@@ -262,8 +283,7 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         route = _trigger_route(symbol, side, by_tf, source_text)
     if not route:
         return None
-    pivot = (next_pivot_projection.analyze_symbol(symbol, by_tf)
-             if getattr(cfg, "NEXT_PIVOT_ENABLED", True) else None)
+    pivot = _safe_next_pivot(symbol, by_tf)
     route = _route_with_next_pivot(route, pivot)
     direction = 1 if side == "LONG" else -1
     views = {}
@@ -432,8 +452,7 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
             route = movement_progress.analyze_for_side(symbol, pair_market, strength, side)
         if not route or route.get("side") != side:
             continue
-        pivot = (next_pivot_projection.analyze_symbol(symbol, pair_market)
-                 if getattr(cfg, "NEXT_PIVOT_ENABLED", True) else None)
+        pivot = _safe_next_pivot(symbol, pair_market)
         route = _scale_route(_route_with_next_pivot(route, pivot))
         max_initial = int(getattr(cfg, "SIGNAL_INITIAL_MAX_PROGRESS_PCT", 35))
         # Новый вход оценивается относительно ближайшей цели, а не далёкой

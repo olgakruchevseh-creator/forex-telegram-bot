@@ -812,25 +812,38 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Новости для Master Direction")
                 master_events = []
-            master_results = master_direction.analyze_market(
-                market,
-                strength,
-                candidate_alerts,
-                dxy_bias=master_dxy_bias,
-                events=master_events,
-                now_utc=datetime.now(timezone.utc),
-            )
+            try:
+                master_results = master_direction.analyze_market(
+                    market,
+                    strength,
+                    candidate_alerts,
+                    dxy_bias=master_dxy_bias,
+                    events=master_events,
+                    now_utc=datetime.now(timezone.utc),
+                )
+            except Exception:
+                log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=master_direction")
+                master_results = []
             strict_pairs = {item["symbol"] for item in master_results}
-            local_results = master_direction.analyze_local_amd_market(
-                market, strength, candidate_alerts,
-                events=master_events, now_utc=datetime.now(timezone.utc),
-            )
+            try:
+                local_results = master_direction.analyze_local_amd_market(
+                    market, strength, candidate_alerts,
+                    events=master_events, now_utc=datetime.now(timezone.utc),
+                )
+            except Exception:
+                log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=local_amd")
+                local_results = []
             # Строгий основной сигнал всегда имеет преимущество; локальная
             # карточка для той же пары в этот час не дублируется.
             master_results.extend(item for item in local_results if item["symbol"] not in strict_pairs)
-            for text, sources in signal_navigator.build_confirmed(
-                master_results, market, strength, candidate_alerts
-            ):
+            try:
+                built_navigator = signal_navigator.build_confirmed(
+                    master_results, market, strength, candidate_alerts
+                )
+            except Exception:
+                log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=build_confirmed")
+                built_navigator = []
+            for text, sources in built_navigator:
                 pair = _alert_pair(text)
                 side = _direct_signal_side(text)
                 if pair and side and cooldown_ok(state, pair, side):
@@ -897,7 +910,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if (_alert_pair(card), _direct_signal_side(card)) == key
             ), None)
             if companion is None:
-                companion = signal_navigator.build_source_companion(text, market, strength)
+                try:
+                    companion = signal_navigator.build_source_companion(text, market, strength)
+                except Exception:
+                    log.exception("NAVIGATOR_COMPANION_SKIPPED pair=%s", pair or "unknown")
+                    companion = None
                 if companion:
                     signal_navigator.register_card(companion[0], companion[1], closed_dt)
             if companion:
