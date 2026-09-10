@@ -878,24 +878,30 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
-            pattern_image = None
+            source_image = None
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
                 try:
-                    pattern_image = patterns.image_for_alert(text)
+                    source_image = patterns.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения паттерна")
-            if pattern_image is not None:
+            if "🎯 AMD / POWER OF THREE" in text:
+                try:
+                    source_image = amd_power_of_three.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения AMD")
+            if source_image is not None:
                 # Текущая карточка короче лимита Telegram для подписи к фото.
                 # Защитный вариант сохраняет полный текст при будущих расширениях.
                 if len(text) <= 1000:
                     await context.application.bot.send_photo(
-                        chat_id=int(chat_id), photo=pattern_image, caption=text)
+                        chat_id=int(chat_id), photo=source_image, caption=text)
                 else:
                     await context.application.bot.send_photo(
-                        chat_id=int(chat_id), photo=pattern_image,
-                        caption="🧩 Паттерн подтверждён · полный разбор следующим сообщением")
+                        chat_id=int(chat_id), photo=source_image,
+                        caption="📊 Сценарий подтверждён · полный разбор следующим сообщением")
                     await _send_parts(context.application, int(chat_id), text)
-                patterns.mark_card_delivered(text)
+                if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
+                    patterns.mark_card_delivered(text)
             else:
                 await _send_parts(context.application, int(chat_id), text)
             delivered_sources = [text]

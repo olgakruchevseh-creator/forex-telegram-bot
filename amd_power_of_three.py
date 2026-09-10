@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import logging
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.amd")
 TF_MINUTES = {"H4": 240, "H1": 60, "M15": 15}
+_PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
 
 
 def _path() -> Path:
@@ -169,12 +171,13 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(event: dict) -> str:
+    icon = "🟢" if event["side"] == "LONG" else "🔴"
     swept = "нижней" if event["side"] == "LONG" else "верхней"
     opposite = "верхней" if event["side"] == "LONG" else "нижней"
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", f"🎯 AMD / POWER OF THREE — {event['side']}", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {event['symbol']}", "📊 Таймфрейм модели: H1",
-        f"Направление: {event['side']}",
+        f"Направление: {event['side']} {icon}",
         f"📦 Накопление: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"🧹 Манипуляция: снятие {swept} границы до {_price(event['symbol'], event['manipulation'])}",
         f"⚡ Подтверждённый выход: за пределы {opposite} границы {_price(event['symbol'], event['broken'])}",
@@ -184,6 +187,83 @@ def format_message(event: dict) -> str:
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
         f"✅ Факт: после накопления цена сняла ликвидность за {swept} границей, вернулась и закрытой {event.get('exit_tf', 'H1')}-свечой подтвердила ранний выход {event['side']}.",
     ])
+
+
+def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
+    """Реальные H1-свечи с тремя фазами AMD и подтверждённым выходом."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    all_bars = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    lookback = max(35, int(getattr(cfg, "AMD_CHART_LOOKBACK", 48)))
+    bars = all_bars[-lookback:]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 23)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font, small = ImageFont.load_default(size=23), ImageFont.load_default(size=17)
+    left, right, top, bottom = 72, 1135, 88, 610
+    values = [value for bar in bars for value in (bar.low, bar.high)]
+    values.extend((event["low"], event["high"], event["manipulation"], event["close"]))
+    pmin, pmax = min(values), max(values)
+    pad = max((pmax-pmin)*.09, abs(event["close"])*.0001)
+    pmin, pmax = pmin-pad, pmax+pad
+    def x_at(index: float) -> float:
+        return left + index/max(1, len(bars)-1)*(right-left)
+    def y_at(price: float) -> float:
+        return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+    index_by_dt = {bar.dt: index for index, bar in enumerate(bars)}
+    manipulation_i = index_by_dt.get(event.get("manipulation_dt"), max(1, len(bars)-3))
+    exit_i = index_by_dt.get(event.get("exit_dt"), len(bars)-1)
+    range_n = int(getattr(cfg, "AMD_RANGE_BARS", 20))
+    box_start = max(0, manipulation_i-range_n)
+    # Три цветные области расположены за свечами и не скрывают их.
+    draw.rectangle((x_at(box_start), y_at(event["high"]), x_at(manipulation_i), y_at(event["low"])),
+                   fill="#f4dc4b24", outline="#f4dc4b", width=3)
+    manip_top = max(event["high"], event["manipulation"])
+    manip_bottom = min(event["low"], event["manipulation"])
+    draw.rectangle((x_at(manipulation_i)-16, y_at(manip_top), x_at(manipulation_i)+28, y_at(manip_bottom)),
+                   fill="#ff657535", outline="#ff6575", width=3)
+    side_color = "#42e889" if event["side"] == "LONG" else "#ff6575"
+    draw.rectangle((x_at(manipulation_i), top, right, bottom), fill="#4aa3ff16")
+    for n in range(6):
+        y = top+n*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#293040", width=1)
+    candle_w = max(4, int((right-left)/max(1, len(bars))*.55))
+    for index, bar in enumerate(bars):
+        x = x_at(index)
+        color = "#37d67a" if bar.close >= bar.open else "#ff5c6c"
+        draw.line((x, y_at(bar.high), x, y_at(bar.low)), fill=color, width=2)
+        y1, y2 = y_at(bar.open), y_at(bar.close)
+        draw.rectangle((x-candle_w/2, min(y1, y2), x+candle_w/2, max(y1, y2)+1), fill=color)
+    # Границы накопления, sweep и подтверждённый выход.
+    draw.line((x_at(box_start), y_at(event["high"]), x_at(exit_i), y_at(event["high"])), fill="#f4dc4b", width=2)
+    draw.line((x_at(box_start), y_at(event["low"]), x_at(exit_i), y_at(event["low"])), fill="#f4dc4b", width=2)
+    mx, my = x_at(manipulation_i), y_at(event["manipulation"])
+    ex, ey = x_at(exit_i), y_at(event["close"])
+    draw.ellipse((mx-9, my-9, mx+9, my+9), fill="#ff6575", outline="#ffffff", width=2)
+    draw.line((mx, my, ex, ey), fill=side_color, width=5)
+    direction = -1 if event["side"] == "LONG" else 1
+    draw.polygon(((ex, ey), (ex-18, ey+direction*10), (ex-8, ey-direction*17)), fill=side_color)
+    draw.text((x_at(box_start)+8, top+12), "НАКОПЛЕНИЕ", fill="#f4dc4b", font=small)
+    draw.text((max(left, mx-75), bottom+10), "МАНИПУЛЯЦИЯ", fill="#ff8b98", font=small)
+    draw.text((max(left, ex-210), max(top, ey-38)), "ПОДТВЕРЖДЁННЫЙ ВЫХОД", fill=side_color, font=small)
+    draw.text((left, 26), f"{event['symbol']} · AMD / POWER OF THREE · {event['side']}", fill="#f1f5fb", font=font)
+    draw.text((left, 657), "Реальные закрытые H1-свечи · M15/H1 подтверждает выход", fill="#aeb7c6", font=small)
+    output = io.BytesIO()
+    output.name = f"amd_{event['symbol'].replace('/', '')}_{event['side']}_{event['exit_dt'].replace(':', '-')}.png"
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "AMD_CHART_IMAGES_ENABLED", True):
+        return None
+    return render_chart(card[0], card[1])
 
 
 def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str:
@@ -232,6 +312,7 @@ def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str
 
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
+    _PENDING_CARDS.clear()
     state = _load()
     if int(state.get("logic_version") or 0) != 2:
         # Раньше событие могло попасть в sent ещё до отбора и доставки Telegram.
@@ -258,6 +339,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             pending[digest] = {"key": event["key"]}
             if not first:
                 messages.append(text)
+                _PENDING_CARDS[text] = (event, by_tf)
         except Exception:
             log.exception("AMD %s", symbol)
     state["bootstrapped"] = True
