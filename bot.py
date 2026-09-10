@@ -448,6 +448,36 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
         await send(app, chat_id, part)
 
 
+def _enqueue_navigator(state: dict, text: str) -> None:
+    """Сохраняет обязательное сопровождение до подтверждённой доставки."""
+    if not text:
+        return
+    outbox = state.setdefault("navigator_outbox", [])
+    if not any(item.get("text") == text for item in outbox if isinstance(item, dict)):
+        outbox.append({"text": text, "saved_at": time.time()})
+    state["navigator_outbox"] = outbox[-30:]
+
+
+async def _flush_navigator_outbox(app: Application, chat_id: int, state: dict) -> None:
+    """Доставляет Навигатор и оставляет неотправленное для следующего скана."""
+    outbox = state.setdefault("navigator_outbox", [])
+    while outbox:
+        item = outbox[0]
+        text = item.get("text", "") if isinstance(item, dict) else ""
+        if not text:
+            outbox.pop(0)
+            continue
+        try:
+            await _send_parts(app, chat_id, text)
+            signal_navigator.mark_delivered(text)
+            outbox.pop(0)
+            save_state(state)
+        except Exception:
+            log.exception("Доставка обязательного сопровождения Навигатора")
+            save_state(state)
+            break
+
+
 def _alert_pair(text: str) -> str:
     match = re.search(r"(?:Пара:\s*|💱 Пара:\s*)([A-Z]{3}/[A-Z]{3})", text or "")
     if not match:
@@ -821,6 +851,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             limit=remaining,
             blocked_pairs=set(bucket.get("pairs") or []),
         ) if remaining else []
+        # Повторяем карточки, чья предыдущая отправка временно не удалась.
+        # Они не расходуют лимит новых исходных сигналов.
+        await _flush_navigator_outbox(context.application, int(chat_id), state)
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
                 signal_journal.update_market(market)
@@ -868,8 +901,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     signal_navigator.register_card(companion[0], companion[1], closed_dt)
             if companion:
                 nav_text, _nav_sources = companion
-                await _send_parts(context.application, int(chat_id), nav_text)
-                signal_navigator.mark_delivered(nav_text)
+                # Сохраняем раньше сетевой отправки: после уже доставленного
+                # паттерна Навигатор больше не может потеряться.
+                _enqueue_navigator(state, nav_text)
+                save_state(state)
+                await _flush_navigator_outbox(context.application, int(chat_id), state)
                 if pair and direct_side:
                     state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
         # One small current-H1 record is enough; old budgets cannot affect new hours.
