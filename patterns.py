@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import io
 import logging
 import os
 from dataclasses import dataclass
@@ -21,6 +22,10 @@ CANDLE_PATTERN_NAMES = {
     "Бычий Belt Hold", "Медвежий Belt Hold",
 }
 
+# Карточки живут только в памяти одного сканирования. Текст остаётся прежним,
+# поэтому общий ранжировщик и Навигатор не зависят от наличия картинки.
+_PENDING_CARDS: dict[str, tuple[str, Pattern, dict]] = {}
+
 
 @dataclass
 class Pattern:
@@ -32,7 +37,6 @@ class Pattern:
     fact: str
     level: float
     dt: str
-    event_id: str = ""
 
 
 def _path() -> Path:
@@ -72,10 +76,10 @@ def _bear(c: Candle) -> bool:
     return c.close < c.open
 
 
-def _add(out, name, side, tf, q, conf, fact, level, c, event_id: str = ""):
+def _add(out, name, side, tf, q, conf, fact, level, c):
     q, conf = int(min(96, q)), int(min(94, conf))
     if q >= cfg.PATTERN_MIN_QUALITY and conf >= cfg.PATTERN_MIN_CONFIDENCE:
-        out.append(Pattern(name, side, tf, q, conf, fact, level, c.dt, event_id))
+        out.append(Pattern(name, side, tf, q, conf, fact, level, c.dt))
 
 
 def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
@@ -167,33 +171,111 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     # Head & shoulders / inverse H&S with closed neckline break.
     if len(highs) >= 3 and highs[-2][1] > highs[-3][1] and highs[-2][1] > highs[-1][1] and abs(highs[-3][1]-highs[-1][1]) <= av*.65:
         necks = [p for i,p in lows if highs[-3][0] < i < highs[-1][0]]
-        if necks and prev.close >= min(necks) and c.close < min(necks) - av*.05 and _bear(c):
+        if necks and c.close < min(necks):
             _add(out, "Голова и плечи", "SHORT", tf, 91, 86, "Правое плечо завершено; линия шеи пробита закрытой свечой.", min(necks), c)
     if len(lows) >= 3 and lows[-2][1] < lows[-3][1] and lows[-2][1] < lows[-1][1] and abs(lows[-3][1]-lows[-1][1]) <= av*.65:
         necks = [p for i,p in highs if lows[-3][0] < i < lows[-1][0]]
-        if necks and prev.close <= max(necks) and c.close > max(necks) + av*.05 and _bull(c):
+        if necks and c.close > max(necks):
             _add(out, "Перевёрнутая голова и плечи", "LONG", tf, 91, 86, "Правое плечо завершено; линия шеи пробита закрытой свечой.", max(necks), c)
+    return out
 
-    # Треугольник считается завершённым только на первом закрытом пробое.
-    if len(highs) >= 3 and len(lows) >= 3:
-        hs = [value for _index, value in highs[-3:]]
-        ls = [value for _index, value in lows[-3:]]
-        high_flat = max(hs) - min(hs) <= tol
-        low_flat = max(ls) - min(ls) <= tol
-        falling_highs = hs[0] > hs[1] > hs[2] and hs[0] - hs[2] >= tol * .5
-        rising_lows = ls[0] < ls[1] < ls[2] and ls[2] - ls[0] >= tol * .5
-        resistance = sum(hs) / len(hs) if high_flat else hs[-1]
-        support = sum(ls) / len(ls) if low_flat else ls[-1]
-        bullish_shape = rising_lows and (high_flat or falling_highs)
-        bearish_shape = falling_highs and (low_flat or rising_lows)
-        if bullish_shape and prev.close <= resistance and c.close > resistance + av*.05 and _bull(c):
-            shape = "восходящий" if high_flat else "симметричный"
-            _add(out, f"{shape.capitalize()} треугольник", "LONG", tf, 88, 84,
-                 f"Границы фигуры сжимались; закрытая свеча впервые пробила верхнюю границу фигуры «{shape} треугольник».", resistance, c)
-        if bearish_shape and prev.close >= support and c.close < support - av*.05 and _bear(c):
-            shape = "нисходящий" if low_flat else "симметричный"
-            _add(out, f"{shape.capitalize()} треугольник", "SHORT", tf, 88, 84,
-                 f"Границы фигуры сжимались; закрытая свеча впервые пробила нижнюю границу фигуры «{shape} треугольник».", support, c)
+
+def _line(points: list[tuple[int, float]], at: int) -> tuple[float, float] | None:
+    """Линейная граница через подтверждённые экстремумы: значение и наклон."""
+    if len(points) < 2:
+        return None
+    points = points[-4:]
+    xs, ys = [float(x) for x, _ in points], [float(y) for _, y in points]
+    xm, ym = sum(xs) / len(xs), sum(ys) / len(ys)
+    den = sum((x-xm) ** 2 for x in xs)
+    if den <= 0:
+        return None
+    slope = sum((x-xm)*(y-ym) for x, y in zip(xs, ys)) / den
+    return ym + slope*(at-xm), slope
+
+
+def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
+    """Клинья, флаги, вымпелы, прямоугольники и треугольники.
+
+    Очертание фигуры само по себе не отправляется: последняя закрытая свеча
+    обязана впервые пробить расчётную границу телом.
+    """
+    if len(bars) < 45:
+        return []
+    out, previous, last = [], bars[-2], bars[-1]
+    history = bars[-42:-1]
+    av = atr(bars, 14) or _range(last)
+    piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(tf, 3)))
+    highs = [(i, price) for i, price, kind in piv if kind == "H"]
+    lows = [(i, price) for i, price, kind in piv if kind == "L"]
+    upper, lower = _line(highs, len(history)), _line(lows, len(history))
+    if not upper or not lower or len(highs) < 2 or len(lows) < 2:
+        return out
+    top, top_slope = upper
+    bottom, bottom_slope = lower
+    if top <= bottom:
+        return out
+    top_n, bottom_n = top_slope / av, bottom_slope / av
+    tolerance = av * .05
+    breaks_up = previous.close <= top + tolerance and last.close > top + tolerance and _bull(last)
+    breaks_down = previous.close >= bottom - tolerance and last.close < bottom - tolerance and _bear(last)
+    old_x = max(0, len(history)-18)
+    old_top = top-top_slope*(len(history)-old_x)
+    old_bottom = bottom-bottom_slope*(len(history)-old_x)
+    converging = (top-bottom) < (old_top-old_bottom) * .82
+
+    # Нейтральные фигуры получают направление только от фактического пробоя.
+    if abs(top_n) <= .035 and bottom_n >= .018 and converging:
+        if breaks_up:
+            _add(out, "Восходящий треугольник — пробой вверх", "LONG", tf, 86, 82,
+                 "Горизонтальное сопротивление и растущие минимумы завершены; закрытая свеча пробила верхнюю границу.", top, last)
+        elif breaks_down:
+            _add(out, "Восходящий треугольник — пробой вниз", "SHORT", tf, 80, 76,
+                 "Цена нарушила растущую нижнюю границу закрытой свечой; бычий сценарий фигуры отменён.", bottom, last)
+    if top_n <= -.018 and abs(bottom_n) <= .035 and converging:
+        if breaks_down:
+            _add(out, "Нисходящий треугольник — пробой вниз", "SHORT", tf, 86, 82,
+                 "Снижающиеся максимумы и горизонтальная поддержка завершены; закрытая свеча пробила нижнюю границу.", bottom, last)
+        elif breaks_up:
+            _add(out, "Нисходящий треугольник — пробой вверх", "LONG", tf, 80, 76,
+                 "Цена нарушила снижающуюся верхнюю границу закрытой свечой; медвежий сценарий фигуры отменён.", top, last)
+    if top_n <= -.015 and bottom_n >= .015 and converging:
+        side, level = ("LONG", top) if breaks_up else (("SHORT", bottom) if breaks_down else ("", 0))
+        if side:
+            _add(out, "Симметричный треугольник", side, tf, 84, 80,
+                 f"Сходящиеся границы завершены; закрытая свеча подтвердила пробой {'вверх' if side == 'LONG' else 'вниз'}.", level, last)
+
+    # Клин: обе границы наклонены в одну сторону, но диапазон сужается.
+    if converging and top_n < -.015 and bottom_n < -.015 and breaks_up:
+        _add(out, "Падающий клин", "LONG", tf, 87, 83,
+             "Обе границы снижались и сходились; закрытая свеча пробила верхнюю границу клина.", top, last)
+    if converging and top_n > .015 and bottom_n > .015 and breaks_down:
+        _add(out, "Восходящий клин", "SHORT", tf, 87, 83,
+             "Обе границы росли и сходились; закрытая свеча пробила нижнюю границу клина.", bottom, last)
+
+    # Прямоугольник: почти горизонтальные границы и не менее двух касаний.
+    if abs(top_n) <= .035 and abs(bottom_n) <= .035:
+        if breaks_up:
+            _add(out, "Бычий прямоугольник", "LONG", tf, 84, 80,
+                 "Боковой диапазон завершён закрытым пробоем верхней границы.", top, last)
+        elif breaks_down:
+            _add(out, "Медвежий прямоугольник", "SHORT", tf, 84, 80,
+                 "Боковой диапазон завершён закрытым пробоем нижней границы.", bottom, last)
+
+    # Флаг/вымпел требует выраженного импульса перед короткой консолидацией.
+    impulse_start, impulse_end = bars[-18], bars[-11]
+    impulse = (impulse_end.close-impulse_start.close) / av
+    consolidation = bars[-10:-1]
+    cons_high, cons_low = max(x.high for x in consolidation), min(x.low for x in consolidation)
+    narrowed = _range(consolidation[-1]) < max(_range(x) for x in consolidation[:4]) * .75
+    if impulse >= 1.8 and last.close > cons_high + tolerance and _bull(last):
+        name = "Бычий вымпел" if narrowed else "Бычий флаг"
+        _add(out, name, "LONG", tf, 86, 82,
+             "После бычьего импульса коррекционная фигура завершилась закрытым пробоем вверх.", cons_high, last)
+    if impulse <= -1.8 and last.close < cons_low - tolerance and _bear(last):
+        name = "Медвежий вымпел" if narrowed else "Медвежий флаг"
+        _add(out, name, "SHORT", tf, 86, 82,
+             "После медвежьего импульса коррекционная фигура завершилась закрытым пробоем вниз.", cons_low, last)
     return out
 
 
@@ -260,7 +342,7 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
             details = ", ".join(f"{name.upper()}={ratios[name]:.2f}" for name in rules)
             _add(out, f"Гармонический паттерн {label}", side, tf, 88, 83,
                  f"Завершена зеркальная структура XABCD ({details}); закрытая свеча подтвердила реакцию от точки D.",
-                 d[1], last, event_id=f"{bars[d[0]].dt}|{d[1]}")
+                 d[1], last)
     return out
 
 
@@ -285,7 +367,7 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
         confirmed = last.close > last.open if side == "LONG" else last.close < last.open
         if confirmed:
             q = 82 + int(max(0, 8 - abs(1-ratio_cd)*10))
-            _add(out, "Гармонический AB=CD", side, tf, q, 80, f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last, event_id=f"{bars[d[0]].dt}|{d[1]}")
+            _add(out, "Гармонический AB=CD", side, tf, q, 80, f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last)
     return out
 
 
@@ -330,6 +412,7 @@ def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
         bars = bars[-lookback:]
         found.extend(candlestick_patterns(tf, bars))
         found.extend(structural_patterns(tf, bars))
+        found.extend(chart_patterns(tf, bars))
         found.extend(pattern_123(tf, bars))
         found.extend(harmonic_abcd(tf, bars))
         found.extend(harmonic_xabcd(tf, bars))
@@ -382,16 +465,77 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "") -> str:
     ])
 
 
-def _pattern_key(symbol: str, pattern: Pattern) -> str:
-    """Гармоника привязана к геометрии D, а не к каждой следующей свече."""
-    if pattern.name.startswith("Гармонический"):
-        identity = pattern.event_id or pattern.dt
-    else:
-        identity = pattern.dt
-    return f"{symbol}|{pattern.tf}|{pattern.name}|{pattern.side}|{identity}"
+def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.BytesIO:
+    """PNG с закрытыми свечами, опорными экстремумами и точкой подтверждения."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    bars = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
+    bars = bars[-max(30, int(getattr(cfg, "PATTERN_CHART_LOOKBACK", 55))):]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 23)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font, small = ImageFont.load_default(size=23), ImageFont.load_default(size=17)
+    left, right, top, bottom = 72, 1135, 92, 610
+    values = [value for bar in bars for value in (bar.low, bar.high)] + [pattern.level]
+    pmin, pmax = min(values), max(values)
+    pad = max((pmax-pmin)*.08, abs(pattern.level)*.0001)
+    pmin, pmax = pmin-pad, pmax+pad
+    def x_at(index: float) -> float:
+        return left + index/max(1, len(bars)-1)*(right-left)
+    def y_at(price: float) -> float:
+        return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+    for index in range(6):
+        y = top+index*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#293040", width=1)
+    candle_w = max(4, int((right-left)/max(1, len(bars))*.55))
+    for index, bar in enumerate(bars):
+        x = x_at(index)
+        color = "#37d67a" if bar.close >= bar.open else "#ff5c6c"
+        draw.line((x, y_at(bar.high), x, y_at(bar.low)), fill=color, width=2)
+        y1, y2 = y_at(bar.open), y_at(bar.close)
+        draw.rectangle((x-candle_w/2, min(y1, y2), x+candle_w/2, max(y1, y2)+1), fill=color)
+    # Последние подтверждённые экстремумы дают наглядный контур фигуры.
+    pivots = _pivots(bars[:-1], max(2, cfg.PATTERN_PIVOT.get(pattern.tf, 3)))
+    for kind, color in (("H", "#62b0ff"), ("L", "#ffd44d")):
+        points = [(x_at(i), y_at(price)) for i, price, value_kind in pivots if value_kind == kind][-4:]
+        if len(points) >= 2:
+            draw.line(points, fill=color, width=4)
+            for x, y in points:
+                draw.ellipse((x-5, y-5, x+5, y+5), fill=color)
+    level_y = y_at(pattern.level)
+    side_color = "#42e889" if pattern.side == "LONG" else "#ff6575"
+    draw.line((left, level_y, right, level_y), fill=side_color, width=3)
+    bx, by = x_at(len(bars)-1), y_at(bars[-1].close)
+    draw.ellipse((bx-11, by-11, bx+11, by+11), fill=side_color, outline="#ffffff", width=2)
+    draw.text((max(left, bx-245), max(top, by-48)), "ПОДТВЕРЖДЁННЫЙ ПРОБОЙ", fill=side_color, font=small)
+    icon = "LONG" if pattern.side == "LONG" else "SHORT"
+    draw.text((left, 28), f"{symbol} · {pattern.tf} · {pattern.name}", fill="#f1f5fb", font=font)
+    draw.text((left, 650), f"{icon} · фигура подтверждена закрытой свечой", fill=side_color, font=small)
+    out = io.BytesIO()
+    out.name = f"pattern_{symbol.replace('/', '')}_{pattern.tf}_{pattern.dt.replace(':', '-')}.png"
+    image.save(out, format="PNG", optimize=True)
+    out.seek(0)
+    return out
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
+        return None
+    symbol, pattern, by_tf = card
+    return render_pattern_chart(symbol, pattern, by_tf)
+
+
+def mark_card_delivered(text: str) -> None:
+    _PENDING_CARDS.pop(text, None)
 
 
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
+    _PENDING_CARDS.clear()
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
@@ -413,14 +557,16 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 # candidate per pair. Otherwise old patterns leak out one by
                 # one on every following scan.
                 for p in candidates:
-                    sent[_pattern_key(symbol, p)] = p.dt
+                    sent[f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"] = p.dt
                 continue
             for p in candidates:
-                key = _pattern_key(symbol, p)
+                key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
                 if key in sent:
                     continue
                 sent[key] = p.dt
-                messages.append(_fmt(symbol, p, context_side))
+                text = _fmt(symbol, p, context_side)
+                messages.append(text)
+                _PENDING_CARDS[text] = (symbol, p, by_tf)
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:
             log.exception("Паттерны %s", symbol)
