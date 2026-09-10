@@ -171,8 +171,16 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#10131d")
     draw = ImageDraw.Draw(image, "RGBA")
-    font = ImageFont.load_default(size=22)
-    small = ImageFont.load_default(size=17)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 22)
+            small = ImageFont.truetype("DejaVuSans.ttf", 17)
+        except OSError:
+            font = ImageFont.load_default(size=22)
+            small = ImageFont.load_default(size=17)
     left, right, top, bottom = 75, 1140, 70, 625
     horizons = [1, 2, 4, 8]
     expected = result.get("expected_by_horizon") or {}

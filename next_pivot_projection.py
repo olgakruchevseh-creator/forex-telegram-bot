@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import math
 import os
 from pathlib import Path
 
@@ -145,6 +147,15 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict | None:
     aligned = sum(item["side"] == primary["side"] for item in available)
     result = dict(primary)
     result.update({"symbol": symbol, "aligned": aligned, "available": len(available)})
+    bars = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    recent = bars[-12:]
+    path = sum(abs(b.close-a.close) for a, b in zip(recent, recent[1:]))
+    efficiency = abs(recent[-1].close-recent[0].close)/path if len(recent) > 1 and path else 0.0
+    weak_structure = result["structure"] in ("LH", "HL")
+    result["main_score"] = int(result["probability"])
+    result["flat_score"] = max(15, min(70, int(round((1-efficiency)*70))))
+    result["reaction_score"] = (max(55, int(result["probability"])) if weak_structure
+                                else max(15, min(55, 100-int(result["probability"]))))
     return result
 
 
@@ -178,12 +189,110 @@ def format_near(result: dict) -> str:
         f"Ожидаемое окно: в пределах ближайших {bars_low}–{bars_high} закрытых H1",
         f"Исторических сравнений: {result['samples']}", f"Вероятность структуры: {result['probability']}%",
         f"Согласование проекций: {result['aligned']} из {result['available']} ТФ",
+        f"🟢/🔴 Основной путь к Pivot: {result.get('main_score', result['probability'])}%",
+        f"🟡 Риск отката или флэта по пути: {result.get('flat_score', 0)}%",
+        f"{reaction_icon} Вероятность реакции {reaction} после зоны: {result.get('reaction_score', 0)}%",
         f"Возможная следующая реакция: {reaction} {reaction_icon} · требует отдельного подтверждения H1/M15", "",
         "⚠️ Факт: цена приблизилась к статистической зоне следующего ZigZag-pivot. Это зона возможного отката или разворота, а не гарантированная точка.",
     ])
 
 
-def process_market(market: dict) -> list[str]:
+def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
+    """PNG: свечи, зона Pivot и три независимых сценария движения."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    bars = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])[-40:]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        # Pillow обычно содержит DejaVuSans и умеет найти его по имени.
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 22)
+            small = ImageFont.truetype("DejaVuSans.ttf", 17)
+        except OSError:
+            font = ImageFont.load_default(size=22)
+            small = ImageFont.load_default(size=17)
+    left, right, top, bottom = 75, 1135, 70, 615
+    current = float(result["current"])
+    av = atr(bars, 14) if len(bars) >= 15 else max(abs(result["zone_high"]-result["zone_low"]), current*.0005)
+    direction = 1 if result["side"] == "LONG" else -1
+    zone_mid = (float(result["zone_low"])+float(result["zone_high"]))/2
+    reaction_price = zone_mid-direction*av*.9
+    pullback_price = current-direction*av*.5
+    prices = [current, result["zone_low"], result["zone_high"], reaction_price, pullback_price]
+    prices += [v for bar in bars for v in (bar.low, bar.high)]
+    pmin, pmax = min(prices), max(prices)
+    pad = max((pmax-pmin)*.10, av*.25)
+    pmin, pmax = pmin-pad, pmax+pad
+    historical = max(1, len(bars))
+    future = max(8, min(14, int(result["bars_high"])+4))
+    total = historical+future
+    def x_at(index: float) -> float:
+        return left+index/max(1, total-1)*(right-left)
+    def y_at(price: float) -> float:
+        return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+    for i in range(6):
+        y = top+i*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#2a3040", width=1)
+        value = pmax-i*(pmax-pmin)/5
+        decimals = 3 if "JPY" in result["symbol"] else 5
+        draw.text((right+6, y-9), f"{value:.{decimals}f}", fill="#9aa4b5", font=small)
+    candle_w = max(4, int((right-left)/total*.55))
+    for i, bar in enumerate(bars):
+        x = x_at(i)
+        color = "#37d67a" if bar.close >= bar.open else "#ff5c6c"
+        draw.line((x, y_at(bar.high), x, y_at(bar.low)), fill=color, width=2)
+        y1, y2 = y_at(bar.open), y_at(bar.close)
+        draw.rectangle((x-candle_w/2, min(y1,y2), x+candle_w/2, max(y1,y2)+1), fill=color)
+    start_x = x_at(historical-1)
+    zone_x1 = x_at(historical-1+max(1, int(result["bars_low"])))
+    zone_x2 = x_at(historical-1+max(3, int(result["bars_high"])))
+    draw.rectangle((zone_x1, y_at(result["zone_high"]), zone_x2, y_at(result["zone_low"])),
+                   fill="#4aa3ff35", outline="#62b0ff", width=3)
+    target_x = (zone_x1+zone_x2)/2
+    main_color = "#42e889" if direction > 0 else "#ff6575"
+    # Основной путь к зоне.
+    draw.line((start_x, y_at(current), target_x, y_at(zone_mid)), fill=main_color, width=5)
+    draw.polygon([(target_x, y_at(zone_mid)), (target_x-15, y_at(zone_mid)+10*direction),
+                  (target_x-10, y_at(zone_mid)-14*direction)], fill=main_color)
+    # Альтернатива: локальный откат/флэт, затем повторный подход к Pivot.
+    alt_x = x_at(historical+1)
+    draw.line((start_x, y_at(current), alt_x, y_at(pullback_price), target_x, y_at(zone_mid)),
+              fill="#ffd44d", width=4)
+    # Реакция после достижения зоны.
+    end_x = x_at(historical-1+future)
+    draw.line((target_x, y_at(zone_mid), end_x, y_at(reaction_price)), fill="#d889ff", width=4)
+    decimals = 3 if "JPY" in result["symbol"] else 5
+    reaction = "SHORT" if direction > 0 else "LONG"
+    # Фиксированная легенда не перекрывается, даже когда три цены находятся
+    # очень близко друг к другу или окно Pivot начинается уже на следующей H1.
+    legend_x, legend_y = 750, 82
+    draw.rounded_rectangle((legend_x-14, legend_y-12, right-8, legend_y+92), radius=10,
+                           fill="#171c29dd", outline="#353d50", width=2)
+    draw.text((legend_x, legend_y),
+              f"Основной → {zone_mid:.{decimals}f} · {result.get('main_score', result['probability'])}%",
+              fill=main_color, font=small)
+    draw.text((legend_x, legend_y+31),
+              f"Откат/флэт → {pullback_price:.{decimals}f} · {result.get('flat_score', 0)}%",
+              fill="#ffd44d", font=small)
+    draw.text((legend_x, legend_y+62),
+              f"После Pivot {reaction} → {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
+              fill="#d889ff", font=small)
+    draw.text((left, 22), f"{result['symbol']} · NEXT PIVOT · {result['structure']}", fill="#f1f5fb", font=font)
+    draw.text((left, height-58), "Сценарии независимы · вероятностная проекция, не торговая гарантия",
+              fill="#9aa4b5", font=small)
+    output = io.BytesIO()
+    output.name = f"next_pivot_{result['symbol'].replace('/', '')}_{result['pivot_dt'].replace(':', '-')}.png"
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
+def process_market(market: dict) -> list[dict]:
     state = _load()
     logic_version = 2
     first = not bool(state.get("bootstrapped")) or int(state.get("logic_version") or 0) != logic_version
@@ -209,12 +318,14 @@ def process_market(market: dict) -> list[str]:
         text = format_near(result)
         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
         pending[digest] = {"key": key}
-        candidates.append((result["probability"], result["aligned"], text))
+        candidates.append((result["probability"], result["aligned"], {
+            "text": text, "image": render_chart(result, market.get(symbol) or {})}))
     state["bootstrapped"], state["logic_version"], state["pending"] = True, logic_version, pending
     if len(delivered) > 500:
         state["delivered"] = dict(list(delivered.items())[-350:])
     _save(state)
-    return [max(candidates)[2]] if candidates else []
+    # Вне торгового лимита: каждая новая качественная пара получает свою карту.
+    return [item[2] for item in sorted(candidates, key=lambda item: (item[0], item[1]), reverse=True)]
 
 
 def mark_delivered(text: str) -> bool:

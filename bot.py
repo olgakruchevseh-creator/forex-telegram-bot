@@ -928,9 +928,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Оно не является новым LONG/SHORT и не расходует торговый лимит H1.
         if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
             try:
-                for text in next_pivot_projection.process_market(market):
-                    await _send_parts(context.application, int(chat_id), text)
-                    next_pivot_projection.mark_delivered(text)
+                for alert in next_pivot_projection.process_market(market):
+                    message = await context.application.bot.send_photo(
+                        chat_id=int(chat_id), photo=alert["image"], caption=alert["text"])
+                    log.info("pivot_telegram_message_id=%s pid=%s", getattr(message, "message_id", None), briefing.instance_id())
+                    next_pivot_projection.mark_delivered(alert["text"])
             except Exception:
                 log.exception("Проекция следующего pivot")
 
