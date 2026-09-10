@@ -111,14 +111,15 @@ def _scale_route(route: dict) -> dict:
     total = abs(final - anchor)
     if total <= 0:
         return scaled
-    progress = max(0, min(100, int(round(abs(current - anchor) / total * 100))))
+    direction = 1 if route.get("side") == "LONG" else -1
+    progress = max(0, min(100, int(round((current-anchor) * direction / total * 100))))
     for item in targets:
         item["route_pct"] = max(0, min(100, int(round(abs(float(item["price"]) - anchor) / total * 100))))
     scaled["targets"] = targets
     scaled["progress"] = progress
     tr1_total = abs(float(targets[0]["price"]) - anchor)
     tr1_progress = (100 if tr1_total <= 0 else
-                    max(0, min(100, int(round(abs(current-anchor) / tr1_total * 100)))))
+                    max(0, min(100, int(round((current-anchor) * direction / tr1_total * 100)))))
     scaled["tr1_progress"] = tr1_progress
     scaled["remaining"] = max(0, 100 - tr1_progress)
     scaled["final_target_name"] = f"TR{len(targets)}"
@@ -203,7 +204,22 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
     if not symbol or not side:
         return None
     by_tf = market.get(symbol) or {}
-    route = _trigger_route(symbol, side, by_tf, source_text)
+    active = (_load().get("active") or {}).get(symbol) or {}
+    same_active = bool(active.get("status") == "ACTIVE" and active.get("side") == side)
+    route = None
+    if same_active and active.get("anchor") and active.get("targets"):
+        h1 = movement_progress._bars(by_tf, "H1")
+        source_close = _float_line(source_text, "Цена закрытия")
+        current = source_close if source_close > 0 else (float(h1[-1].close) if h1 else float(active["anchor"]))
+        route = {
+            "symbol": symbol, "side": side, "anchor": float(active["anchor"]),
+            "current": current, "target": float(active.get("target") or active["targets"][0]["price"]),
+            "target_tf": active.get("target_tf") or active["targets"][0].get("tf", ""),
+            "targets": [dict(item) for item in active["targets"]],
+            "mode": active.get("mode") or "LOCAL",
+        }
+    if not route:
+        route = _trigger_route(symbol, side, by_tf, source_text)
     if not route:
         return None
     direction = 1 if side == "LONG" else -1
@@ -233,6 +249,10 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         "zigzag_h4": zz_text, "evidence": ["исходный модуль подтвердил событие"],
         "source_accepted": True, "tf_biases": views,
     }
+    if same_active:
+        previous_names = [part.strip() for part in str(active.get("sources") or "").split("·") if part.strip()]
+        master["source_names_override"] = list(dict.fromkeys(previous_names + [_source_name(source_text)]))
+        master["evidence"] = ["новый модуль дополнительно подтвердил действующий маршрут"]
     return format_confirmed(master, _scale_route(route), [source_text]), [source_text]
 
 
@@ -246,7 +266,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     evidence = list(master.get("evidence") or [])[:3]
     echo = master.get("echo")
     next_pivot = master.get("next_pivot")
-    source_names = list(dict.fromkeys(_source_name(text) for text in sources))
+    source_names = (list(master.get("source_names_override") or [])
+                    or list(dict.fromkeys(_source_name(text) for text in sources)))
     local_early = bool(master.get("local_early"))
     source_accepted = bool(master.get("source_accepted"))
     direction = 1 if side == "LONG" else -1
@@ -263,7 +284,10 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         strength_line = f"• Сила относительно {side}: {directed_gap:+.2f} · 🟡 почти равная"
     navigator_status = ""
     assessment = f"{icon} направление {side} подтверждено по закрытой H1-свече."
+    display_mode = mode_names.get(route["mode"], route["mode"])
     if source_accepted:
+        no_tf_confirmation = (int(master.get("senior_n") or 0) == 0
+                              and int(master.get("junior_n") or 0) == 0)
         conflicts = h1_bias == -direction or directed_gap <= -.03 or zz_opposite
         fully_confirmed = (int(master.get("senior_n") or 0) >= 2
                            and int(master.get("junior_n") or 0) >= 2
@@ -272,6 +296,11 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         if fully_confirmed:
             navigator_status = "✅ ПОЛНОСТЬЮ ПОДТВЕРЖДЁН"
             assessment = f"✅ направление {side} подтверждено закрытыми таймфреймами и принято на сопровождение."
+        elif no_tf_confirmation:
+            navigator_status = "🔴 ЛОКАЛЬНАЯ РЕАКЦИЯ · ОСНОВНОЙ МАРШРУТ НЕ ПОДТВЕРЖДЁН"
+            assessment = (f"🔴 зафиксирована локальная реакция {side}, но закрытые "
+                          "таймфреймы ещё не подтвердили продолжение маршрута.")
+            display_mode = "ЛОКАЛЬНАЯ РЕАКЦИЯ"
         elif conflicts:
             navigator_status = "⚠️ ПРИНЯТ НА СОПРОВОЖДЕНИЕ · ЕСТЬ ВСТРЕЧНЫЕ ФАКТОРЫ"
             assessment = f"⚠️ сигнал {side} принят на сопровождение, но подтверждение пока частичное."
@@ -289,7 +318,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     lines = [
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {master['symbol']}", f"Направление: {side} {icon}",
-        f"Режим: {mode_names.get(route['mode'], route['mode'])}",
+        f"Режим: {display_mode}",
         f"💪 Качество: {master['quality']}/100",
         f"📈 Вероятность: {master['confidence']}%", "",
         *([f"Статус Навигатора: {navigator_status}", ""] if navigator_status else []),
@@ -408,14 +437,30 @@ def mark_delivered(text: str) -> bool:
             old["status"] = "REPLACED"
             old["resolved_at"] = time.time()
             state.setdefault("history", []).append(old)
-        state.setdefault("active", {})[symbol] = scenario
+        if old and old.get("side") == scenario.get("side") and old.get("status") == "ACTIVE":
+            # Повторный модуль подтверждает уже существующий маршрут. Не
+            # сбрасываем anchor, цели и достигнутые TR новой поздней ценой.
+            old_sources = [part.strip() for part in str(old.get("sources") or "").split("·") if part.strip()]
+            new_sources = [part.strip() for part in str(scenario.get("sources") or "").split("·") if part.strip()]
+            old["sources"] = " · ".join(dict.fromkeys(old_sources + new_sources))
+            old["last_h1"] = max(str(old.get("last_h1") or ""), str(scenario.get("last_h1") or ""))
+            old["last_progress"] = max(int(old.get("last_progress") or 0),
+                                       int(scenario.get("last_progress") or 0))
+            old["max_progress"] = max(int(old.get("max_progress") or 0),
+                                      int(scenario.get("max_progress") or 0),
+                                      int(old.get("last_progress") or 0))
+            old["updated_at"] = time.time()
+        else:
+            state.setdefault("active", {})[symbol] = scenario
         state["history"] = (state.get("history") or [])[-300:]
     _save(state)
     return True
 
 
 def _line(text: str, label: str) -> str:
-    match = re.search(rf"^{re.escape(label)}:\s*(.+)$", text or "", re.M | re.I)
+    # Строки исходных модулей часто начинаются с одного эмодзи: например,
+    # «💵 Цена закрытия». Он не должен мешать извлечению фактической цены.
+    match = re.search(rf"^[^\w\n]*{re.escape(label)}:\s*(.+)$", text or "", re.M | re.I)
     return match.group(1).strip() if match else ""
 
 
@@ -452,6 +497,7 @@ def _scenario_from_card(text: str) -> dict:
         "sources": sources, "start_h1": "", "last_h1": "",
         "last_target_dt": "",
         "last_progress": _route_progress_from_card(text),
+        "max_progress": _route_progress_from_card(text),
         "reached_count": 0, "near_for": 0,
         "near_sent": False, "status": "ACTIVE", "created_at": time.time(),
     }
@@ -573,7 +619,13 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             continue
         direction = 1 if item["side"] == "LONG" else -1
         total = abs(target - anchor)
-        progress = max(0, min(100, int(round(((current_bar.close-anchor) * direction) / total * 100))))
+        close_progress = max(0, min(100, int(round(((current_bar.close-anchor) * direction) / total * 100))))
+        favorable_price = (max(bar.high for bar in target_bars) if direction > 0
+                           else min(bar.low for bar in target_bars))
+        excursion_progress = max(0, min(100, int(round(
+            ((favorable_price-anchor) * direction) / total * 100))))
+        progress = max(int(item.get("max_progress") or 0), close_progress, excursion_progress)
+        item["max_progress"] = progress
         highest_reached = reached_before
         for index in range(reached_before, len(targets)):
             price = float(targets[index]["price"])
@@ -584,6 +636,12 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             else:
                 break
         reached = highest_reached > reached_before
+        if highest_reached:
+            reached_price = float(targets[highest_reached-1]["price"])
+            reached_progress = max(0, min(100, int(round(
+                abs(reached_price-anchor) / total * 100))))
+            progress = max(progress, reached_progress)
+            item["max_progress"] = progress
         # Касание цели фиксируется быстро по M5, но отмена маршрута никогда не
         # принимается по внутрисвечному шуму — только по новой закрытой H1.
         invalid = new_h1 and (h1_bar.close <= anchor if direction > 0 else h1_bar.close >= anchor)
@@ -610,7 +668,8 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         digest = hashlib.sha256(message.encode()).hexdigest()[:20]
         pending[digest] = {"symbol": symbol, "action": action, "h1_dt": h1_bar.dt,
                            "target_dt": current_bar.dt,
-                           "progress": progress, "reached_count": highest_reached,
+                           "progress": progress, "max_progress": progress,
+                           "reached_count": highest_reached,
                            "near_for": reached_before + 1}
         messages.append(message)
     state["pending_lifecycle"] = pending
@@ -630,6 +689,8 @@ def mark_lifecycle_delivered(text: str) -> bool:
         item["last_h1"] = event["h1_dt"]
         item["last_target_dt"] = event.get("target_dt") or item.get("last_target_dt", "")
         item["last_progress"] = event["progress"]
+        item["max_progress"] = max(int(item.get("max_progress") or 0),
+                                   int(event.get("max_progress") or event["progress"]))
         if event["action"] == "NEAR":
             item["near_for"] = event["near_for"]
             item["near_sent"] = True

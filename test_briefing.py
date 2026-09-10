@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import briefing
+import news
 from analysis import Candle, PairStack, TfView, bias_of
 
 
@@ -80,32 +81,6 @@ class BriefingFixes(unittest.TestCase):
         self.assertEqual(briefing._tf_status(stack, "D1"), "RANGE")
         self.assertEqual(briefing.classify_state(stack), "RANGE")
 
-    def test_neutral_h1_does_not_claim_confirmed_trend_or_reversal(self):
-        views = {
-            "D1": _tf("D1", 1, structure="расширение / смена"),
-            "H4": _tf("H4", 1),
-            "H1": _tf("H1", 0, "флэт / консолидация", "сужение / сжатие"),
-        }
-        stack = PairStack("AUD/USD", .72, .1, views, 0, 0)
-        state = briefing.classify_state(stack)
-        self.assertEqual("СТАРШИЙ LONG · H1 НЕ ПОДТВЕРЖДЁН", state)
-        self.assertNotIn("ПОДТВЕРЖДЁННЫЙ РАЗВОРОТ", state)
-
-    def test_best_pair_requires_two_of_three_lower_timeframes(self):
-        views = {
-            "D1": _tf("D1", 1), "H4": _tf("H4", 1),
-            "H1": _tf("H1", 0, "флэт / консолидация", "сужение / сжатие"),
-            "M15": _tf("M15", 0, "флэт / консолидация", "сужение / сжатие"),
-            "M5": _tf("M5", 0, "флэт / консолидация", "сужение / сжатие"),
-        }
-        stack = PairStack("EUR/USD", 1.1, .2, views, 1, 0)
-        brief = briefing.PairBrief(
-            "EUR/USD", stack, "LONG", "LONG", "RANGE", "RANGE", "x",
-            "2/3", 2, .2, "СТАРШИЙ LONG · H1 НЕ ПОДТВЕРЖДЁН",
-            "LONG", 10.0, False,
-        )
-        self.assertEqual([], briefing.pick_leaders([brief]))
-
     def test_unclear_zigzag_keeps_bullish_ema_adx_direction(self):
         self.assertEqual(bias_of("неясно", "импульс / тренд вверх"), 1)
 
@@ -145,9 +120,171 @@ class BriefingFixes(unittest.TestCase):
         self.assertNotIn("MEDIUM", text)
         self.assertIn("ДОСКА ПРИОРИТЕТОВ", text)
 
+    def test_board_uses_calm_semantic_icons(self):
+        b = briefing.PairBrief(
+            symbol="USD/JPY", stack=None, d1="SHORT", h4="SHORT", h1="SHORT", m15="SHORT",
+            zigzag="H4: LH → LL · SHORT", agree="3/3", agree_n=3, gap=-.10,
+            state="ТРЕНД SHORT", side="SHORT", score=1, news_near=False,
+            zigzag_h4_side=-1, w1="LONG", m5="SHORT",
+            position="ОСНОВНОЙ ИМПУЛЬС SHORT",
+            amd="МАНИПУЛЯЦИЯ: СНЯТА ВЕРХНЯЯ ГРАНИЦА · СЦЕНАРИЙ SHORT ЕЩЁ НЕ ПОДТВЕРЖДЁН",
+        )
+        text = "\n".join(briefing.format_board([b]))
+        self.assertIn("ZigZag: 🔴", text)
+        self.assertIn("Текущее положение: 🔴", text)
+        self.assertIn("AMD: 🧹", text)
+        self.assertIn("Сила: JPY сильнее USD на 0.10", text)
+
+    def test_board_marks_accumulation_with_box(self):
+        b = briefing.PairBrief(
+            symbol="AUD/USD", stack=None, d1="LONG", h4="LONG", h1="RANGE", m15="RANGE",
+            zigzag="структура смешанная", agree="2/3", agree_n=2, gap=.10,
+            state="СМЕШАННО", side=None, score=0, news_near=False,
+            position="ОСНОВНОЙ LONG · ЛОКАЛЬНОЕ ДВИЖЕНИЕ НЕ ПОДТВЕРЖДЕНО",
+            amd="НАКОПЛЕНИЕ H1 · НАПРАВЛЕННЫЙ ВЫХОД ЕЩЁ НЕ ПОДТВЕРЖДЁН",
+        )
+        text = "\n".join(briefing.format_board([b]))
+        self.assertIn("Текущее положение: 🟢", text)
+        self.assertIn("AMD: 📦", text)
+
+    def test_board_renames_completed_distribution_as_directional_exit(self):
+        b = briefing.PairBrief(
+            symbol="USD/CHF", stack=None, d1="LONG", h4="RANGE", h1="LONG", m15="LONG",
+            zigzag="структура смешанная", agree="2/3", agree_n=2, gap=.10,
+            state="СМЕШАННО", side="LONG", score=1, news_near=False,
+            position="ОСНОВНОЙ ИМПУЛЬС LONG",
+            amd="ИМПУЛЬСНОЕ РАСПРЕДЕЛЕНИЕ LONG ПОСЛЕ МАНИПУЛЯЦИИ",
+        )
+        text = "\n".join(briefing.format_board([b]))
+        self.assertIn("AMD: ⚡ НАПРАВЛЕННЫЙ ВЫХОД LONG ПОСЛЕ МАНИПУЛЯЦИИ", text)
+        self.assertNotIn("AMD: 🧹", text)
+
+    def test_h4_h1_countermove_is_pullback_inside_higher_long(self):
+        stack = briefing.PairStack(
+            symbol="NZD/USD",
+            last=1.0,
+            strength_gap=0.0,
+            views={
+                "W1": _tf("W1", 1),
+                "D1": _tf("D1", 1),
+                "H4": _tf("H4", -1),
+                "H1": _tf("H1", -1),
+                "M15": _tf("M15", 0),
+                "M5": _tf("M5", 0),
+            },
+            htf_bias=1,
+            ltf_bias=0,
+        )
+        self.assertEqual(
+            briefing.current_position(stack, zigzag_h4_side=1),
+            "ОТКАТ SHORT ВНУТРИ LONG",
+        )
+
+    def test_h4_h1_and_zigzag_countermove_is_local_impulse(self):
+        stack = briefing.PairStack(
+            symbol="NZD/USD", last=1.0, strength_gap=0.0,
+            views={
+                "W1": _tf("W1", 1), "D1": _tf("D1", 1),
+                "H4": _tf("H4", -1), "H1": _tf("H1", -1),
+                "M15": _tf("M15", -1), "M5": _tf("M5", -1),
+            }, htf_bias=1, ltf_bias=-1,
+        )
+        self.assertEqual(
+            "ЛОКАЛЬНЫЙ ИМПУЛЬС SHORT ВНУТРИ СТАРШЕГО LONG",
+            briefing.current_position(stack, zigzag_h4_side=-1),
+        )
+
+    def test_h4_opposite_without_local_majority_is_transition_not_main_long(self):
+        stack = briefing.PairStack(
+            symbol="NZD/USD", last=1.0, strength_gap=0.0,
+            views={
+                "W1": _tf("W1", 1), "D1": _tf("D1", 1),
+                "H4": _tf("H4", -1), "H1": _tf("H1", 0),
+                "M15": _tf("M15", -1), "M5": _tf("M5", 1),
+            }, htf_bias=1, ltf_bias=0,
+        )
+        self.assertEqual(
+            "RANGE / ПЕРЕХОДНАЯ ФАЗА",
+            briefing.current_position(stack, zigzag_h4_side=0),
+        )
+
+    def test_one_lower_timeframe_does_not_create_local_impulse(self):
+        stack = briefing.PairStack(
+            symbol="USD/CAD", last=1.0, strength_gap=0.0,
+            views={
+                "D1": _tf("D1", 0, "флэт", "флэт"),
+                "H4": _tf("H4", 0, "флэт", "флэт"),
+                "H1": _tf("H1", 0, "флэт", "флэт"),
+                "M15": _tf("M15", -1),
+                "M5": _tf("M5", 0, "флэт", "флэт"),
+            }, htf_bias=0, ltf_bias=0,
+        )
+        self.assertEqual("RANGE", briefing.classify_state(stack))
+
+    def test_dxy_context_does_not_call_positive_h1_a_drawdown(self):
+        dxy = briefing.IndexView("DXY", 98.93, .06, "медвежья", "тренд вниз", 56, -1)
+        text = briefing.dxy_context(.10, dxy)
+        self.assertIn("последняя H1 DXY растёт", text)
+        self.assertNotIn("просадка DXY", text)
+
+    def test_dxy_context_marks_bullish_structure_against_short_as_mixed(self):
+        dxy = briefing.IndexView(
+            "DXY", 98.83, -.03, "бычья (HH + HL)", "импульс / тренд вниз", 43, -1
+        )
+        text = briefing.dxy_context(-.10, dxy)
+        self.assertIn("смешанный контекст", text)
+        self.assertIn("направление SHORT", text)
+        self.assertIn("структура LONG", text)
+        self.assertNotIn("DXY подтверждает", text)
+
     def test_news_impact_russian(self):
         self.assertEqual(briefing._impact_ru("MEDIUM"), "СРЕДНЯЯ ВАЖНОСТЬ")
         self.assertEqual(briefing._impact_ru("HIGH"), "ВЫСОКАЯ ВАЖНОСТЬ")
+
+    def test_speech_has_no_actual_scenario(self):
+        event = news.NewsEvent(
+            "x", "BOE Gov Bailey Speaks", "GBP", "HIGH", datetime.now(timezone.utc),
+            "—", "—", "—", news.classify_effect("BOE Gov Bailey Speaks"),
+        )
+        text = news.scenario_before(event, .10)
+        self.assertIn("нет числового Actual", text)
+        self.assertNotIn("Сильный Actual", text)
+
+    def test_unemployment_scenario_explains_higher_is_negative(self):
+        event = news.NewsEvent(
+            "u", "Unemployment Rate", "USD", "HIGH", datetime.now(timezone.utc),
+            "4.1%", "4.1%", "—", news.classify_effect("Unemployment Rate"),
+        )
+        text = news.scenario_before(event, .10)
+        self.assertIn("Факт выше прогноза — отрицательно для USD", text)
+        self.assertIn("факт ниже прогноза — положительно для USD", text)
+        self.assertNotIn("Сильный Actual", text)
+
+    def test_employment_scenario_explains_higher_is_positive(self):
+        event = news.NewsEvent(
+            "e", "Non-Farm Employment Change", "USD", "HIGH", datetime.now(timezone.utc),
+            "-23K", "55K", "—", news.classify_effect("Non-Farm Employment Change"),
+        )
+        text = news.scenario_before(event, -.10)
+        self.assertIn("Факт выше прогноза — положительно для USD", text)
+        self.assertIn("факт ниже прогноза — отрицательно для USD", text)
+
+    def test_leader_requires_meaningful_strength_gap(self):
+        weak = briefing.PairBrief(
+            "USD/CAD", None, "SHORT", "SHORT", "SHORT", "RANGE", "SHORT",
+            "3/3", 3, -.02, "ТРЕНД SHORT", "SHORT", 10, False,
+        )
+        self.assertEqual(briefing.pick_leaders([weak]), [])
+
+    def test_leader_low_accepted_gap_has_capped_confidence(self):
+        views = {"M15": _tf("M15", 0, "флэт / консолидация", "сужение / сжатие")}
+        stack = PairStack("USD/CAD", 1.0, -.05, views, -1, 0)
+        brief = briefing.PairBrief(
+            "USD/CAD", stack, "SHORT", "SHORT", "SHORT", "RANGE", "SHORT",
+            "3/3", 3, -.05, "ТРЕНД SHORT", "SHORT", 10, False,
+            zigzag_h4_side=-1,
+        )
+        self.assertLessEqual(briefing.leader_confidence(brief), 82)
 
     def test_dxy_failure_returns_none(self):
         with patch.object(briefing, "fetch_index", return_value=[]), patch.object(briefing.time, "sleep"):

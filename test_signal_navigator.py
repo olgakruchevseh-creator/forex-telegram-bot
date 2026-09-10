@@ -161,6 +161,7 @@ class SignalNavigatorTests(unittest.TestCase):
             messages = signal_navigator.process_lifecycle({"EUR/USD": {"H1": candles}})
             self.assertEqual(1, len(messages))
             self.assertIn("МАРШРУТ ПОЛНОСТЬЮ ОТРАБОТАН", messages[0])
+            self.assertIn("Пройдено расчётного пути: 100%", messages[0])
             self.assertIn("EUR/USD", signal_navigator._load()["active"])
             self.assertTrue(signal_navigator.mark_lifecycle_delivered(messages[0]))
             self.assertNotIn("EUR/USD", signal_navigator._load()["active"])
@@ -189,6 +190,36 @@ class SignalNavigatorTests(unittest.TestCase):
         self.assertEqual([40, 70, 100], [item["route_pct"] for item in scaled["targets"]])
         self.assertEqual(75, scaled["tr1_progress"])
         self.assertEqual(25, scaled["remaining"])
+
+    def test_emoji_prefixed_close_is_used_as_route_anchor(self):
+        self.assertEqual(1.38193, signal_navigator._float_line(
+            "💵 Цена закрытия: 1.38193", "Цена закрытия"))
+
+    def test_zero_of_three_is_only_local_reaction(self):
+        weak = {**master(), "senior_n": 0, "junior_n": 0, "gap": .08,
+                "source_accepted": True,
+                "tf_biases": {"H1": 1}, "zigzag_h4": "RANGE"}
+        text = signal_navigator.format_confirmed(weak, route("SHORT"), [source("SHORT")])
+        self.assertIn("ЛОКАЛЬНАЯ РЕАКЦИЯ · ОСНОВНОЙ МАРШРУТ НЕ ПОДТВЕРЖДЁН", text)
+        self.assertIn("Режим: ЛОКАЛЬНАЯ РЕАКЦИЯ", text)
+
+    def test_same_side_confirmation_merges_sources_without_resetting_route(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):
+            old = signal_navigator._scenario_from_card(
+                signal_navigator.format_confirmed(master(), route(), [source()]))
+            old.update({"sources": "Levels", "status": "ACTIVE", "reached_count": 1,
+                        "max_progress": 40, "last_progress": 40})
+            signal_navigator._save({"active": {"EUR/USD": old}})
+            pattern = source().replace("ПРОБОЙ УРОВНЯ", "ПАТТЕРН ПОДТВЕРЖДЁН")
+            new_text = signal_navigator.format_confirmed(master(),
+                                                         {**route(), "anchor": 1.15}, [pattern])
+            signal_navigator.register_card(new_text, [pattern], "2026-09-09 11:00:00")
+            self.assertTrue(signal_navigator.mark_delivered(new_text))
+            merged = signal_navigator._load()["active"]["EUR/USD"]
+            self.assertEqual(1.10, merged["anchor"])
+            self.assertEqual(1, merged["reached_count"])
+            self.assertIn("Levels", merged["sources"])
+            self.assertIn("Patterns", merged["sources"])
 
     def test_new_card_is_blocked_when_tr1_is_already_more_than_35_percent(self):
         three = {**route(), "current": 1.13,
