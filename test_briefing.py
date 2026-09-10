@@ -177,7 +177,7 @@ class BriefingFixes(unittest.TestCase):
         )
         self.assertEqual(
             briefing.current_position(stack, zigzag_h4_side=1),
-            "ОТКАТ SHORT ВНУТРИ LONG",
+            "НАЧАЛО ОТКАТА SHORT ВНУТРИ LONG · M15/M5 ЕЩЁ НЕ ПОДТВЕРДИЛИ",
         )
 
     def test_h4_h1_and_zigzag_countermove_is_local_impulse(self):

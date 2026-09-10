@@ -76,6 +76,13 @@ class NextPivotProjectionTests(unittest.TestCase):
         self.assertIn("Риск отката или флэта", text)
         self.assertNotIn("Направление:", text)
 
+    def test_message_says_when_price_is_already_inside_zone(self):
+        value = {**near_result(), "current": 1.1055}
+        text = projection.format_near(value)
+        self.assertIn("ЦЕНА В ЗОНЕ ВЕРОЯТНОГО PIVOT", text)
+        self.assertIn("Цена уже находится в ожидаемой Pivot-зоне", text)
+        self.assertNotIn("Ожидаемое окно:", text)
+
     def test_chart_is_a_real_png(self):
         result = projection.analyze_symbol("EUR/USD", {"H1": wave_bars()})
         image = projection.render_chart(result, {"H1": wave_bars()})

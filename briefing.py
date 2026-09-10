@@ -343,6 +343,9 @@ def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0) -> str
         return f"ОСНОВНОЙ ИМПУЛЬС {_dir_word(primary)}"
     if primary and local == -primary:
         return f"ОТКАТ {_dir_word(local)} ВНУТРИ {_dir_word(primary)}"
+    if primary and not local and _tf_bias(stack, "H1") == -primary:
+        return (f"НАЧАЛО ОТКАТА {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)}"
+                " · M15/M5 ЕЩЁ НЕ ПОДТВЕРДИЛИ")
     # Если W1/D1 сохраняют старший маршрут, а H4 и H1 уже синхронно идут
     # против него, это фактический откат даже до подтверждения на M15/M5.
     if primary and _tf_bias(stack, "H4") == -primary and _tf_bias(stack, "H1") == -primary:

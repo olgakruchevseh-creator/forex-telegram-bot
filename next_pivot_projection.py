@@ -178,8 +178,10 @@ def format_near(result: dict) -> str:
     reaction = "SHORT" if result["side"] == "LONG" else "LONG"
     reaction_icon = "🔴" if reaction == "SHORT" else "🟢"
     kind = "ВЕРШИНЫ" if result["kind"] == "high" else "ОСНОВАНИЯ"
-    title = ("🔭 ПРИБЛИЖЕНИЕ К ВЕРОЯТНОМУ PIVOT" if result["probability"] >= 75
-             else "🔭 ПРИБЛИЖЕНИЕ К ЗОНЕ ВОЗМОЖНОГО PIVOT")
+    inside = float(result["zone_low"]) <= float(result["current"]) <= float(result["zone_high"])
+    title = ("🔭 ЦЕНА В ЗОНЕ ВЕРОЯТНОГО PIVOT" if inside else
+             ("🔭 ПРИБЛИЖЕНИЕ К ВЕРОЯТНОМУ PIVOT" if result["probability"] >= 75
+              else "🔭 ПРИБЛИЖЕНИЕ К ЗОНЕ ВОЗМОЖНОГО PIVOT"))
     bars_low = max(1, int(result["bars_low"]))
     bars_high = max(bars_low+2, int(result["bars_high"]))
     return "\n".join([
@@ -187,7 +189,10 @@ def format_near(result: dict) -> str:
         f"💱 Пара: {result['symbol']}", f"Текущее движение: {result['side']} {icon}",
         f"Ожидаемая зона {kind}: {_price(result['symbol'], result['zone_low'])}–{_price(result['symbol'], result['zone_high'])}",
         f"Предполагаемая структура: {result['structure']}",
-        f"Ожидаемое окно: в пределах ближайших {bars_low}–{bars_high} закрытых H1",
+        *(([f"📍 Цена уже находится в ожидаемой Pivot-зоне",
+             f"Возможная реакция может сформироваться в пределах ближайших {bars_low}–{bars_high} закрытых H1"])
+          if inside else
+          [f"Ожидаемое окно: в пределах ближайших {bars_low}–{bars_high} закрытых H1"]),
         f"Исторических сравнений: {result['samples']}", f"Вероятность структуры: {result['probability']}%",
         f"Согласование проекций: {result['aligned']} из {result['available']} ТФ",
         f"🟢/🔴 Основной путь к Pivot: {result.get('main_score', result['probability'])}%",

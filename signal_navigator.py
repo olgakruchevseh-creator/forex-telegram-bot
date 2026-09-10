@@ -42,7 +42,10 @@ def _pair(text: str) -> str:
 
 
 def _side(text: str) -> str:
-    match = re.search(r"(?:Основное\s+)?направление(?: реакции)?:\s*(LONG|SHORT)\b", text or "", re.I)
+    match = re.search(
+        r"(?:Основное\s+)?направление(?:\s+(?:реакции|пробоя))?:\s*(LONG|SHORT)\b",
+        text or "", re.I,
+    )
     return match.group(1) if match else ""
 
 
@@ -124,6 +127,43 @@ def _scale_route(route: dict) -> dict:
     scaled["remaining"] = max(0, 100 - tr1_progress)
     scaled["final_target_name"] = f"TR{len(targets)}"
     return scaled
+
+
+def _route_with_next_pivot(route: dict, pivot: dict | None) -> dict:
+    """Использует Pivot как цель/ограничитель, но никогда как veto сигнала."""
+    if not pivot or pivot.get("side") != route.get("side"):
+        return route
+    current = float(route.get("current") or 0)
+    low, high = float(pivot.get("zone_low") or 0), float(pivot.get("zone_high") or 0)
+    if not current or not low or not high or low > high:
+        return route
+    direction = 1 if route["side"] == "LONG" else -1
+    inside = low <= current <= high
+    route = dict(route)
+    route["next_pivot"] = pivot
+    route["pivot_inside"] = inside
+
+    # Для отката зона вероятного разворота ограничивает весь локальный маршрут.
+    if route.get("mode") == "PULLBACK":
+        ordered = [low, (low + high) / 2, high] if direction > 0 else [high, (low + high) / 2, low]
+        prices = [price for price in ordered
+                  if (price-current)*direction > max(abs(current)*1e-7, 1e-9)]
+        if prices:
+            targets = [{"price": price, "tf": "Next Pivot H1"} for price in prices]
+            route.update({"targets": targets, "target": targets[0]["price"],
+                          "target_tf": targets[0]["tf"]})
+        return route
+
+    # Для основного импульса Pivot становится ближайшим этапом, а не отменяет
+    # более дальние структурные цели H4/D1.
+    entry = low if direction > 0 else high
+    if (entry-current)*direction > max(abs(current)*1e-7, 1e-9):
+        targets = [{"price": entry, "tf": "Next Pivot H1"}]
+        targets.extend(dict(item) for item in (route.get("targets") or [])
+                       if (float(item["price"])-entry)*direction > 0)
+        route["targets"] = targets[:3]
+        route["target"], route["target_tf"] = targets[0]["price"], targets[0]["tf"]
+    return route
 
 
 def _source_number(text: str, label: str, default: int) -> int:
@@ -222,6 +262,9 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         route = _trigger_route(symbol, side, by_tf, source_text)
     if not route:
         return None
+    pivot = (next_pivot_projection.analyze_symbol(symbol, by_tf)
+             if getattr(cfg, "NEXT_PIVOT_ENABLED", True) else None)
+    route = _route_with_next_pivot(route, pivot)
     direction = 1 if side == "LONG" else -1
     views = {}
     for tf in ("D1", "H4", "H1", "M15", "M5"):
@@ -248,6 +291,7 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
         "zigzag_h4": zz_text, "evidence": ["исходный модуль подтвердил событие"],
         "source_accepted": True, "tf_biases": views,
+        "next_pivot": pivot,
     }
     if same_active:
         previous_names = [part.strip() for part in str(active.get("sources") or "").split("·") if part.strip()]
@@ -340,6 +384,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         lines.append(f"• 🔭 Echo: {echo['side']} {echo['confidence']}% · {forecast} · аналогов {echo['sample']}")
     if next_pivot:
         lines.append(f"• 🎯 Следующий pivot: {next_pivot_projection.compact_line(next_pivot)}")
+        if route.get("pivot_inside"):
+            lines.append("• 📍 Цена уже находится внутри ожидаемой Pivot-зоны; потенциал текущего движения ограничен")
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     final_fact = ("Факт: подтверждённое событие исходного модуля принято Навигатором; таймфреймы, сила валют и ZigZag показаны как контекст сопровождения, а не как повторный запрет."
                   if source_accepted else
@@ -386,16 +432,17 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
             route = movement_progress.analyze_for_side(symbol, pair_market, strength, side)
         if not route or route.get("side") != side:
             continue
-        route = _scale_route(route)
+        pivot = (next_pivot_projection.analyze_symbol(symbol, pair_market)
+                 if getattr(cfg, "NEXT_PIVOT_ENABLED", True) else None)
+        route = _scale_route(_route_with_next_pivot(route, pivot))
         max_initial = int(getattr(cfg, "SIGNAL_INITIAL_MAX_PROGRESS_PCT", 35))
         # Новый вход оценивается относительно ближайшей цели, а не далёкой
         # TR3: нельзя выдавать сигнал, когда почти вся TR1 уже пройдена.
         if route.get("tr1_progress", route.get("progress", 100)) > max_initial:
             continue
-        if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
+        if pivot:
             result = dict(result)
-            result["next_pivot"] = next_pivot_projection.analyze_symbol(
-                symbol, market.get(symbol) or {})
+            result["next_pivot"] = pivot
         previous = active.get(symbol) or {}
         reversal = bool(previous and previous.get("side") != side)
         output.append((format_confirmed(result, route, sources, reversal=reversal), sources))
@@ -479,6 +526,13 @@ def _route_progress_from_card(text: str) -> int:
 
 def _scenario_from_card(text: str) -> dict:
     symbol, side = _pair(text), _side(text)
+    mode_text = _line(text, "Режим")
+    mode = {
+        "ОСНОВНОЙ ИМПУЛЬС": "IMPULSE",
+        "ЛОКАЛЬНОЕ ДВИЖЕНИЕ": "LOCAL",
+        "ПОДТВЕРЖДЁННЫЙ ОТКАТ": "PULLBACK",
+        "ЛОКАЛЬНАЯ РЕАКЦИЯ": "LOCAL",
+    }.get(mode_text, "LOCAL")
     target_matches = re.findall(r"^•\s*TR([123])\s*\(([^)]+)\):\s*([0-9.]+)", text or "", re.M)
     targets = [{"name": f"TR{number}", "tf": tf, "price": float(price)}
                for number, tf, price in target_matches]
@@ -494,6 +548,7 @@ def _scenario_from_card(text: str) -> dict:
         "anchor": _float_line(text, "Начало маршрута H1"),
         "target": targets[0]["price"] if targets else 0.0,
         "target_tf": targets[0]["tf"] if targets else "", "targets": targets,
+        "mode": mode,
         "sources": sources, "start_h1": "", "last_h1": "",
         "last_target_dt": "",
         "last_progress": _route_progress_from_card(text),

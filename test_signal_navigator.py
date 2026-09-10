@@ -136,6 +136,33 @@ class SignalNavigatorTests(unittest.TestCase):
         self.assertEqual("LONG", signal_navigator._side(text))
         self.assertEqual([text], signal_navigator.matching_sources("EUR/USD", "LONG", [text]))
 
+    def test_breakout_direction_wording_is_recognized(self):
+        text = "⚡ ПРОБОЙ УРОВНЯ\n💱 Пара: GBP/USD\n🔴 Направление пробоя: SHORT"
+        self.assertEqual("SHORT", signal_navigator._side(text))
+
+    def test_pullback_targets_are_limited_by_matching_next_pivot(self):
+        base = {
+            "symbol": "USD/JPY", "side": "LONG", "mode": "PULLBACK",
+            "anchor": 154.0, "current": 154.1, "target": 156.8, "target_tf": "H4",
+            "targets": [{"price": 156.8, "tf": "H4"}, {"price": 159.0, "tf": "H4"}],
+        }
+        pivot = {"side": "LONG", "zone_low": 154.2, "zone_high": 154.8}
+        adjusted = signal_navigator._route_with_next_pivot(base, pivot)
+        self.assertEqual([154.2, 154.5, 154.8],
+                         [round(item["price"], 1) for item in adjusted["targets"]])
+        self.assertTrue(all(item["tf"] == "Next Pivot H1" for item in adjusted["targets"]))
+
+    def test_main_route_uses_matching_pivot_as_nearest_stage(self):
+        base = {
+            "symbol": "EUR/USD", "side": "LONG", "mode": "IMPULSE",
+            "anchor": 1.10, "current": 1.11, "target": 1.15, "target_tf": "H4",
+            "targets": [{"price": 1.15, "tf": "H4"}, {"price": 1.20, "tf": "D1"}],
+        }
+        adjusted = signal_navigator._route_with_next_pivot(
+            base, {"side": "LONG", "zone_low": 1.12, "zone_high": 1.13})
+        self.assertEqual("Next Pivot H1", adjusted["targets"][0]["tf"])
+        self.assertEqual(1.12, adjusted["targets"][0]["price"])
+
     def test_delivered_card_becomes_active_scenario(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):
             text = signal_navigator.format_confirmed(master(), route(), [source()])
