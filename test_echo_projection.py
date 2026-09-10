@@ -52,7 +52,7 @@ class EchoProjectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, \
              patch.dict(os.environ, {"STATE_DIR": folder}), \
              patch.object(echo.cfg, "PAIRS", ["EUR/USD"]), \
-             patch.object(echo.cfg, "ECHO_ALERT_MIN_CONFIDENCE", .75):
+             patch.object(echo.cfg, "ECHO_ALERT_MIN_CONFIDENCE", .70):
             first = echo.process_market({"EUR/USD": by_tf})
             self.assertEqual(1, len(first))
             self.assertLessEqual(len(first[0]["text"]), 1024)

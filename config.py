@@ -107,14 +107,14 @@ ECHO_MIN_CONFIDENCE = 0.60
 ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.75
 # Самостоятельный Echo: отдельная карточка с графиком, вне торгового лимита.
 ECHO_STANDALONE_ENABLED = True
-ECHO_ALERT_MIN_CONFIDENCE = 0.75
+ECHO_ALERT_MIN_CONFIDENCE = 0.70
 ECHO_CHART_CANDLES = 40
 # Next Pivot Projection — информационная зона возможного следующего экстремума.
 NEXT_PIVOT_ENABLED = True
-NEXT_PIVOT_MIN_SAMPLES = 12
-NEXT_PIVOT_MIN_PROBABILITY = 70
+NEXT_PIVOT_MIN_SAMPLES = 8
+NEXT_PIVOT_MIN_PROBABILITY = 65
 NEXT_PIVOT_MIN_ZONE_ATR = 0.25
-NEXT_PIVOT_NEAR_ATR = 0.30
+NEXT_PIVOT_NEAR_ATR = 0.55
 # Ранний локальный сценарий: только завершённый AMD, подтверждённые M15/M5
 # и ещё не более 45% уже пройденного структурного маршрута.
 LOCAL_AMD_EARLY_ENABLED = True

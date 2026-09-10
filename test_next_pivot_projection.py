@@ -42,6 +42,17 @@ class NextPivotProjectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}), \
              patch.object(projection, "analyze_symbol", return_value=near_result()):
             self.assertEqual([], projection.process_market({"EUR/USD": {}}))
+            state = projection._load()
+            self.assertEqual({}, state.get("delivered"))
+            self.assertEqual("2026-09-09 11:00:00", state.get("bootstrap_h1"))
+            self.assertEqual([], projection.process_market({"EUR/USD": {}}))
+
+        next_hour = {**near_result(), "closed_h1": "2026-09-09 12:00:00"}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):
+            projection._save({"bootstrapped": True, "logic_version": 3, "bootstrap_h1":
+                              "2026-09-09 11:00:00", "delivered": {}})
+            with patch.object(projection, "analyze_symbol", return_value=next_hour):
+                self.assertEqual(1, len(projection.process_market({"EUR/USD": {}})))
 
     def test_near_event_is_committed_only_after_delivery(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}), \
@@ -49,7 +60,7 @@ class NextPivotProjectionTests(unittest.TestCase):
             projection.process_market({})
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}), \
              patch.object(projection, "analyze_symbol", return_value=None):
-            projection._save({"bootstrapped": True, "logic_version": 2, "delivered": {}})
+            projection._save({"bootstrapped": True, "logic_version": 3, "delivered": {}})
             with patch.object(projection, "analyze_symbol", side_effect=lambda symbol, _: near_result(symbol)):
                 messages = projection.process_market({pair: {} for pair in projection.cfg.PAIRS})
                 self.assertEqual(1, len(messages))
@@ -70,11 +81,11 @@ class NextPivotProjectionTests(unittest.TestCase):
         image = projection.render_chart(result, {"H1": wave_bars()})
         self.assertEqual(b"\x89PNG\r\n\x1a\n", image.read(8))
 
-    def test_probability_below_70_is_silent(self):
-        weak = {**near_result(), "probability": 69}
+    def test_probability_below_65_is_silent(self):
+        weak = {**near_result(), "probability": 64}
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}), \
              patch.object(projection, "analyze_symbol", return_value=None):
-            projection._save({"bootstrapped": True, "logic_version": 2, "delivered": {}})
+            projection._save({"bootstrapped": True, "logic_version": 3, "delivered": {}})
             with patch.object(projection, "analyze_symbol", return_value=weak):
                 self.assertEqual([], projection.process_market({"EUR/USD": {}}))
 
@@ -83,7 +94,7 @@ class NextPivotProjectionTests(unittest.TestCase):
         strong = {**near_result("GBP/USD"), "probability": 88}
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}), \
              patch.object(projection.cfg, "PAIRS", ["EUR/USD", "GBP/USD"]):
-            projection._save({"bootstrapped": True, "logic_version": 2, "delivered": {}})
+            projection._save({"bootstrapped": True, "logic_version": 3, "delivered": {}})
             with patch.object(projection, "analyze_symbol",
                               side_effect=lambda symbol, _: weak if symbol == "EUR/USD" else strong):
                 alerts = projection.process_market({"EUR/USD": {}, "GBP/USD": {}})
@@ -94,7 +105,7 @@ class NextPivotProjectionTests(unittest.TestCase):
 
     def test_same_pivot_is_not_repeated_when_zone_edges_move(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):
-            projection._save({"bootstrapped": True, "logic_version": 2, "delivered": {}})
+            projection._save({"bootstrapped": True, "logic_version": 3, "delivered": {}})
             with patch.object(
                 projection, "analyze_symbol",
                 side_effect=lambda symbol, _: near_result(symbol) if symbol == "EUR/USD" else None,

@@ -121,10 +121,10 @@ def _tf_projection(tf: str, raw: list) -> dict | None:
     structure = ("HH" if continuation_probability >= .5 else "LH") if target_kind == "high" else (
         "LL" if continuation_probability >= .5 else "HL")
     probability = int(round(max(continuation_probability, 1-continuation_probability)*100))
-    if probability < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 60)):
+    if probability < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 65)):
         return None
     current = bars[-1].close
-    margin = av*float(getattr(cfg, "NEXT_PIVOT_NEAR_ATR", .30))
+    margin = av*float(getattr(cfg, "NEXT_PIVOT_NEAR_ATR", .55))
     distance = max(0.0, zone_low-current) if direction > 0 else max(0.0, current-zone_high)
     approaching = current <= zone_high+margin if direction > 0 else current >= zone_low-margin
     return {
@@ -295,27 +295,40 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
 
 def process_market(market: dict) -> list[dict]:
     state = _load()
-    logic_version = 2
+    logic_version = 3
     first = not bool(state.get("bootstrapped")) or int(state.get("logic_version") or 0) != logic_version
     if first:
-        # При переходе со старых точных координат зоны не повторяем уже
-        # существующие проекции; текущий снимок становится новым bootstrap.
+        # Старые ключи могли быть записаны как доставленные ещё до реальной
+        # отправки. Новая версия начинает чистую историю, но первый снимок
+        # использует только как исходную точку и ничего не объявляет задним числом.
         state["delivered"] = {}
+        state["bootstrapped"] = True
+        state["logic_version"] = logic_version
+        h1_values = []
+        for symbol in cfg.PAIRS:
+            result = analyze_symbol(symbol, market.get(symbol) or {})
+            if result and result.get("closed_h1"):
+                h1_values.append(result["closed_h1"])
+        state["bootstrap_h1"] = max(h1_values) if h1_values else ""
+        state["pending"] = {}
+        _save(state)
+        return []
     delivered, pending, candidates = state.setdefault("delivered", {}), {}, []
     for symbol in cfg.PAIRS:
         result = analyze_symbol(symbol, market.get(symbol) or {})
         if (not result or not result["near"]
-                or result["samples"] < int(getattr(cfg, "NEXT_PIVOT_MIN_SAMPLES", 12))
-                or result["probability"] < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 70))):
+                or result["samples"] < int(getattr(cfg, "NEXT_PIVOT_MIN_SAMPLES", 8))
+                or result["probability"] < int(getattr(cfg, "NEXT_PIVOT_MIN_PROBABILITY", 65))):
+            continue
+        # После обновления версии ждём следующую закрытую H1, но не помечаем
+        # текущую проекцию доставленной: на новом часу она сможет честно пройти.
+        if state.get("bootstrap_h1") == result["closed_h1"]:
             continue
         if state.get("last_sent_h1") == result["closed_h1"]:
             continue
         # Одна исходная pivot-точка — одно уведомление, даже если при следующей
         # H1 границы статистической зоны немного пересчитались.
         key = f"{symbol}|{result['pivot_dt']}|{result['kind']}"
-        if first:
-            delivered[key] = True
-            continue
         if key in delivered:
             continue
         alignment_ratio = float(result["aligned"])/max(1, int(result["available"]))
