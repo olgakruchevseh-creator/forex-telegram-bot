@@ -8,7 +8,8 @@ import levels
 import patterns
 import zigzag_scanner
 import bot
-from analysis import Candle, closed_candles
+import master_direction
+from analysis import Candle, build_stack, closed_candles
 from levels import Zone
 
 
@@ -65,6 +66,44 @@ class ScannerTests(unittest.TestCase):
         with patch.object(patterns, "_pivots", return_value=pivots):
             found = patterns.harmonic_xabcd("H1", bars)
         self.assertTrue(any(p.name == "Гармонический паттерн Гартли" and p.side == "LONG" for p in found))
+
+    def test_triangle_requires_fresh_closed_breakout(self):
+        bars = trend_bars(40, step=.0001)
+        bars[-2] = Candle(bars[-2].dt, 1.185, 1.195, 1.180, 1.190)
+        bars[-1] = Candle(bars[-1].dt, 1.190, 1.215, 1.188, 1.210)
+        pivots = [
+            (5, 1.200, "H"), (8, 1.150, "L"),
+            (12, 1.201, "H"), (16, 1.165, "L"),
+            (21, 1.199, "H"), (25, 1.180, "L"),
+        ]
+        with patch.object(patterns, "_pivots", return_value=pivots), \
+             patch.object(patterns, "atr", return_value=.010):
+            found = patterns.structural_patterns("H1", bars)
+        self.assertTrue(any(p.name == "Восходящий треугольник" and p.side == "LONG" for p in found))
+
+    def test_head_shoulders_only_on_first_neckline_break(self):
+        bars = trend_bars(40, step=.0001)
+        pivots = [
+            (5, 1.200, "H"), (10, 1.150, "L"),
+            (15, 1.250, "H"), (20, 1.160, "L"), (25, 1.201, "H"),
+        ]
+        bars[-2] = Candle(bars[-2].dt, 1.170, 1.175, 1.155, 1.160)
+        bars[-1] = Candle(bars[-1].dt, 1.160, 1.162, 1.138, 1.140)
+        with patch.object(patterns, "_pivots", return_value=pivots), \
+             patch.object(patterns, "atr", return_value=.010):
+            first = patterns.structural_patterns("H1", bars)
+        self.assertTrue(any(p.name == "Голова и плечи" for p in first))
+        bars[-2] = Candle(bars[-2].dt, 1.145, 1.148, 1.135, 1.140)
+        bars[-1] = Candle(bars[-1].dt, 1.140, 1.142, 1.125, 1.130)
+        with patch.object(patterns, "_pivots", return_value=pivots), \
+             patch.object(patterns, "atr", return_value=.010):
+            repeated = patterns.structural_patterns("H1", bars)
+        self.assertFalse(any(p.name == "Голова и плечи" for p in repeated))
+
+    def test_harmonic_antispam_key_is_geometry_based(self):
+        first = patterns.Pattern("Гармонический AB=CD", "LONG", "H1", 88, 83, "x", 1.12345, "10:00", "D@09:00")
+        later = patterns.Pattern("Гармонический AB=CD", "LONG", "H1", 88, 83, "x", 1.12345, "11:00", "D@09:00")
+        self.assertEqual(patterns._pattern_key("EUR/USD", first), patterns._pattern_key("EUR/USD", later))
     def setUp(self):
         self.old = os.environ.get("STATE_DIR")
         self.tmp = tempfile.mkdtemp()
@@ -80,6 +119,33 @@ class ScannerTests(unittest.TestCase):
         result = closed_candles(trend_bars(), 240)
         self.assertGreaterEqual(len(result), 89)
         self.assertLessEqual(len(result), 90)
+
+    def test_stack_never_uses_open_last_candle(self):
+        closed = trend_bars(60)
+        future = datetime.now(timezone.utc) + timedelta(hours=2)
+        open_bar = Candle(future.strftime("%Y-%m-%d %H:%M:%S"), 9.0, 9.1, 8.9, 9.0)
+        stack = build_stack(
+            "EUR/USD",
+            {"H1": closed + [open_bar], "M15": closed + [open_bar]},
+            {"EUR": .1, "USD": 0},
+        )
+        self.assertIsNotNone(stack)
+        self.assertNotEqual(9.0, stack.last)
+
+    def test_master_rejects_stale_m5_cache(self):
+        h1_open = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+
+        def bar(at):
+            return Candle(at.strftime("%Y-%m-%d %H:%M:%S"), 1.0, 1.1, .9, 1.0)
+
+        fresh = {
+            "H1": [bar(h1_open)],
+            "M15": [bar(h1_open + timedelta(minutes=45))],
+            "M5": [bar(h1_open + timedelta(minutes=55))],
+        }
+        stale = {**fresh, "M5": [bar(h1_open)]}
+        self.assertTrue(master_direction._lower_timeframes_fresh(fresh))
+        self.assertFalse(master_direction._lower_timeframes_fresh(stale))
 
     def test_levels_build_without_hidden_type_error(self):
         bars = trend_bars(100)
@@ -197,22 +263,21 @@ class ScannerTests(unittest.TestCase):
         chosen = bot.select_trade_alerts(items, limit=1)
         self.assertIn("Вероятность: 91%", chosen[0])
 
-    def test_navigator_replaces_only_matching_source_and_keeps_other_modules(self):
-        raw = [
-            (1, "🧩 ПАТТЕРН\n💱 Пара: EUR/USD\nНаправление: LONG"),
-            (1, "⚡ УРОВЕНЬ\n💱 Пара: USD/JPY\nНаправление: SHORT"),
-        ]
-        navigator = [
-            (-1, "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР\n💱 Пара: EUR/USD\nНаправление: LONG 🟢"),
-        ]
-        merged = bot.merge_navigator_with_sources(raw, navigator)
-        self.assertEqual(2, len(merged))
-        self.assertIn("НАВИГАТОР", merged[0][1])
-        self.assertIn("USD/JPY", merged[1][1])
+    def test_pullback_is_context_not_a_new_entry(self):
+        pullback = "↕️ ZIGZAG — ОТКАТ\nПара: EUR/USD\nОсновное направление: LONG"
+        structure = "↕️ ZIGZAG — СТРУКТУРА\nПара: EUR/USD\nОсновное направление: LONG"
+        self.assertTrue(bot.is_context_alert(pullback))
+        self.assertFalse(bot.is_context_alert(structure))
 
-    def test_unconfirmed_source_is_not_removed_by_navigator(self):
-        raw = [(1, "🧩 ПАТТЕРН\n💱 Пара: EUR/USD\nНаправление: LONG")]
-        self.assertEqual(raw, bot.merge_navigator_with_sources(raw, []))
+    def test_h1_reference_uses_majority_not_one_ahead_pair(self):
+        common = trend_bars(25)
+        ahead = list(common)
+        last = common[-1]
+        dt = (datetime.strptime(last.dt, "%Y-%m-%d %H:%M:%S") + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        ahead.append(Candle(dt, last.close, last.close+.001, last.close-.001, last.close))
+        h1 = {symbol: common for symbol in bot.cfg.PAIRS}
+        h1[bot.cfg.PAIRS[0]] = ahead
+        self.assertEqual(common[-1].dt, bot.last_closed_h1_dt(h1))
 
 
 if __name__ == "__main__":

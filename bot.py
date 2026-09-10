@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -154,17 +155,20 @@ def _extract_pairs(data: dict) -> dict[str, list[Candle]]:
 
 
 def fetch_tf_batch(tf: dict, api_key: str) -> dict[str, list[Candle]]:
-    """Сначала пакет из 7 пар, если пусто — по одной."""
+    """Пакет из 7 пар с обязательным дозапросом отсутствующих символов."""
+    out: dict[str, list[Candle]] = {}
     try:
         data = _request_series(",".join(cfg.PAIRS), tf, api_key)
         out = _extract_pairs(data)
-        if out:
+        if len(out) == len(cfg.PAIRS):
             return out
     except Exception as e:
         log.warning("Пакет %s не вышел: %s", tf["key"], e)
 
-    out: dict[str, list[Candle]] = {}
-    for symbol in cfg.PAIRS:
+    missing = [symbol for symbol in cfg.PAIRS if symbol not in out]
+    if missing:
+        log.warning("Пакет %s неполный: дозапрос %s", tf["key"], ", ".join(missing))
+    for symbol in missing:
         try:
             data = _request_series(symbol, tf, api_key)
             if isinstance(data, dict) and isinstance(data.get("values"), list):
@@ -197,9 +201,16 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
         try:
             batch = fetch_tf_batch(tf, api_key)
             ts = time.time()
-            for s, candles in batch.items():
-                CACHE[(s, tf["key"])] = {"ts": ts, "candles": candles}
-                market[s][tf["key"]] = candles
+            for s in cfg.PAIRS:
+                candles = batch.get(s) or []
+                if candles:
+                    CACHE[(s, tf["key"])] = {"ts": ts, "candles": candles}
+                    market[s][tf["key"]] = candles
+                    continue
+                # Частичный batch не должен стирать пригодный кэш другой пары.
+                hit = CACHE.get((s, tf["key"]))
+                if hit and hit.get("candles"):
+                    market[s][tf["key"]] = hit["candles"]
             time.sleep(cfg.REQUEST_PAUSE_SEC)
         except Exception as e:
             log.warning("Пакет %s: %s", tf["key"], e)
@@ -225,7 +236,42 @@ def last_closed_h1_dt(h1: dict[str, list[Candle]]) -> str:
         closed = closed_candles(candles)
         if closed:
             dts.append(closed[-1].dt)
-    return max(dts) if dts else ""
+    if not dts:
+        return ""
+    counts = Counter(dts)
+    # Одна опережающая или запаздывающая пара не имеет права задавать час
+    # всей корзине. При равенстве выбирается более свежая общая метка.
+    return max(counts, key=lambda value: (counts[value], value))
+
+
+def aligned_market(market: dict[str, dict[str, list[Candle]]], h1_dt: str) -> dict:
+    """Выравнивает H1 корзины; пары без общей закрытой H1 исключает из решений."""
+    if not h1_dt:
+        return {symbol: {} for symbol in cfg.PAIRS}
+    aligned: dict[str, dict[str, list[Candle]]] = {}
+    for symbol in cfg.PAIRS:
+        by_tf = market.get(symbol) or {}
+        h1 = [c for c in closed_candles(by_tf.get("H1") or [], 60) if c.dt <= h1_dt]
+        if not h1 or h1[-1].dt != h1_dt:
+            log.warning("PAIR_SKIPPED reason=H1_TIME_MISMATCH symbol=%s expected=%s actual=%s",
+                        symbol, h1_dt, h1[-1].dt if h1 else "empty")
+            aligned[symbol] = {}
+            continue
+        aligned[symbol] = dict(by_tf)
+        aligned[symbol]["H1"] = h1
+    return aligned
+
+
+def aligned_h1_series(market: dict[str, dict[str, list[Candle]]]) -> dict[str, list[Candle]]:
+    reference = last_closed_h1_dt(h1_series(market))
+    return h1_series(aligned_market(market, reference))
+
+
+def complete_h1_basket(market: dict[str, dict[str, list[Candle]]]) -> bool:
+    return all(
+        len((market.get(symbol) or {}).get("H1") or []) > int(cfg.STRENGTH_LOOKBACK)
+        for symbol in cfg.PAIRS
+    )
 
 
 def h1_just_closed(dt_str: str, max_min: int = 12) -> bool:
@@ -366,12 +412,13 @@ async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Считаю силу валют по H1…")
     market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
     h1 = h1_series(market)
-    if not any(len(closed_candles(v)) > cfg.STRENGTH_LOOKBACK for v in h1.values()):
+    aligned_h1 = aligned_h1_series(market)
+    if not all(len(v) > cfg.STRENGTH_LOOKBACK for v in aligned_h1.values()):
         await update.message.reply_text(
-            "Котировки H1 сейчас не пришли. Повтори /now через минуту."
+            "Полная синхронная корзина из 7 H1 сейчас не пришла. Повтори /now через минуту."
         )
         return
-    strength = currency_strength(h1, cfg.STRENGTH_LOOKBACK)
+    strength = currency_strength(aligned_h1, cfg.STRENGTH_LOOKBACK)
     rank = rank_currencies(strength)
     await update.message.reply_text(format_strength(rank, last_closed_h1_dt(h1)))
 
@@ -388,8 +435,11 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(f"Собираю стек по {raw}…")
     market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
+    if not all(len(v) > cfg.STRENGTH_LOOKBACK for v in aligned_h1_series(market).values()):
+        await update.message.reply_text("Синхронная H1-корзина из 7 пар пока неполная. Повтори через минуту.")
+        return
     got = {k: len(v) for k, v in (market.get(raw) or {}).items()}
-    strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
+    strength = currency_strength(aligned_h1_series(market), cfg.STRENGTH_LOOKBACK)
     stack = build_stack(raw, market.get(raw) or {}, strength)
     if not stack:
         detail = ", ".join(f"{k}:{n}" for k, n in got.items()) or "пусто"
@@ -409,6 +459,11 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         market = fetch_market(api_key)
         if not any(h1_series(market).values()):
             market = fetch_market(api_key, force=True)
+        reference_h1 = last_closed_h1_dt(h1_series(market))
+        market = aligned_market(market, reference_h1)
+        if not complete_h1_basket(market):
+            await update.message.reply_text("Брифинг не собрался: синхронная H1-корзина из 7 пар неполная.")
+            return
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
         if not rank:
@@ -496,7 +551,7 @@ def _alert_rank(item: tuple[int, str]) -> tuple[float, int, int]:
     return (-combined, priority, -probability)
 
 
-def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pairs=None) -> list[str]:
+def select_trade_alerts(items: list[tuple[int, str]], limit: int = 3, blocked_pairs=None) -> list[str]:
     """Лучшие числовые сигналы, максимум один на пару в часовом бюджете."""
     ranked = sorted(items, key=_alert_rank)
     chosen, pairs = [], set(blocked_pairs or [])
@@ -512,25 +567,28 @@ def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pa
     return chosen
 
 
-def merge_navigator_with_sources(
-    raw_items: list[tuple[int, str]], confirmed_items: list[tuple[int, str]]
-) -> list[tuple[int, str]]:
-    """Навигатор улучшает исходный сигнал, но больше не блокирует его доставку.
+def is_context_alert(text: str) -> bool:
+    """Сопровождение/отмена не является новым торговым входом."""
+    upper = (text or "").upper()
+    return (
+        "ZIGZAG — ОТКАТ" in upper
+        or "УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН" in upper
+    )
 
-    Если по той же паре и направлению уже готова карточка Навигатора, она
-    заменяет исходную карточку. Остальные сработавшие модули остаются в очереди
-    и могут быть отправлены в пределах общего часового бюджета.
-    """
-    replaced = {
-        (_alert_pair(text), _direct_signal_side(text))
-        for _priority, text in confirmed_items
-        if _alert_pair(text) and _direct_signal_side(text)
-    }
-    fallback = [
-        item for item in raw_items
-        if (_alert_pair(item[1]), _direct_signal_side(item[1])) not in replaced
-    ]
-    return list(confirmed_items) + fallback
+
+def select_context_alerts(items: list[tuple[int, str]], limit: int = 1) -> list[str]:
+    """Не более одного наиболее важного служебного события на пару/скан."""
+    chosen, pairs = [], set()
+    for _priority, text in sorted(items, key=lambda item: item[0]):
+        pair = _alert_pair(text)
+        if pair and pair in pairs:
+            continue
+        chosen.append(text)
+        if pair:
+            pairs.add(pair)
+        if len(chosen) >= max(0, limit):
+            break
+    return chosen
 
 
 async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -548,6 +606,10 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     api_key = env("TWELVE_DATA_API_KEY")
     try:
         market = fetch_market(api_key)
+        market = aligned_market(market, last_closed_h1_dt(h1_series(market)))
+        if not complete_h1_basket(market):
+            log.warning("BRIEFING_SKIPPED reason=INCOMPLETE_H1_BASKET")
+            return
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
         dxy = briefing.collect_extras(api_key, market=market)
@@ -559,6 +621,9 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if event.event_id in state["news_warned"]:
                     continue
                 fresh_m = fetch_market(api_key, force=True)
+                fresh_m = aligned_market(fresh_m, last_closed_h1_dt(h1_series(fresh_m)))
+                if not complete_h1_basket(fresh_m):
+                    fresh_m = market
                 fresh_s = currency_strength(h1_series(fresh_m), cfg.STRENGTH_LOOKBACK)
                 fresh_r = rank_currencies(fresh_s)
                 fresh_dxy = briefing.collect_extras(api_key, market=fresh_m)
@@ -595,11 +660,14 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         market = fetch_market(env("TWELVE_DATA_API_KEY"))
-        strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
-        rank = rank_currencies(strength)
-
+        closed_dt = last_closed_h1_dt(h1_series(market))
+        market = aligned_market(market, closed_dt)
+        if not complete_h1_basket(market):
+            log.warning("SCAN_SKIPPED reason=INCOMPLETE_H1_BASKET expected=%s", closed_dt)
+            return
         h1 = h1_series(market)
-        closed_dt = last_closed_h1_dt(h1)
+        strength = currency_strength(h1, cfg.STRENGTH_LOOKBACK)
+        rank = rank_currencies(strength)
         empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
         iid = briefing.issue_id(closed_dt, chat_id) if closed_dt else ""
         log.info(
@@ -751,20 +819,19 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
                 for text in patterns.process_market(market, strength):
-                    structural = any(name in text for name in ("BOS", "Двойная", "голова и плечи", "AB=CD"))
+                    structural = any(name in text for name in ("BOS", "Двойная", "голова и плечи", "AB=CD", "треугольник"))
                     module_alerts.append((1 if structural else 3, text))
             except Exception:
                 log.exception("Ошибка сканера паттернов")
 
-        # Навигатор сопровождает модульные события, но не имеет права полностью
-        # блокировать их доставку. Готовая карточка Навигатора заменит исходную
-        # карточку той же пары/направления; неподтверждённый им сигнал всё равно
-        # останется доступен для отправки.
         source_alerts = list(module_alerts)
-        raw_alerts = [text for _priority, text in module_alerts]
-        # События, не подтверждённые в эту H1, не теряются: они остаются
-        # внутренними кандидатами ограниченное число часов.
-        candidate_alerts = signal_navigator.remember_candidates(raw_alerts, closed_dt)
+        context_items = [item for item in source_alerts if is_context_alert(item[1])]
+        entry_items = [item for item in source_alerts if not is_context_alert(item[1])]
+        # Исходные торговые карточки никогда не отправляются напрямую. Они
+        # остаются кандидатами до строгого согласования либо до истечения TTL.
+        candidate_alerts = signal_navigator.remember_candidates(
+            [text for _priority, text in entry_items], closed_dt
+        )
         navigator_sources: dict[str, list[str]] = {}
         confirmed_alerts: list[tuple[int, str]] = []
         if getattr(cfg, "MASTER_DIRECTION_ENABLED", True):
@@ -805,19 +872,14 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if pair and side and cooldown_ok(state, pair, side):
                     confirmed_alerts.append((-1, text))
                     navigator_sources[text] = sources
-                    signal_navigator.register_card(text, sources, closed_dt)
-
-        # Часовой лимит считает исходные торговые события. Навигатор является
-        # обязательным сопровождением выбранного события и этот лимит не тратит.
-        module_alerts = source_alerts
 
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
         bucket = buckets.setdefault(bucket_key, {"count": 0, "pairs": []})
-        hourly_limit = max(0, int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 3)))
+        hourly_limit = max(0, int(getattr(cfg, "MAX_CONFIRMED_SIGNALS_PER_H1", 3)))
         remaining = max(0, hourly_limit - int(bucket.get("count") or 0))
         selected_alerts = select_trade_alerts(
-            module_alerts,
+            confirmed_alerts,
             limit=remaining,
             blocked_pairs=set(bucket.get("pairs") or []),
         ) if remaining else []
@@ -827,8 +889,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
+            delivered_sources = navigator_sources.get(text) or []
+            signal_navigator.register_card(text, delivered_sources, closed_dt)
             await _send_parts(context.application, int(chat_id), text)
-            delivered_sources = [text]
             for source_text in delivered_sources:
                 if "↕️ ZIGZAG —" in source_text:
                     try:
@@ -847,31 +910,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Запись отправленного сигнала в журнал")
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
-            # Шестичасовой cooldown относится к итоговой торговой карточке.
-            # Исходное событие не должно мешать Навигатору прислать последующее
-            # подтверждение и сопровождение этого же сценария.
             bucket["count"] = int(bucket.get("count") or 0) + 1
             if pair and pair not in bucket.setdefault("pairs", []):
                 bucket["pairs"].append(pair)
+            signal_navigator.mark_delivered(text)
+            if pair and direct_side:
+                state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
 
-            # Сразу после исходного события отправляется связанная карточка
-            # Навигатора. Строгая версия используется, если уже готова; иначе
-            # строится маршрут от цены самого свежего модульного подтверждения.
-            key = (pair, direct_side)
-            companion = next((
-                (card, navigator_sources[card]) for _p, card in confirmed_alerts
-                if (_alert_pair(card), _direct_signal_side(card)) == key
-            ), None)
-            if companion is None:
-                companion = signal_navigator.build_source_companion(text, market, strength)
-                if companion:
-                    signal_navigator.register_card(companion[0], companion[1], closed_dt)
-            if companion:
-                nav_text, _nav_sources = companion
-                await _send_parts(context.application, int(chat_id), nav_text)
-                signal_navigator.mark_delivered(nav_text)
-                if pair and direct_side:
-                    state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
+        # Подтверждённый откат или отмена — отдельный служебный факт. Он не
+        # создаёт новый маршрут и не расходует три торговых места.
+        context_limit = int(getattr(cfg, "MAX_CONTEXT_ALERTS_PER_SCAN", 1))
+        for text in select_context_alerts(context_items, context_limit):
+            await _send_parts(context.application, int(chat_id), text)
+            if "↕️ ZIGZAG —" in text:
+                zigzag_scanner.mark_delivered(text)
         # One small current-H1 record is enough; old budgets cannot affect new hours.
         state["module_alert_buckets"] = {bucket_key: bucket}
 

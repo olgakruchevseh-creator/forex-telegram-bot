@@ -23,28 +23,32 @@ def route(side="LONG"):
 
 
 class SignalNavigatorTests(unittest.TestCase):
-    def test_source_companion_is_built_without_master_veto(self):
+    def test_source_companion_cannot_bypass_master_veto(self):
         bars = [Candle(f"2026-09-09 {i:02d}:00:00", 1.10, 1.102, 1.098, 1.101) for i in range(30)]
         by_tf = {tf: bars for tf in ("D1", "H4", "H1", "M15", "M5")}
         with patch.object(signal_navigator.movement_progress, "_swings", return_value=[]), \
              patch.object(signal_navigator.movement_progress, "atr", return_value=.002):
             result = signal_navigator.build_source_companion(source(), {"EUR/USD": by_tf}, {"EUR": .6, "USD": .5})
-        self.assertIsNotNone(result)
-        self.assertIn("НАВИГАТОР СОПРОВОЖДАЕТ СИГНАЛ", result[0])
-        self.assertIn("TR1 (H1 ATR)", result[0])
+        self.assertIsNone(result)
 
-    def test_companion_reports_conflict_without_false_h1_confirmation(self):
-        accepted = {**master("LONG"), "source_accepted": True,
-                    "gap": -.15, "senior_n": 2, "junior_n": 1,
-                    "zigzag_h4": "LONG",
-                    "tf_biases": {"D1": 1, "H4": 1, "H1": -1, "M15": 0, "M5": 0}}
-        text = signal_navigator.format_confirmed(
-            accepted, signal_navigator._scale_route(route()), [source()])
-        self.assertIn("ЕСТЬ ВСТРЕЧНЫЕ ФАКТОРЫ", text)
-        self.assertIn("Сила относительно LONG: -0.15", text)
-        self.assertIn("против направления", text)
-        self.assertIn("H1: коррекция против маршрута LONG", text)
-        self.assertNotIn("направление LONG подтверждено по закрытой H1", text)
+    def test_defensive_gate_rejects_partial_lower_timeframes(self):
+        partial = {**master("LONG"), "junior_n": 1}
+        with patch.object(signal_navigator.movement_progress, "analyze_progress", return_value=route()):
+            result = signal_navigator.build_confirmed([partial], {"EUR/USD": {}}, {}, [source()])
+        self.assertEqual([], result)
+
+    def test_defensive_gate_rejects_strength_against_direction(self):
+        against = {**master("LONG"), "gap": -.15}
+        with patch.object(signal_navigator.movement_progress, "analyze_progress", return_value=route()):
+            result = signal_navigator.build_confirmed([against], {"EUR/USD": {}}, {}, [source()])
+        self.assertEqual([], result)
+
+    def test_quality_75_from_old_companion_is_rejected(self):
+        weak = {**master("SHORT"), "quality": 75, "confidence": 70,
+                "gap": -.21, "junior_n": 1}
+        with patch.object(signal_navigator.movement_progress, "analyze_progress", return_value=route("SHORT")):
+            result = signal_navigator.build_confirmed([weak], {"EUR/USD": {}}, {}, [source("SHORT")])
+        self.assertEqual([], result)
 
     def test_route_percent_labels_are_unambiguous(self):
         text = signal_navigator.format_confirmed(
@@ -115,11 +119,16 @@ class SignalNavigatorTests(unittest.TestCase):
             signal_navigator.register_card(text, [source()])
             self.assertTrue(signal_navigator.mark_delivered(text))
             self.assertEqual([], signal_navigator.remember_candidates([], "2026-09-09 12:00:00"))
+            self.assertEqual([], signal_navigator.remember_candidates([source()], "2026-09-09 12:00:00"))
 
     def test_zigzag_main_direction_is_a_candidate(self):
         text = "↕️ ZIGZAG — СТРУКТУРА\nПара: EUR/USD\nОсновное направление: LONG"
         self.assertEqual("LONG", signal_navigator._side(text))
         self.assertEqual([text], signal_navigator.matching_sources("EUR/USD", "LONG", [text]))
+
+    def test_level_break_direction_is_parsed(self):
+        text = "⚡ ПРОБОЙ УРОВНЯ\n💱 Пара: GBP/USD\n🟢 Направление пробоя: LONG"
+        self.assertEqual("LONG", signal_navigator._side(text))
 
     def test_delivered_card_becomes_active_scenario(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):

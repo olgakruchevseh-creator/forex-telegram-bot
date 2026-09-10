@@ -80,6 +80,32 @@ class BriefingFixes(unittest.TestCase):
         self.assertEqual(briefing._tf_status(stack, "D1"), "RANGE")
         self.assertEqual(briefing.classify_state(stack), "RANGE")
 
+    def test_neutral_h1_does_not_claim_confirmed_trend_or_reversal(self):
+        views = {
+            "D1": _tf("D1", 1, structure="расширение / смена"),
+            "H4": _tf("H4", 1),
+            "H1": _tf("H1", 0, "флэт / консолидация", "сужение / сжатие"),
+        }
+        stack = PairStack("AUD/USD", .72, .1, views, 0, 0)
+        state = briefing.classify_state(stack)
+        self.assertEqual("СТАРШИЙ LONG · H1 НЕ ПОДТВЕРЖДЁН", state)
+        self.assertNotIn("ПОДТВЕРЖДЁННЫЙ РАЗВОРОТ", state)
+
+    def test_best_pair_requires_two_of_three_lower_timeframes(self):
+        views = {
+            "D1": _tf("D1", 1), "H4": _tf("H4", 1),
+            "H1": _tf("H1", 0, "флэт / консолидация", "сужение / сжатие"),
+            "M15": _tf("M15", 0, "флэт / консолидация", "сужение / сжатие"),
+            "M5": _tf("M5", 0, "флэт / консолидация", "сужение / сжатие"),
+        }
+        stack = PairStack("EUR/USD", 1.1, .2, views, 1, 0)
+        brief = briefing.PairBrief(
+            "EUR/USD", stack, "LONG", "LONG", "RANGE", "RANGE", "x",
+            "2/3", 2, .2, "СТАРШИЙ LONG · H1 НЕ ПОДТВЕРЖДЁН",
+            "LONG", 10.0, False,
+        )
+        self.assertEqual([], briefing.pick_leaders([brief]))
+
     def test_unclear_zigzag_keeps_bullish_ema_adx_direction(self):
         self.assertEqual(bias_of("неясно", "импульс / тренд вверх"), 1)
 

@@ -32,6 +32,7 @@ class Pattern:
     fact: str
     level: float
     dt: str
+    event_id: str = ""
 
 
 def _path() -> Path:
@@ -71,10 +72,10 @@ def _bear(c: Candle) -> bool:
     return c.close < c.open
 
 
-def _add(out, name, side, tf, q, conf, fact, level, c):
+def _add(out, name, side, tf, q, conf, fact, level, c, event_id: str = ""):
     q, conf = int(min(96, q)), int(min(94, conf))
     if q >= cfg.PATTERN_MIN_QUALITY and conf >= cfg.PATTERN_MIN_CONFIDENCE:
-        out.append(Pattern(name, side, tf, q, conf, fact, level, c.dt))
+        out.append(Pattern(name, side, tf, q, conf, fact, level, c.dt, event_id))
 
 
 def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
@@ -166,12 +167,33 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     # Head & shoulders / inverse H&S with closed neckline break.
     if len(highs) >= 3 and highs[-2][1] > highs[-3][1] and highs[-2][1] > highs[-1][1] and abs(highs[-3][1]-highs[-1][1]) <= av*.65:
         necks = [p for i,p in lows if highs[-3][0] < i < highs[-1][0]]
-        if necks and c.close < min(necks):
+        if necks and prev.close >= min(necks) and c.close < min(necks) - av*.05 and _bear(c):
             _add(out, "Голова и плечи", "SHORT", tf, 91, 86, "Правое плечо завершено; линия шеи пробита закрытой свечой.", min(necks), c)
     if len(lows) >= 3 and lows[-2][1] < lows[-3][1] and lows[-2][1] < lows[-1][1] and abs(lows[-3][1]-lows[-1][1]) <= av*.65:
         necks = [p for i,p in highs if lows[-3][0] < i < lows[-1][0]]
-        if necks and c.close > max(necks):
+        if necks and prev.close <= max(necks) and c.close > max(necks) + av*.05 and _bull(c):
             _add(out, "Перевёрнутая голова и плечи", "LONG", tf, 91, 86, "Правое плечо завершено; линия шеи пробита закрытой свечой.", max(necks), c)
+
+    # Треугольник считается завершённым только на первом закрытом пробое.
+    if len(highs) >= 3 and len(lows) >= 3:
+        hs = [value for _index, value in highs[-3:]]
+        ls = [value for _index, value in lows[-3:]]
+        high_flat = max(hs) - min(hs) <= tol
+        low_flat = max(ls) - min(ls) <= tol
+        falling_highs = hs[0] > hs[1] > hs[2] and hs[0] - hs[2] >= tol * .5
+        rising_lows = ls[0] < ls[1] < ls[2] and ls[2] - ls[0] >= tol * .5
+        resistance = sum(hs) / len(hs) if high_flat else hs[-1]
+        support = sum(ls) / len(ls) if low_flat else ls[-1]
+        bullish_shape = rising_lows and (high_flat or falling_highs)
+        bearish_shape = falling_highs and (low_flat or rising_lows)
+        if bullish_shape and prev.close <= resistance and c.close > resistance + av*.05 and _bull(c):
+            shape = "восходящий" if high_flat else "симметричный"
+            _add(out, f"{shape.capitalize()} треугольник", "LONG", tf, 88, 84,
+                 f"Границы фигуры сжимались; закрытая свеча впервые пробила верхнюю границу фигуры «{shape} треугольник».", resistance, c)
+        if bearish_shape and prev.close >= support and c.close < support - av*.05 and _bear(c):
+            shape = "нисходящий" if low_flat else "симметричный"
+            _add(out, f"{shape.capitalize()} треугольник", "SHORT", tf, 88, 84,
+                 f"Границы фигуры сжимались; закрытая свеча впервые пробила нижнюю границу фигуры «{shape} треугольник».", support, c)
     return out
 
 
@@ -238,7 +260,7 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
             details = ", ".join(f"{name.upper()}={ratios[name]:.2f}" for name in rules)
             _add(out, f"Гармонический паттерн {label}", side, tf, 88, 83,
                  f"Завершена зеркальная структура XABCD ({details}); закрытая свеча подтвердила реакцию от точки D.",
-                 d[1], last)
+                 d[1], last, event_id=f"{bars[d[0]].dt}|{d[1]}")
     return out
 
 
@@ -263,7 +285,7 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
         confirmed = last.close > last.open if side == "LONG" else last.close < last.open
         if confirmed:
             q = 82 + int(max(0, 8 - abs(1-ratio_cd)*10))
-            _add(out, "Гармонический AB=CD", side, tf, q, 80, f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last)
+            _add(out, "Гармонический AB=CD", side, tf, q, 80, f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last, event_id=f"{bars[d[0]].dt}|{d[1]}")
     return out
 
 
@@ -360,6 +382,15 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "") -> str:
     ])
 
 
+def _pattern_key(symbol: str, pattern: Pattern) -> str:
+    """Гармоника привязана к геометрии D, а не к каждой следующей свече."""
+    if pattern.name.startswith("Гармонический"):
+        identity = pattern.event_id or pattern.dt
+    else:
+        identity = pattern.dt
+    return f"{symbol}|{pattern.tf}|{pattern.name}|{pattern.side}|{identity}"
+
+
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
@@ -382,10 +413,10 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 # candidate per pair. Otherwise old patterns leak out one by
                 # one on every following scan.
                 for p in candidates:
-                    sent[f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"] = p.dt
+                    sent[_pattern_key(symbol, p)] = p.dt
                 continue
             for p in candidates:
-                key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
+                key = _pattern_key(symbol, p)
                 if key in sent:
                     continue
                 sent[key] = p.dt

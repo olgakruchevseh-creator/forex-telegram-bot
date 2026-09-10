@@ -373,8 +373,11 @@ def build_stack(
 ) -> Optional[PairStack]:
     views: dict[str, TfView] = {}
     last = 0.0
+    tf_minutes = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
     for tf in cfg.TIMEFRAMES:
-        candles = by_tf.get(tf["key"]) or []
+        candles = closed_candles(
+            by_tf.get(tf["key"]) or [], tf_minutes.get(tf["key"], 60)
+        )
         view = analyze_tf(tf["key"], tf["label"], candles)
         if view:
             views[tf["key"]] = view

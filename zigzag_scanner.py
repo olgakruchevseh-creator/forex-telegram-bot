@@ -198,7 +198,7 @@ def format_message(s: dict) -> str:
         "",
         f"Пара: {s['symbol']}",
         f"Основное направление: {side}",
-        f"Таймфреймы: {tf_line}",
+        f"Текущий уклон ТФ: {tf_line}",
         f"Структура {s['tf']}: {s['structure']}",
         f"Фаза: {s['phase']} · ADX {s['adx']}",
     ]

@@ -3,15 +3,40 @@ from __future__ import annotations
 
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config as cfg
 import news as newsmod
 import zigzag_scanner
 import echo_projection
-from analysis import PairStack, build_stack, split_pair
+from analysis import PairStack, build_stack, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
+
+
+def _candle_dt(raw: str) -> datetime | None:
+    try:
+        value = str(raw or "").replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(value)
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _lower_timeframes_fresh(by_tf: dict) -> bool:
+    """M15/M5 должны принадлежать последнему закрытому часу, а не старому кэшу."""
+    h1 = closed_candles(by_tf.get("H1") or [], 60)
+    if not h1:
+        return False
+    h1_open = _candle_dt(h1[-1].dt)
+    if not h1_open:
+        return False
+    for tf, minutes, offset in (("M15", 15, 45), ("M5", 5, 55)):
+        bars = closed_candles(by_tf.get(tf) or [], minutes)
+        latest = _candle_dt(bars[-1].dt) if bars else None
+        if not latest or latest < h1_open + timedelta(minutes=offset):
+            return False
+    return True
 
 
 def _consensus(stack: PairStack, keys: tuple[str, ...], minimum: int) -> int:
@@ -31,7 +56,10 @@ def _pair(text: str) -> str:
 
 
 def _side(text: str) -> int:
-    match = re.search(r"(?:Основное\s+)?направление(?: реакции)?:\s*(LONG|SHORT)", text or "", re.I)
+    match = re.search(
+        r"(?:Основное\s+)?направление(?: реакции| пробоя)?:\s*(LONG|SHORT)",
+        text or "", re.I,
+    )
     if not match:
         match = re.search(r"(?:^|\n)[🟢🔴]?\s*(?:MASTER DIRECTION\s*[—-]\s*)?(LONG|SHORT)\b", text or "")
     if not match:
@@ -125,6 +153,8 @@ def analyze_symbol(
     events: list[newsmod.NewsEvent] | None = None,
     now_utc: datetime | None = None,
 ) -> dict | None:
+    if not _lower_timeframes_fresh(by_tf):
+        return None
     stack = build_stack(symbol, by_tf, strength)
     if not stack:
         return None
@@ -161,9 +191,9 @@ def analyze_symbol(
         echo and echo["side"] != wanted_name
         and echo["confidence"] >= echo_block and opposite
     )
-    # Старшие ТФ и H4 ZigZag — одна структурная группа. Одиночная группа
-    # задаёт откат/штраф; сигнал блокируют только две независимые группы.
-    conflict_groups = sum((higher_conflict, dxy_conflict, forecast_conflict))
+    # Старшие ТФ и H4 ZigZag — одна структурная группа. Модульный конфликт,
+    # DXY и Echo считаются независимыми группами. Две группы блокируют вход.
+    conflict_groups = sum((higher_conflict, dxy_conflict, forecast_conflict, opposite))
     if conflict_groups >= 2:
         return None
 
@@ -228,6 +258,8 @@ def analyze_local_amd_symbol(
     закрытого H1-пробоя. Старшее направление здесь не объявляется основным.
     """
     if not getattr(cfg, "LOCAL_AMD_EARLY_ENABLED", True):
+        return None
+    if not _lower_timeframes_fresh(by_tf):
         return None
     stack = build_stack(symbol, by_tf, strength)
     if not stack:
@@ -378,5 +410,4 @@ def analyze_market(
         except Exception:
             log.exception("Master Direction %s", symbol)
     candidates.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
-    limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 2))
-    return candidates[:limit]
+    return candidates

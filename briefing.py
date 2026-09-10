@@ -220,11 +220,7 @@ def classify_state(stack: Optional[PairStack]) -> str:
     if d1 and h4 and h4 != d1 and h1 == h4:
         return f"ЛОКАЛЬНЫЙ ИМПУЛЬС {_dir_word(h4)}"
     if d1 and h4 and d1 == h4:
-        struct = ""
-        dv = stack.views.get("D1")
-        if dv and "смена" in (dv.structure or ""):
-            return f"ПОДТВЕРЖДЁННЫЙ РАЗВОРОТ {_dir_word(d1)}"
-        return f"ТРЕНД {_dir_word(d1)}"
+        return f"СТАРШИЙ {_dir_word(d1)} · H1 НЕ ПОДТВЕРЖДЁН"
     # Один M15 среди нейтральных H1/M5 — ещё не локальный импульс.
     # Требуется настоящее большинство двух младших таймфреймов из трёх.
     lower = (h1, m15, m5)
@@ -333,8 +329,13 @@ def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0) -> str
     local = consensus(("H1", "M15", "M5"))
     if primary and zigzag_h4_side == -primary:
         return f"ПЕРЕХОД: ZIGZAG H4 ПРОТИВ ОСНОВНОГО {_dir_word(primary)}"
-    if primary and local == primary:
+    h1_bias = _tf_bias(stack, "H1")
+    if primary and local == primary and h1_bias == primary:
         return f"ОСНОВНОЙ ИМПУЛЬС {_dir_word(primary)}"
+    if primary and local == primary and h1_bias == -primary:
+        return f"ОТКАТ {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)} · M15/M5 ВОЗВРАЩАЮТСЯ"
+    if primary and local == primary:
+        return f"ОСНОВНОЙ {_dir_word(primary)} · H1 НЕ ПОДТВЕРЖДЁН"
     if primary and local == -primary:
         return f"ОТКАТ {_dir_word(local)} ВНУТРИ {_dir_word(primary)}"
     # Если W1/D1 сохраняют старший маршрут, а H4 и H1 уже синхронно идут
@@ -593,6 +594,12 @@ def pick_leaders(briefs: list[PairBrief]) -> list[PairBrief]:
             continue
         if b.state in ("СМЕШАННО", "КОНФЛИКТ СТРУКТУРЫ H4"):
             continue
+        wanted = 1 if b.side == "LONG" else -1
+        lower = [_tf_bias(b.stack, key) for key in ("H1", "M15", "M5")]
+        if sum(value == wanted for value in lower) < 2:
+            continue
+        if b.news_near:
+            continue
         chosen.append(b)
         if len(chosen) >= 2:
             break
@@ -624,7 +631,7 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
         return lines
     lines.append(f"Цена: {dxy.price:.2f}")
     lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
-    lines.append(f"Направление: {_dir_word(effective_dxy_bias(dxy))}")
+    lines.append(f"Направление: {_dir_word(effective_dxy_bias(dxy))} (по структуре/фазе)")
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
     lines.append(f"ADX: {dxy.adx:.0f}")

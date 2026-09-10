@@ -79,7 +79,10 @@ LTF_MIN_AGREE = 2
 SIGNAL_COOLDOWN_HOURS = 6
 # Единый бюджет для всех торговых модулей после одной закрытой H1.
 # Часовой брифинг и новостные сообщения в этот лимит не входят.
-MAX_MODULE_ALERTS_PER_H1 = 3
+MAX_CONFIRMED_SIGNALS_PER_H1 = 3
+# Подтверждённые откаты/отмены — сопровождение, а не новые входы.
+# Они не расходуют три торговых места, но ограничены одним сообщением за скан.
+MAX_CONTEXT_ALERTS_PER_SCAN = 1
 SIGNAL_JOURNAL_ENABLED = True
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
@@ -91,7 +94,6 @@ MASTER_DIRECTION_ENABLED = True
 MASTER_STRENGTH_MIN_GAP = 0.05
 MASTER_MIN_QUALITY = 78
 MASTER_REQUIRE_MODULE_TRIGGER = True
-MASTER_MAX_SIGNALS_PER_H1 = 2
 # Echo — историческая проекция, только внутренний фильтр Master Direction.
 ECHO_ENABLED = True
 ECHO_HORIZONS_H1 = (1, 2, 4, 8)
@@ -112,8 +114,7 @@ NEXT_PIVOT_NEAR_ATR = 0.30
 LOCAL_AMD_EARLY_ENABLED = True
 LOCAL_AMD_MIN_STRENGTH_GAP = 0.08
 LOCAL_AMD_MAX_PROGRESS_PCT = 45
-# Новая карточка Навигатора допустима только в ранней части всего маршрута
-# от anchor до последней доступной структурной цели TR3.
+# Новая карточка Навигатора допустима только в ранней части пути до TR1.
 SIGNAL_INITIAL_MAX_PROGRESS_PCT = 35
 # Не присылать предположительные предупреждения о близости к цели:
 # только фактическое достижение TR1/TR2/TR3 или подтверждённая отмена.
@@ -145,9 +146,27 @@ LEVEL_MAX_ZONE_H1_ATR = 3.0
 LEVEL_MAX_ZONE_PIPS = 45
 LEVEL_EVENT_COOLDOWN_MINUTES = 55
 LEVEL_EXACT_EVENT_HISTORY = 1500
+LEVEL_LOCK_STALE_SECONDS = 600
 LEVEL_MIN_EVENT_QUALITY = 74
 LEVEL_MIN_EVENT_CONFIDENCE = 70
-# Отбой отправляется только после следующей H1 и при поддержке силы валют.
+# Пробой обязан закрыться телом за зоной с запасом по ATR, ширине зоны и
+# консервативной оценке спреда. Дополнительные котировки для этого не нужны.
+LEVEL_BREAK_BUFFER_ATR = 0.12
+LEVEL_BREAK_BUFFER_ZONE = 0.15
+LEVEL_BREAK_SPREAD_MULTIPLIER = 2.5
+LEVEL_BREAK_MIN_BODY_ATR = 0.25
+LEVEL_BREAK_CLOSE_EDGE_MAX = 0.40
+LEVEL_DEFAULT_SPREAD_PIPS = 1.5
+LEVEL_ESTIMATED_SPREAD_PIPS = {
+    "EUR/USD": 0.8,
+    "GBP/USD": 1.2,
+    "USD/JPY": 1.0,
+    "USD/CHF": 1.2,
+    "AUD/USD": 1.0,
+    "NZD/USD": 1.2,
+    "USD/CAD": 1.3,
+}
+# Отбой от старшей зоны подтверждается второй закрытой M15 и силой валют.
 LEVEL_BOUNCE_REQUIRE_FOLLOW_THROUGH = True
 LEVEL_BOUNCE_MIN_STRENGTH_GAP = 0.05
 LEVEL_FALSE_BREAK_MIN_STRENGTH_GAP = 0.05
@@ -182,9 +201,8 @@ MOVEMENT_PULLBACK_MAX_OPPOSITE_STRENGTH = 0.03
 MOVEMENT_PROGRESS_MIN_TARGET_ATR = 0.8
 MOVEMENT_PROGRESS_MIN_REPORT_PCT = 15
 MOVEMENT_PROGRESS_MIN_CHANGE_PCT = 8
-# Неотправленный модульный сигнал ждёт подтверждения максимум 4 закрытых H1.
-# Торговый кандидат не может становиться «новым входом» спустя несколько часов.
-# 45 минут достаточно для согласования закрытых M15 и ближайшей H1-картины.
+# Неотправленный модульный факт ждёт строгого подтверждения максимум 45 минут.
+# После TTL он закрывается и не получает новый срок от повторной выдачи модуля.
 SIGNAL_CANDIDATE_TTL_HOURS = 0.75
 # Одно предупреждение перед структурной целью; промежуточные проценты не спамят.
 SIGNAL_NEAR_TARGET_PCT = 85

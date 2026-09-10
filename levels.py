@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -38,6 +38,10 @@ def levels_state_path() -> Path:
     if raw:
         return Path(raw) / "levels_state.json"
     return STATE_PATH
+
+
+def levels_lock_path() -> Path:
+    return levels_state_path().with_suffix(".lock")
 
 TF_ORDER = ["W1", "D1", "H4", "H1", "M15", "M5"]
 TF_WEIGHT = {"W1": 40, "D1": 30, "H4": 18, "H1": 10, "M15": 4, "M5": 2}
@@ -120,6 +124,83 @@ def digits(symbol: str) -> int:
     return 3 if "JPY" in symbol else 5
 
 
+def pip_size(symbol: str) -> float:
+    return 0.01 if "JPY" in symbol else 0.0001
+
+
+def estimated_spread_price(symbol: str) -> float:
+    spreads = getattr(cfg, "LEVEL_ESTIMATED_SPREAD_PIPS", {}) or {}
+    spread_pips = float(spreads.get(symbol, getattr(cfg, "LEVEL_DEFAULT_SPREAD_PIPS", 1.5)))
+    return max(0.0, spread_pips) * pip_size(symbol)
+
+
+def breakout_distance(zone: Zone, candle: Candle, side: str) -> float:
+    if side == "LONG":
+        return max(0.0, candle.close - zone.high)
+    return max(0.0, zone.low - candle.close)
+
+
+def breakout_buffer(zone: Zone, atr_v: float) -> float:
+    """Минимальный запас за зоной: волатильность, ширина зоны и спред."""
+    atr_part = max(0.0, atr_v) * float(getattr(cfg, "LEVEL_BREAK_BUFFER_ATR", 0.12))
+    zone_part = zone.width * float(getattr(cfg, "LEVEL_BREAK_BUFFER_ZONE", 0.15))
+    spread_part = estimated_spread_price(zone.symbol) * float(
+        getattr(cfg, "LEVEL_BREAK_SPREAD_MULTIPLIER", 2.5)
+    )
+    return max(atr_part, zone_part, spread_part)
+
+
+def breakout_candle_confirmed(zone: Zone, candle: Candle, side: str, atr_v: float) -> bool:
+    """Подтверждает импульсное тело и закрытие у края свечи."""
+    body = abs(candle.close - candle.open)
+    min_body = max(0.0, atr_v) * float(getattr(cfg, "LEVEL_BREAK_MIN_BODY_ATR", 0.25))
+    if body < min_body:
+        return False
+    full_range = max(candle.high - candle.low, 1e-12)
+    max_edge = float(getattr(cfg, "LEVEL_BREAK_CLOSE_EDGE_MAX", 0.40))
+    if side == "LONG":
+        directional = candle.close > candle.open
+        edge_ratio = (candle.high - candle.close) / full_range
+    else:
+        directional = candle.close < candle.open
+        edge_ratio = (candle.close - candle.low) / full_range
+    return directional and edge_ratio <= max_edge
+
+
+def candle_close_time(candle_dt: str, tf_key: str) -> str:
+    """Twelve Data сообщает время открытия; пользователю показываем закрытие."""
+    if not candle_dt:
+        return ""
+    raw = str(candle_dt).strip().replace("Z", "+00:00")
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return str(candle_dt)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    closed_at = (parsed + timedelta(minutes=int(TF_MINUTES.get(tf_key, 60)))).astimezone(LOCAL_TZ)
+    return closed_at.strftime("%d.%m.%Y · %H:%M") + " (Europe/Amsterdam)"
+
+
+def breakout_fact(zone: Zone, candle: Candle, side: str, atr_v: float) -> str:
+    distance = breakout_distance(zone, candle, side)
+    distance_pips = distance / pip_size(zone.symbol)
+    distance_atr = distance / max(atr_v, 1e-12)
+    boundary = "выше сопротивления" if side == "LONG" else "ниже поддержки"
+    return (
+        f"Цена закрылась {boundary} с запасом {distance_pips:.1f} п. "
+        f"({distance_atr:.2f} ATR). Пробой подтверждён телом закрытой свечи."
+    )
+
+
 def load_store() -> dict:
     dest = levels_state_path()
     src = DEFAULT_STATE_PATH if DEFAULT_STATE_PATH.exists() else STATE_PATH
@@ -157,16 +238,49 @@ def save_store(store: dict) -> None:
 
 def acquire(store: dict) -> bool:
     now = _now()
-    if now - float(store.get("lock") or 0) < 90:
-        return False
-    store["lock"] = now
-    save_store(store)
-    return True
+    lock_path = levels_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_after = float(getattr(cfg, "LEVEL_LOCK_STALE_SECONDS", 600))
+    for attempt in range(2):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, f"{os.getpid()} {now}".encode("ascii"))
+            finally:
+                os.close(fd)
+            store["lock"] = now
+            save_store(store)
+            return True
+        except FileExistsError:
+            try:
+                is_stale = now - lock_path.stat().st_mtime >= stale_after
+            except FileNotFoundError:
+                continue
+            if attempt == 0 and is_stale:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            return False
+        except Exception:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+    return False
 
 
 def release(store: dict) -> None:
     store["lock"] = 0
-    save_store(store)
+    try:
+        save_store(store)
+    finally:
+        try:
+            levels_lock_path().unlink()
+        except FileNotFoundError:
+            pass
 
 
 def zone_from_dict(raw: dict) -> Zone:
@@ -681,17 +795,61 @@ def kind_ru(kind: str) -> str:
     return "ПОДДЕРЖКА" if kind == "support" else "СОПРОТИВЛЕНИЕ"
 
 
-def reaction_metrics(zone: Zone, candle: Candle | None, atr_v: float, event: str = "") -> tuple[int, int]:
-    """Оценка основана на силе зоны и размере подтверждающей реакции."""
+def reaction_metrics(
+    zone: Zone,
+    candle: Candle | None,
+    atr_v: float,
+    event: str = "",
+    side: str = "",
+    strength: dict[str, float] | None = None,
+) -> tuple[int, int]:
+    """Индивидуальная оценка: зона, тело, запас, форма свечи и сила валют."""
     body_atr = abs(candle.close - candle.open) / max(atr_v, 1e-12) if candle else 0.0
+    if event == "break" and candle is not None and side not in ("LONG", "SHORT"):
+        if candle.close > zone.high:
+            side = "LONG"
+        elif candle.close < zone.low:
+            side = "SHORT"
+    if event == "break" and candle is not None and side in ("LONG", "SHORT"):
+        distance = breakout_distance(zone, candle, side)
+        distance_atr = distance / max(atr_v, 1e-12)
+        required = breakout_buffer(zone, atr_v)
+        reserve_ratio = distance / max(required, 1e-12)
+        full_range = max(candle.high - candle.low, 1e-12)
+        edge_ratio = (
+            (candle.high - candle.close) / full_range
+            if side == "LONG"
+            else (candle.close - candle.low) / full_range
+        )
+        base, quote = split_pair(zone.symbol)
+        currency_gap = float((strength or {}).get(base, 0.0)) - float(
+            (strength or {}).get(quote, 0.0)
+        )
+        aligned_gap = currency_gap if side == "LONG" else -currency_gap
+        zone_score = max(0.0, min(12.0, (zone.strength - 60.0) * 0.30))
+        confluence_score = min(6.0, max(0, len(zone.tfs) - 1) * 1.5)
+        body_score = min(8.0, body_atr * 8.0)
+        reserve_score = min(
+            8.0,
+            max(0.0, reserve_ratio - 1.0) * 3.0 + min(3.0, distance_atr * 3.0),
+        )
+        edge_score = max(0.0, min(4.0, (1.0 - edge_ratio) * 4.0))
+        strength_score = max(-4.0, min(4.0, aligned_gap * 20.0))
+        quality = int(round(
+            55.0 + zone_score + confluence_score + body_score
+            + reserve_score + edge_score + strength_score
+        ))
+        quality = max(55, min(96, quality))
+        confidence = int(round(
+            quality - 8.0 + body_score * 0.25 + reserve_score * 0.35
+            + max(0.0, strength_score) * 0.30
+        ))
+        return quality, max(52, min(94, confidence))
+
     multi = min(12, max(0, len(zone.tfs) - 1) * 3)
     impulse = min(18, int(body_atr * 12))
     quality = int(max(60, min(94, zone.strength * 0.62 + multi + impulse + 12)))
     confidence = max(58, min(91, quality - 4))
-    # Первый пробой ещё не доказал удержание следующей свечой.
-    if event == "break":
-        quality = min(86, quality)
-        confidence = min(82, confidence)
     return quality, confidence
 
 
@@ -705,6 +863,7 @@ def build_message(
     quality: int | None = None,
     confidence: int | None = None,
     cancelled_side: str = "",
+    confirmation_dt: str = "",
 ) -> str:
     lines = [
         "━━━━━━━━━━━━━━━━━━",
@@ -731,15 +890,20 @@ def build_message(
         lines.append(f"🔎 Подтверждение: {zone.reactions} независимые реакции")
     if side:
         icon = "🟢" if side == "LONG" else "🔴"
-        lines.append(f"{icon} Направление реакции: {side}")
+        direction_label = "Направление пробоя" if event == "break" else "Направление реакции"
+        lines.append(f"{icon} {direction_label}: {side}")
     if cancelled_side:
         lines.append(f"⚠️ Предыдущее подтверждённое направление {cancelled_side} отменено.")
     if confirmation_tf:
-        lines.append(f"🕯 Подтверждение реакции: закрытая {confirmation_tf}-свеча")
+        confirmation_label = "Подтверждение пробоя" if event == "break" else "Подтверждение реакции"
+        lines.append(f"🕯 {confirmation_label}: закрытая {confirmation_tf}-свеча")
+    if confirmation_dt:
+        lines.append(f"🕐 Время закрытия: {candle_close_time(confirmation_dt, confirmation_tf)}")
     if close_price is not None:
         lines.append(f"💵 Цена закрытия: {fmt_price(zone.symbol, close_price)}")
     if quality is not None and confidence is not None:
-        lines.append(f"💪 Качество реакции: {quality}/100")
+        quality_label = "Качество пробоя" if event == "break" else "Качество реакции"
+        lines.append(f"💪 {quality_label}: {quality}/100")
         lines.append(f"📈 Вероятность: {confidence}%")
     lines.append(f"✅ Факт: {extra}")
     lines.append("")
@@ -788,7 +952,7 @@ def detect_events(
     c0 = candles[-2]
     c1 = candles[-1]
     atr_v = atr_map.get(work, zone.width)
-    buf = max(atr_v * 0.08, zone.width * 0.15)
+    buf = breakout_buffer(zone, atr_v)
     events: list[tuple[str, str, str]] = []
     if not zone.original_kind:
         zone.original_kind = zone.kind
@@ -878,12 +1042,12 @@ def detect_events(
     broke_up = (
         c0.close <= zone.high
         and closed_beyond(c1, zone, "up", buf)
-        and (c1.close - c1.open) > 0
+        and breakout_candle_confirmed(zone, c1, "LONG", atr_v)
     )
     broke_dn = (
         c0.close >= zone.low
         and closed_beyond(c1, zone, "down", buf)
-        and (c1.close - c1.open) < 0
+        and breakout_candle_confirmed(zone, c1, "SHORT", atr_v)
     )
     still_up = c1.close > zone.high + buf
     still_dn = c1.close < zone.low - buf
@@ -900,13 +1064,13 @@ def detect_events(
             zone.state = "пробита"
             zone.broken_side = "up"
             zone.break_dt = c1.dt
-            events.append(("break", "Цена закрылась выше сопротивления. Пробой подтверждён закрытой свечой.", "LONG"))
+            events.append(("break", breakout_fact(zone, c1, "LONG", atr_v), "LONG"))
         elif broke_dn and zone.kind == "support":
             note_beyond(zone, c1.dt)
             zone.state = "пробита"
             zone.broken_side = "down"
             zone.break_dt = c1.dt
-            events.append(("break", "Цена закрылась ниже поддержки. Пробой подтверждён закрытой свечой.", "SHORT"))
+            events.append(("break", breakout_fact(zone, c1, "SHORT", atr_v), "SHORT"))
 
     # 2) после пробоя: удержание или ложный пробой — другая свеча
     elif zone.state == "пробита" and zone.break_dt and not zone.hold_dt:
@@ -1120,7 +1284,12 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                             confirm_bars = closed_map.get(work) or []
                             confirm_candle = confirm_bars[-1] if confirm_bars else None
                             q, probability = reaction_metrics(
-                                z, confirm_candle, atr_map.get(work, z.width), ev
+                                z,
+                                confirm_candle,
+                                atr_map.get(work, z.width),
+                                ev,
+                                side,
+                                strength,
                             )
                             if q < int(getattr(cfg, "LEVEL_MIN_EVENT_QUALITY", 74)):
                                 continue
@@ -1144,11 +1313,14 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     work_bars = closed_map.get(work) or []
                     candle = work_bars[-1] if work_bars else None
                     av = atr_map.get(work, z.width)
-                    quality, confidence = reaction_metrics(z, candle, av, ev)
+                    quality, confidence = reaction_metrics(
+                        z, candle, av, ev, side, strength
+                    )
                     cancelled_side = direction_to_cancel(store, z.symbol, side)
                     messages.append(build_message(
                         z, ev, fact, side,
                         confirmation_tf=work if ev != "new_level" else "",
+                        confirmation_dt=candle.dt if candle and ev != "new_level" else "",
                         close_price=candle.close if candle and ev != "new_level" else None,
                         quality=quality if ev != "new_level" else None,
                         confidence=confidence if ev != "new_level" else None,
