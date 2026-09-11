@@ -5,7 +5,8 @@ import json
 import io
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import config as cfg
@@ -534,17 +535,80 @@ def mark_card_delivered(text: str) -> None:
     _PENDING_CARDS.pop(text, None)
 
 
+def _confirmation_tf(tf: str) -> str:
+    """Закрытый младший ТФ, который подтверждает сформированный паттерн."""
+    return "M5" if tf == "M15" else "M15"
+
+
+def _trigger_close(pattern: Pattern, by_tf: dict) -> float:
+    bars = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
+    bar = next((item for item in reversed(bars) if item.dt == pattern.dt), None)
+    return float(bar.close) if bar else 0.0
+
+
+def _confirmation_bar(pattern: Pattern, by_tf: dict) -> Candle | None:
+    tf = _confirmation_tf(pattern.tf)
+    bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+    try:
+        formed_at = datetime.fromisoformat(str(pattern.dt).replace("Z", "+00:00"))
+        closed_at = formed_at + timedelta(minutes=TF_MINUTES[pattern.tf])
+        return next((bar for bar in bars
+                     if datetime.fromisoformat(str(bar.dt).replace("Z", "+00:00")) >= closed_at), None)
+    except (TypeError, ValueError):
+        # Совместимость со старыми/нестандартными метками времени.
+        return next((bar for bar in bars if str(bar.dt) > str(pattern.dt)), None)
+
+
+def _confirmed_by_next_close(pattern: Pattern, trigger_close: float, bar: Candle) -> bool:
+    """Одна более поздняя закрытая свеча должна удержать идею паттерна."""
+    direction_ok = _bull(bar) if pattern.side == "LONG" else _bear(bar)
+    invalidated = (bar.close <= pattern.level if pattern.side == "LONG"
+                   else bar.close >= pattern.level)
+    if invalidated or not direction_ok:
+        return False
+    # Для пробойных фигур удерживаем именно пробитую границу. Для свечных и
+    # гармонических моделей уровень является защитной точкой, поэтому кроме
+    # её сохранения требуем продолжение относительно закрытия сигнальной свечи.
+    if pattern.name not in CANDLE_PATTERN_NAMES and not pattern.name.startswith("Гармонический"):
+        return bar.close > pattern.level if pattern.side == "LONG" else bar.close < pattern.level
+    if not trigger_close:
+        return True
+    return bar.close >= trigger_close if pattern.side == "LONG" else bar.close <= trigger_close
+
+
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
+    pending = state.setdefault("pending_confirmation", {})
     messages = []
     for symbol in cfg.PAIRS:
         try:
-            candidates = scan_symbol(symbol, market.get(symbol) or {})
             by_tf = market.get(symbol) or {}
             context_side = _market_context_side(by_tf)
+            # Сначала завершаем ранее найденные сетапы. Первая более поздняя
+            # закрытая свеча либо подтверждает паттерн, либо молча снимает его.
+            for key, raw in list(pending.items()):
+                if raw.get("symbol") != symbol:
+                    continue
+                pattern = Pattern(**raw["pattern"])
+                bar = _confirmation_bar(pattern, by_tf)
+                if bar is None:
+                    continue
+                pending.pop(key, None)
+                sent[key] = pattern.dt
+                if _confirmed_by_next_close(pattern, float(raw.get("trigger_close") or 0), bar):
+                    text = _fmt(symbol, pattern, context_side)
+                    text = text.replace(
+                        "\nФакт:",
+                        f"\nПодтверждение удержания: закрытая {_confirmation_tf(pattern.tf)}-свеча\n\nФакт:",
+                        1,
+                    )
+                    messages.append(text)
+                    _PENDING_CARDS[text] = (symbol, pattern, by_tf)
+
+            candidates = scan_symbol(symbol, by_tf)
             strength = strength or {}
             candidates = [
                 p for p in candidates
@@ -561,12 +625,13 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 continue
             for p in candidates:
                 key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
-                if key in sent:
+                if key in sent or key in pending:
                     continue
-                sent[key] = p.dt
-                text = _fmt(symbol, p, context_side)
-                messages.append(text)
-                _PENDING_CARDS[text] = (symbol, p, by_tf)
+                pending[key] = {
+                    "symbol": symbol,
+                    "pattern": asdict(p),
+                    "trigger_close": _trigger_close(p, by_tf),
+                }
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:
             log.exception("Паттерны %s", symbol)
@@ -574,5 +639,6 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     # Ограничиваем файл состояния, не теряя свежую защиту от повторов.
     if len(sent) > 1500:
         state["sent"] = dict(list(sent.items())[-1200:])
+    state["pending_confirmation"] = pending
     _save(state)
     return messages

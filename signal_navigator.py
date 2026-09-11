@@ -475,6 +475,7 @@ def register_card(text: str, sources: list[str], h1_dt: str = "") -> None:
     source_hashes = {hashlib.sha256(item.encode()).hexdigest()[:20] for item in sources}
     digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
     scenario = _scenario_from_card(text)
+    scenario["invalidation"] = _source_invalidation(sources, scenario.get("side", ""))
     scenario["start_h1"] = h1_dt
     scenario["last_h1"] = h1_dt
     state.setdefault("pending_cards", {})[digest] = {
@@ -515,6 +516,8 @@ def mark_delivered(text: str) -> bool:
             old["max_progress"] = max(int(old.get("max_progress") or 0),
                                       int(scenario.get("max_progress") or 0),
                                       int(old.get("last_progress") or 0))
+            if not old.get("invalidation") and scenario.get("invalidation"):
+                old["invalidation"] = scenario["invalidation"]
             old["updated_at"] = time.time()
         else:
             state.setdefault("active", {})[symbol] = scenario
@@ -534,6 +537,24 @@ def _float_line(text: str, label: str) -> float:
     raw = _line(text, label)
     match = re.search(r"-?\d+(?:\.\d+)?", raw)
     return float(match.group(0)) if match else 0.0
+
+
+def _source_invalidation(sources: list[str], side: str) -> float:
+    """Извлекает реальную границу поломки идеи, а не цену входа."""
+    levels = []
+    for source in sources or []:
+        zone = re.search(r"^.*Зона(?: FVG| импульса)?:\s*([0-9.]+)[–-]([0-9.]+)", source, re.M)
+        if zone:
+            low, high = sorted((float(zone.group(1)), float(zone.group(2))))
+            levels.append(low if side == "LONG" else high)
+            continue
+        value = _float_line(source, "Ключевой уровень")
+        if value:
+            levels.append(value)
+    if not levels:
+        return 0.0
+    # Самая близкая подтверждённая граница защищает действующий маршрут.
+    return max(levels) if side == "LONG" else min(levels)
 
 
 def _route_progress_from_card(text: str) -> int:
@@ -565,6 +586,7 @@ def _scenario_from_card(text: str) -> dict:
         "key": f"{symbol}|{side}|{_line(text, 'Начало маршрута H1')}",
         "symbol": symbol, "side": side,
         "anchor": _float_line(text, "Начало маршрута H1"),
+        "invalidation": _float_line(text, "Уровень отмены"),
         "target": targets[0]["price"] if targets else 0.0,
         "target_tf": targets[0]["tf"] if targets else "", "targets": targets,
         "mode": mode,
@@ -604,16 +626,26 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int,
                 "Это завершение прежнего пути, а не автоматический сигнал разворота.")
     else:
         title = "❌ СЦЕНАРИЙ ОТМЕНЁН"
-        fact = "Контрольный маршрут нарушен закрытой H1-свечой либо H1 и M15 подтвердили противоположное направление."
-    return "\n".join([
+        boundary = float(item.get("invalidation") or 0)
+        if boundary:
+            fact = (f"Закрытая H1-свеча нарушила уровень отмены "
+                    f"{movement_progress._price(symbol, boundary)} либо H1 и M15 подтвердили противоположное направление.")
+        else:
+            fact = "H1 и M15 подтвердили противоположное направление; обычный ретест цены входа не считается отменой."
+    lines = [
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {symbol}", f"Исходное направление: {side} {icon}",
         f"Источники модулей: {source}",
         f"Текущая цена: {movement_progress._price(symbol, current)}",
+    ]
+    if action == "CANCEL" and item.get("invalidation"):
+        lines.append(f"Уровень отмены: {movement_progress._price(symbol, float(item['invalidation']))}")
+    lines.extend([
         f"Текущая цель: {current_target.get('name', 'TR')} ({current_target.get('tf', '')}) "
         f"{movement_progress._price(symbol, float(current_target.get('price') or item.get('target') or 0))}",
         f"Пройдено расчётного пути: {progress}%", "", f"Факт: {fact}", "", "━━━━━━━━━━━━━━━━━━",
     ])
+    return "\n".join(lines)
 
 
 def _opposite_confirmed(side: str, by_tf: dict) -> bool:
@@ -718,7 +750,10 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             item["max_progress"] = progress
         # Касание цели фиксируется быстро по M5, но отмена маршрута никогда не
         # принимается по внутрисвечному шуму — только по новой закрытой H1.
-        invalid = new_h1 and (h1_bar.close <= anchor if direction > 0 else h1_bar.close >= anchor)
+        invalidation = float(item.get("invalidation") or 0)
+        invalid = bool(new_h1 and invalidation and
+                       (h1_bar.close <= invalidation if direction > 0
+                        else h1_bar.close >= invalidation))
         reached_names = [targets[index]["name"] for index in range(reached_before, highest_reached)]
         next_target = targets[highest_reached] if highest_reached < len(targets) else targets[-1]
         problems = []
@@ -729,6 +764,9 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                 problems = _continuation_check(item, by_tf, strength or {})
                 action = "TARGET_RISK" if problems else "TARGET_CLEAR"
         else:
+            # Возврат к цене старта — обычный ретест, а не отмена. Без
+            # структурной границы сценарий снимается только при согласованном
+            # развороте H1 и M15.
             action = "CANCEL" if (new_h1 and (invalid or _opposite_confirmed(item["side"], by_tf))) else ""
         if (getattr(cfg, "SIGNAL_NEAR_TARGET_ALERTS", False) and not action
                 and progress >= int(getattr(cfg, "SIGNAL_NEAR_TARGET_PCT", 85))

@@ -175,7 +175,11 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
             gap = 0.0
         min_gap = float(getattr(cfg, "ZIGZAG_EARLY_MIN_STRENGTH_GAP", .05))
         strength_ok = bool(early_side and gap * early_side >= min_gap)
-        if early_side and m5_side == early_side and strength_ok:
+        # Текст карточки использует направления analyze_tf, поэтому ранний
+        # сигнал разрешён лишь когда эти же отображаемые M15/M5 не спорят с
+        # сериями свечей. Это исключает формулировку «M15 подтвердил» при RANGE.
+        displayed_ok = m15 == early_side and m5 == early_side
+        if early_side and m5_side == early_side and strength_ok and displayed_ok:
             side, early_key = early_side, run_dt
             event = ("РАННИЙ ПОДТВЕРЖДЁННЫЙ ИМПУЛЬС" if early_side == main
                      else "РАННИЙ ПОДТВЕРЖДЁННЫЙ ОТКАТ")
