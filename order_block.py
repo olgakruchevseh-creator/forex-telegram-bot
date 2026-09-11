@@ -13,6 +13,7 @@ from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 log = logging.getLogger("fxbot.order_block")
 TF_MINUTES = {"H4": 240, "H1": 60, "M15": 15}
 SCAN_TFS = ("H4", "H1")
+_LAST_CHART_CARDS: dict[str, tuple[dict, dict]] = {}
 
 
 @dataclass
@@ -210,7 +211,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     confirmed.append(event)
             if confirmed and not first:
                 best = max(confirmed, key=lambda e: (e["quality"], e["tf"] == "H4"))
-                messages.append(format_message(best))
+                message = format_message(best)
+                messages.append(message)
+                _LAST_CHART_CARDS[message] = (best, by_tf)
             for tf in SCAN_TFS:
                 source_bars = h4 if tf == "H4" else h1
                 block = newest_block(symbol, tf, source_bars)
@@ -224,3 +227,62 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["blocks"] = {b.block_id: asdict(b) for b in kept[-500:]}
     _save(state)
     return messages
+
+
+def render_chart(event: dict, by_tf: dict):
+    """PNG chart for an already-confirmed Order Block retest.
+
+    Presentation only: this function never changes Order Block signal logic.
+    """
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    tf = event.get("confirm_tf", "M15")
+    bars = _bars(by_tf, tf)
+    lookback = max(40, int(getattr(cfg, "ORDER_BLOCK_CHART_LOOKBACK", 72)))
+    bars = bars[-lookback:]
+    if not bars:
+        return None
+
+    fig, ax = plt.subplots(figsize=(10, 5.4))
+    for i, c in enumerate(bars):
+        ax.vlines(i, c.low, c.high, linewidth=1)
+        bottom = min(c.open, c.close)
+        height = max(abs(c.close-c.open), max(c.high-c.low, 1e-8)*0.015)
+        ax.add_patch(Rectangle((i-.32, bottom), .64, height, fill=False, linewidth=1.1))
+
+    low, high = float(event["low"]), float(event["high"])
+    ax.axhspan(low, high, alpha=.12)
+    ax.axhline(float(event["bos_level"]), linestyle="--", linewidth=1.2)
+    ax.text(len(bars)-1, high, " ORDER BLOCK", ha="right", va="bottom", fontsize=9)
+    ax.text(len(bars)-1, float(event["bos_level"]), " BOS", ha="right", va="bottom", fontsize=9)
+
+    # Mark the latest closed confirmation candle.
+    idx = len(bars)-1
+    y = bars[-1].high if event["side"] == "LONG" else bars[-1].low
+    ax.annotate(f"RETEST {event['side']}", (idx, y), xytext=(-55, 18 if event["side"]=="LONG" else -28),
+                textcoords="offset points", arrowprops={"arrowstyle": "->"}, fontsize=9)
+
+    ax.set_title(f"{event['symbol']} · ORDER BLOCK · {event['side']} · {event['tf']} → {tf}")
+    ax.set_ylabel("Price")
+    ax.set_xlabel("Closed candles")
+    ax.grid(True, alpha=.2)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def image_for_alert(text: str):
+    """Return chart for the exact emitted Order Block alert, if available."""
+    if not getattr(cfg, "ORDER_BLOCK_CHART_IMAGES_ENABLED", True):
+        return None
+    card = _LAST_CHART_CARDS.pop(text, None)
+    if not card:
+        return None
+    return render_chart(card[0], card[1])

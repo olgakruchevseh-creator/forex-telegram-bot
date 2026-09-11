@@ -918,6 +918,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = chain_entries.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Chain Entry")
+            if "🧱 РЕТЕСТ ORDER BLOCK" in text:
+                try:
+                    source_image = order_block.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Order Block")
             if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
                 try:
                     source_image = accumulation_distribution.image_for_alert(text)
@@ -1102,22 +1107,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-async def _send_retest_with_chart(bot, chat_id, text, symbol, candles, event):
-    """Send confirmed Retest alert with PNG; fall back to text if chart creation fails."""
-    import tempfile
-    from pathlib import Path
-    try:
-        from retest_confirmation import render_retest_chart
-        from config import RETEST_CHART_ENABLED
-        if RETEST_CHART_ENABLED:
-            with tempfile.TemporaryDirectory(prefix="retest_chart_") as td:
-                png = Path(td) / "retest.png"
-                rendered = render_retest_chart(symbol, candles, event, png)
-                if rendered:
-                    with open(rendered, "rb") as photo:
-                        return await bot.send_photo(chat_id=chat_id, photo=photo, caption=text)
-    except Exception:
-        pass
-    return await bot.send_message(chat_id=chat_id, text=text)
-
