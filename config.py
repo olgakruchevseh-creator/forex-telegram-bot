@@ -114,7 +114,7 @@ ECHO_CHART_CANDLES = 40
 SESSION_PROJECTIONS_ENABLED = True
 # Если Railway пропустил открытие сессии, недоставленные карточки догоняются
 # при ближайшем сканировании в пределах той же сессии.
-SESSION_PROJECTIONS_CATCH_UP = False
+SESSION_PROJECTIONS_CATCH_UP = True
 SESSION_PROJECTIONS_OPEN_WINDOW_MIN = 20
 # Почасовые одиночные карточки отключены, чтобы не дублировать сессионные.
 ECHO_HOURLY_ENABLED = False

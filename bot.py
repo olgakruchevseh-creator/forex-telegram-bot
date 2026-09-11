@@ -1035,12 +1035,17 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Полные прогнозы от текущей сессии до следующей: семь пар Эхо и
         # семь пар Next Pivot. Это отдельный информационный поток, который не
         # расходует лимит торговых кандидатов и не проходит через Навигатор.
-        if (getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True)
-                and briefing.just_opened(
-                    window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20)))):
+        session_projection_due = (
+            briefing.just_opened(
+                window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20))
+            )
+            or bool(getattr(cfg, "SESSION_PROJECTIONS_CATCH_UP", False))
+        )
+        if getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True) and session_projection_due:
             try:
-                # Только начало новой сессии: расчёт использует последнюю
-                # закрытую H1 и не догоняется произвольно через несколько часов.
+                # В норме отправляем у открытия сессии. Если Railway пропустил
+                # это окно, catch-up повторно проверяет только НЕДОСТАВЛЕННЫЕ
+                # ключи текущей сессии; уже отправленные карточки не дублируются.
                 session_events = briefing.session_events(newsmod.load_events())
                 for alert in session_projection_reports.pending_reports(
                         market, session_events, state):
