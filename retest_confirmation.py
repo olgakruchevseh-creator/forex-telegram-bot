@@ -1,4 +1,5 @@
 """Строгий структурный ретест: BOS -> удержание -> отдельный возврат к уровню."""
+_RETEST_CHART_CACHE = {}
 from __future__ import annotations
 
 import json
@@ -206,7 +207,11 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if existing:
                     event = confirm_retest(existing, h1, by_tf, strength)
                     if event and not first:
-                        messages.append(format_message(event))
+                        message = format_message(event)
+
+                        messages.append(message)
+
+                        _RETEST_CHART_CACHE[message] = (event, by_tf)
                 bars = _bars(by_tf, tf)
                 fresh = detect_bos(symbol, tf, bars)
                 if fresh and (not existing or fresh.setup_id != existing.setup_id):
@@ -286,3 +291,29 @@ def render_retest_chart(symbol, candles, event, output_path):
     plt.close(fig)
     return str(output_path)
 
+
+
+def image_for_alert(text: str):
+    """One-shot chart for the exact confirmed structural Retest alert."""
+    if not getattr(cfg, "RETEST_CHART_ENABLED", True):
+        return None
+    card = _RETEST_CHART_CACHE.pop(text, None)
+    if not card:
+        return None
+    event, by_tf = card
+    def get(obj, key, default=None):
+        return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+    tf = get(event, "confirm_tf", get(event, "tf", "M15"))
+    candles = by_tf.get(tf) or by_tf.get("M15") or by_tf.get("H1") or []
+    data = {
+        "level": get(event, "level", get(event, "bos_level")),
+        "direction": get(event, "direction", get(event, "side", "")),
+    }
+    import tempfile, os, io
+    with tempfile.TemporaryDirectory(prefix="retest_chart_") as td:
+        path = os.path.join(td, "retest.png")
+        rendered = render_retest_chart(get(event, "symbol", ""), candles, data, path)
+        if not rendered:
+            return None
+        with open(rendered, "rb") as f:
+            return io.BytesIO(f.read())

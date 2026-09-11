@@ -883,11 +883,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         delivery_alerts = list(dict.fromkeys(mandatory_amd_alerts + selected_alerts))
         for text in delivery_alerts:
             source_image = None
-            if "СНЯТИЕ ЛИКВИДНОСТИ" in text.upper():
-                try:
-                    source_image = liquidity_sweep.image_for_alert(text)
-                except Exception:
-                    log.exception("Подготовка изображения снятия ликвидности")
             if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
                 try:
                     source_image = disbalance.image_for_alert(text)
@@ -918,16 +913,47 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = fibonacci_grid.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Fibonacci")
+            if "🧱 РЕТЕСТ ORDER BLOCK" in text:
+                try:
+                    source_image = order_block.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Order Block")
+            if "СНЯТИЕ ЛИКВИДНОСТИ" in text.upper():
+                try:
+                    source_image = liquidity_sweep.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения снятия ликвидности")
+            if "РЕТЕСТ" in text.upper() and "ORDER BLOCK" not in text.upper() and "УРОВНЯ" not in text.upper():
+                try:
+                    source_image = retest_confirmation.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Retest")
             if "⛓️ CHAIN ENTRY" in text:
                 try:
                     source_image = chain_entries.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Chain Entry")
+            if "📅 ПРОБОЙ МАКСИМУМА ДНЯ" in text or "📅 ПРОБОЙ МИНИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МАКСИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МИНИМУМА ДНЯ" in text:
+                try:
+                    source_image = daily_high_low.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Daily High/Low")
             if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
                 try:
                     source_image = accumulation_distribution.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения фазы накопления/распределения")
+            if any(tag in text for tag in (
+                "📍 СИЛЬНЫЙ УРОВЕНЬ", "↘️ ОТБОЙ ОТ СОПРОТИВЛЕНИЯ",
+                "↗️ ОТБОЙ ОТ ПОДДЕРЖКИ", "⚡ ПРОБОЙ УРОВНЯ",
+                "📌 УДЕРЖАНИЕ ПОДТВЕРЖДЕНО", "↘️ ЛОЖНЫЙ ПРОБОЙ СОПРОТИВЛЕНИЯ",
+                "↗️ ЛОЖНЫЙ ПРОБОЙ ПОДДЕРЖКИ", "🔄 РЕТТЕСТ УРОВНЯ",
+                "🔄 СМЕНА РОЛИ УРОВНЯ", "❌ УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН",
+            )):
+                try:
+                    source_image = levels.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Levels")
             if source_image is not None:
                 # Текущая карточка короче лимита Telegram для подписи к фото.
                 # Защитный вариант сохраняет полный текст при будущих расширениях.
@@ -1040,9 +1066,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Полные прогнозы от текущей сессии до следующей: семь пар Эхо и
         # семь пар Next Pivot. Это отдельный информационный поток, который не
         # расходует лимит торговых кандидатов и не проходит через Навигатор.
-        if (getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True)
-                and briefing.just_opened(
-                    window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20)))):
+        session_projection_due = (
+            briefing.just_opened(
+                window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20))
+            )
+            or bool(getattr(cfg, "SESSION_PROJECTIONS_CATCH_UP", False))
+        )
+        if getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True) and session_projection_due:
             try:
                 # Только начало новой сессии: расчёт использует последнюю
                 # закрытую H1 и не догоняется произвольно через несколько часов.
