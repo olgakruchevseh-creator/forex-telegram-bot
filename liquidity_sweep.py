@@ -10,6 +10,9 @@ from pathlib import Path
 import config as cfg
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
+_LAST_CHART_CARDS: dict[str, tuple[dict, dict]] = {}
+
+
 log = logging.getLogger("fxbot.liquidity_sweep")
 TF_MINUTES = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15}
 
@@ -215,7 +218,11 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     continue
                 event = confirm_sweep(setup, h1, h4, m15, strength)
                 if event and not first:
-                    messages.append(format_message(event))
+                    message = format_message(event)
+
+                    messages.append(message)
+
+                    _LAST_CHART_CARDS[message] = (event, by_tf)
             fresh = detect_new_sweep(symbol, d1, h4, h1)
             if fresh and fresh.setup_id not in setups:
                 # Один активный sweep каждого направления на пару.
@@ -231,3 +238,84 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["setups"] = {s.setup_id: asdict(s) for s in kept[-500:]}
     _save(state)
     return messages
+
+
+def render_chart(event: dict, by_tf: dict):
+    """Render PNG for an already-confirmed liquidity sweep.
+
+    Presentation-only: does not alter detection, confirmation, scoring or anti-spam.
+    """
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    def _get(obj, *names, default=None):
+        for name in names:
+            if isinstance(obj, dict) and name in obj:
+                return obj[name]
+            if hasattr(obj, name):
+                return getattr(obj, name)
+        return default
+
+    tf = _get(event, "tf", "confirm_tf", default="M15")
+    bars = by_tf.get(tf) if isinstance(by_tf, dict) else None
+    if not bars:
+        for fallback in ("M15", "H1", "M5", "H4"):
+            if isinstance(by_tf, dict) and by_tf.get(fallback):
+                tf, bars = fallback, by_tf[fallback]
+                break
+    bars = list(bars or [])[-int(getattr(cfg, "LIQUIDITY_SWEEP_CHART_LOOKBACK", 72)):]
+    if not bars:
+        return None
+
+    def cv(c, key):
+        if isinstance(c, dict):
+            return float(c[key])
+        return float(getattr(c, key))
+
+    level = _get(event, "level", "liquidity_level", "sweep_level")
+    direction = str(_get(event, "direction", "side", default="")).upper()
+    kind = str(_get(event, "type", "kind", "sweep_type", default="LIQUIDITY SWEEP"))
+
+    fig, ax = plt.subplots(figsize=(10, 5.4))
+    for i, c in enumerate(bars):
+        o,h,l,cl = cv(c,"open"),cv(c,"high"),cv(c,"low"),cv(c,"close")
+        ax.vlines(i, l, h, linewidth=1)
+        bottom=min(o,cl)
+        height=max(abs(cl-o), max(h-l,1e-8)*0.015)
+        ax.add_patch(Rectangle((i-.32,bottom),.64,height,fill=False,linewidth=1.1))
+
+    if level is not None:
+        level=float(level)
+        ax.axhline(level, linestyle="--", linewidth=1.4)
+        ax.text(len(bars)-1, level, f" LIQUIDITY  {level:.5f}",
+                ha="right", va="bottom", fontsize=9)
+
+    idx=len(bars)-1
+    y=cv(bars[-1],"high") if direction in ("SHORT","SELL") else cv(bars[-1],"low")
+    ax.annotate(f"SWEEP → {direction or 'CONFIRMED'}", (idx,y),
+                xytext=(-85, 20 if direction in ("LONG","BUY") else -28),
+                textcoords="offset points", arrowprops={"arrowstyle":"->"}, fontsize=9)
+    symbol=str(_get(event,"symbol","pair",default=""))
+    ax.set_title(f"{symbol} · {kind} · {direction}".strip(" ·"))
+    ax.set_xlabel("Closed candles")
+    ax.set_ylabel("Price")
+    ax.grid(True, alpha=.2)
+    fig.tight_layout()
+    buf=io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def image_for_alert(text: str):
+    """Return one chart for the exact emitted liquidity-sweep alert."""
+    if not getattr(cfg, "LIQUIDITY_SWEEP_CHART_IMAGES_ENABLED", True):
+        return None
+    card=_LAST_CHART_CARDS.pop(text, None)
+    if not card:
+        return None
+    return render_chart(card[0], card[1])

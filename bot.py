@@ -883,6 +883,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         delivery_alerts = list(dict.fromkeys(mandatory_amd_alerts + selected_alerts))
         for text in delivery_alerts:
             source_image = None
+            if "СНЯТИЕ ЛИКВИДНОСТИ" in text.upper():
+                try:
+                    source_image = liquidity_sweep.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения снятия ликвидности")
             if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
                 try:
                     source_image = disbalance.image_for_alert(text)
@@ -918,11 +923,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = chain_entries.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Chain Entry")
-            if "🧱 РЕТЕСТ ORDER BLOCK" in text:
-                try:
-                    source_image = order_block.image_for_alert(text)
-                except Exception:
-                    log.exception("Подготовка изображения Order Block")
             if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
                 try:
                     source_image = accumulation_distribution.image_for_alert(text)
