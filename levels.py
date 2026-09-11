@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -31,6 +32,9 @@ log = logging.getLogger("fxbot.levels")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
 DEFAULT_STATE_PATH = Path(__file__).parent / "levels_state.json"
 STATE_PATH = DEFAULT_STATE_PATH
+
+
+_PENDING_CARDS: dict[str, tuple] = {}
 
 
 def levels_state_path() -> Path:
@@ -1217,8 +1221,68 @@ def _strength_confirms(
     return gap >= minimum if side == "LONG" else gap <= -minimum
 
 
+def render_chart(zone: Zone, event: str, side: str, closed_by_tf: dict[str, list[Candle]]) -> io.BytesIO:
+    """График подтвержденного события Levels на реальных закрытых свечах."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    tf = pick_work_tf(zone)
+    bars = (closed_by_tf.get(tf) or closed_by_tf.get("H1") or [])[-max(40, int(getattr(cfg, "LEVEL_CHART_LOOKBACK", 72))):]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 23)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font, small = ImageFont.load_default(), ImageFont.load_default()
+    left, right, top, bottom = 72, 1135, 88, 610
+    values = [v for c in bars for v in (c.low, c.high)] + [zone.low, zone.high]
+    if not values:
+        values = [zone.low, zone.high]
+    pmin, pmax = min(values), max(values)
+    pad = max((pmax-pmin)*.08, abs(zone.mid)*.0001, zone.width*.5)
+    pmin, pmax = pmin-pad, pmax+pad
+    def x_at(i): return left + i/max(1, len(bars)-1)*(right-left)
+    def y_at(price): return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+    for n in range(6):
+        y=top+n*(bottom-top)/5
+        draw.line((left,y,right,y), fill="#293040", width=1)
+    cw=max(3, int((right-left)/max(1,len(bars))*.55))
+    for i,c in enumerate(bars):
+        x=x_at(i); color="#37d67a" if c.close>=c.open else "#ff5c6c"
+        draw.line((x,y_at(c.high),x,y_at(c.low)), fill=color, width=2)
+        y1,y2=y_at(c.open),y_at(c.close)
+        draw.rectangle((x-cw/2,min(y1,y2),x+cw/2,max(y1,y2)+1), fill=color)
+    zy1,zy2=y_at(zone.high),y_at(zone.low)
+    zone_color="#ff6575" if zone.kind=="resistance" else "#42e889"
+    draw.rectangle((left,min(zy1,zy2),right,max(zy1,zy2)), fill=zone_color+"28", outline=zone_color, width=2)
+    label="СОПРОТИВЛЕНИЕ" if zone.kind=="resistance" else "ПОДДЕРЖКА"
+    draw.text((left+8,min(zy1,zy2)-27), f"{label}  {fmt_price(zone.symbol,zone.low)}–{fmt_price(zone.symbol,zone.high)}", fill=zone_color, font=small)
+    if bars:
+        x=x_at(len(bars)-1); c=bars[-1]
+        py=y_at(c.close)
+        draw.ellipse((x-9,py-9,x+9,py+9), fill="#f4c542", outline="#ffffff", width=2)
+        if side in ("LONG","SHORT"):
+            direction=-1 if side=="LONG" else 1
+            ey=max(top+35,min(bottom-35,py+direction*105))
+            draw.line((x,py,max(left,x-85),ey), fill="#42e889" if side=="LONG" else "#ff6575", width=5)
+    title=header_event(event).replace("📍 ","").replace("⚡ ","").replace("↗️ ","").replace("↘️ ","").replace("📌 ","").replace("🔄 ","").replace("❌ ","")
+    draw.text((left,26), f"{zone.symbol} · LEVELS · {side or label}", fill="#f1f5fb", font=font)
+    draw.text((left,657), f"{title} · реальные закрытые {tf}-свечи · TF уровня: {format_tfs(zone.tfs)}", fill="#aeb7c6", font=small)
+    out=io.BytesIO(); out.name=f"levels_{zone.symbol.replace('/','')}_{event}_{side or zone.kind}.png"
+    image.save(out, format="PNG", optimize=True); out.seek(0); return out
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "LEVEL_CHART_IMAGES_ENABLED", True):
+        return None
+    return render_chart(card[0], card[1], card[2], card[3])
+
+
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
     """Считает уровни по уже полученному рынку. Возвращает тексты новых фактов."""
+    _PENDING_CARDS.clear()
     store = load_store()
     if not acquire(store):
         return []
@@ -1317,7 +1381,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                         z, candle, av, ev, side, strength
                     )
                     cancelled_side = direction_to_cancel(store, z.symbol, side)
-                    messages.append(build_message(
+                    message = build_message(
                         z, ev, fact, side,
                         confirmation_tf=work if ev != "new_level" else "",
                         confirmation_dt=candle.dt if candle and ev != "new_level" else "",
@@ -1325,7 +1389,9 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                         quality=quality if ev != "new_level" else None,
                         confidence=confidence if ev != "new_level" else None,
                         cancelled_side=cancelled_side,
-                    ))
+                    )
+                    messages.append(message)
+                    _PENDING_CARDS[message] = (z, ev, side, closed_map)
                     remember_pair_direction(store, z.symbol, side, ev)
             except Exception:
                 log.exception("Уровни %s", symbol)

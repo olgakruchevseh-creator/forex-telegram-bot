@@ -928,6 +928,17 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = accumulation_distribution.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения фазы накопления/распределения")
+            if any(tag in text for tag in (
+                "📍 СИЛЬНЫЙ УРОВЕНЬ", "↘️ ОТБОЙ ОТ СОПРОТИВЛЕНИЯ",
+                "↗️ ОТБОЙ ОТ ПОДДЕРЖКИ", "⚡ ПРОБОЙ УРОВНЯ",
+                "📌 УДЕРЖАНИЕ ПОДТВЕРЖДЕНО", "↘️ ЛОЖНЫЙ ПРОБОЙ СОПРОТИВЛЕНИЯ",
+                "↗️ ЛОЖНЫЙ ПРОБОЙ ПОДДЕРЖКИ", "🔄 РЕТТЕСТ УРОВНЯ",
+                "🔄 СМЕНА РОЛИ УРОВНЯ", "❌ УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН",
+            )):
+                try:
+                    source_image = levels.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Levels")
             if source_image is not None:
                 # Текущая карточка короче лимита Telegram для подписи к фото.
                 # Защитный вариант сохраняет полный текст при будущих расширениях.
