@@ -918,6 +918,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = chain_entries.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Chain Entry")
+            if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
+                try:
+                    source_image = accumulation_distribution.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения фазы накопления/распределения")
             if source_image is not None:
                 # Текущая карточка короче лимита Telegram для подписи к фото.
                 # Защитный вариант сохраняет полный текст при будущих расширениях.
@@ -965,6 +970,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         chain_entries.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Chain Entry")
+                if "🚀 ВЫХОД ИЗ ФАЗЫ" in source_text or "📦 ФАЗА " in source_text:
+                    try:
+                        accumulation_distribution.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленной фазы накопления/распределения")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import io
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -14,6 +16,7 @@ log = logging.getLogger("fxbot.accumulation")
 TF_MINUTES = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 MAIN_TFS = ("D1", "H4", "H1")
 TF_RANK = {"D1": 3, "H4": 2, "H1": 1}
+_PENDING_CARDS: dict[str, tuple["Phase", dict]] = {}
 
 
 @dataclass
@@ -36,6 +39,8 @@ class Phase:
     exit_sent: bool = False
     invalid: bool = False
     last_dt: str = ""
+    exit_dt: str = ""
+    exit_price: float = 0.0
 
 
 def _path() -> Path:
@@ -149,6 +154,8 @@ def detect_exit(phase: Phase, bars: list[Candle], by_tf: dict, strength: dict[st
     phase.exit_sent = True
     phase.status = "ВЫХОД ПОДТВЕРЖДЁН"
     phase.confidence = min(93, phase.confidence + 5)
+    phase.exit_dt = current.dt
+    phase.exit_price = current.close
     return True
 
 
@@ -178,11 +185,91 @@ def format_message(phase: Phase, event: str) -> str:
     ])
 
 
+def render_chart(phase: Phase, by_tf: dict) -> io.BytesIO:
+    """Закрытые M15-свечи с диапазоном фазы и подтверждённым выходом."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    bars = _bars(by_tf, "M15")[-max(72, int(getattr(cfg, "PHASE_CHART_LOOKBACK", 120))):]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 23)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font, small = ImageFont.load_default(size=23), ImageFont.load_default(size=17)
+    left, right, top, bottom = 72, 1135, 88, 610
+    values = [v for candle in bars for v in (candle.low, candle.high)]
+    values.extend((phase.low, phase.high, phase.exit_price or phase.high))
+    pmin, pmax = min(values), max(values)
+    pad = max((pmax-pmin)*.08, max(abs(phase.low), 1.0)*.0001)
+    pmin, pmax = pmin-pad, pmax+pad
+
+    def x_at(index: float) -> float:
+        return left + index/max(1, len(bars)-1)*(right-left)
+
+    def y_at(price: float) -> float:
+        return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+
+    for n in range(6):
+        y = top+n*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#293040", width=1)
+    phase_color = "#f4dc4b" if phase.kind == "accumulation" else "#75a7ff"
+    draw.rectangle((left, y_at(phase.high), right, y_at(phase.low)),
+                   fill=phase_color+"28", outline=phase_color, width=3)
+    candle_w = max(3, int((right-left)/max(1, len(bars))*.55))
+    for index, candle in enumerate(bars):
+        x = x_at(index)
+        color = "#37d67a" if candle.close >= candle.open else "#ff5c6c"
+        draw.line((x, y_at(candle.high), x, y_at(candle.low)), fill=color, width=2)
+        y1, y2 = y_at(candle.open), y_at(candle.close)
+        draw.rectangle((x-candle_w/2, min(y1, y2), x+candle_w/2, max(y1, y2)+1), fill=color)
+    index_by_dt = {bar.dt: index for index, bar in enumerate(bars)}
+    exit_i = index_by_dt.get(phase.exit_dt, max(0, len(bars)-1))
+    ex, ey = x_at(exit_i), y_at(phase.exit_price or bars[-1].close)
+    side_color = "#42e889" if phase.side == "LONG" else "#ff6575"
+    draw.ellipse((ex-10, ey-10, ex+10, ey+10), fill=side_color, outline="#ffffff", width=2)
+    direction = -1 if phase.side == "LONG" else 1
+    arrow_x, arrow_y = min(right-15, ex+85), max(top+25, min(bottom-25, ey+direction*100))
+    draw.line((ex, ey, arrow_x, arrow_y), fill=side_color, width=5)
+    label = "НАКОПЛЕНИЕ" if phase.kind == "accumulation" else "РАСПРЕДЕЛЕНИЕ"
+    draw.text((left+8, y_at(phase.high)+7), f"ФАЗА: {label} · {phase.tf}", fill=phase_color, font=small)
+    draw.text((max(left, ex-185), max(top, ey-38)), "ПОДТВЕРЖДЁННЫЙ ВЫХОД", fill=side_color, font=small)
+    draw.text((left, 26), f"{phase.symbol} · ФАЗА И ВЫХОД · {phase.side}", fill="#f1f5fb", font=font)
+    draw.text((left, 657), "Реальные закрытые M15-свечи · границы исходной фазы сохранены", fill="#aeb7c6", font=small)
+    output = io.BytesIO()
+    output.name = f"phase_{phase.symbol.replace('/', '')}_{phase.side}.png"
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "PHASE_CHART_IMAGES_ENABLED", True):
+        return None
+    return render_chart(card[0], card[1])
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
+    _PENDING_CARDS.clear()
     state = _load()
+    if int(state.get("logic_version") or 0) != 2:
+        state["pending"] = {}
+        state["logic_version"] = 2
     first = not bool(state.get("bootstrapped"))
     stored = {k: Phase(**v) for k, v in (state.get("phases") or {}).items()}
-    messages = []
+    pending = state.setdefault("pending", {})
+    messages: list[str] = []
+    for digest, item in list(pending.items()):
+        raw_phase = item.get("phase") if isinstance(item, dict) else None
+        if not isinstance(raw_phase, dict):
+            pending.pop(digest, None)
+            continue
+        phase = Phase(**raw_phase)
+        text = format_message(phase, item.get("event", "exit"))
+        messages.append(text)
+        _PENDING_CARDS[text] = (phase, market.get(phase.symbol) or {})
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -191,7 +278,11 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 # Граница фазы H1/H4/D1 сохраняется, но сам выход фиксируется
                 # закрытой M15, а не ждёт закрытия старшего таймфрейма.
                 if detect_exit(phase, _bars(by_tf, "M15"), by_tf, strength) and not first:
-                    messages.append(format_message(phase, "exit"))
+                    text = format_message(phase, "exit")
+                    digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+                    pending[digest] = {"phase": asdict(phase), "event": "exit"}
+                    messages.append(text)
+                    _PENDING_CARDS[text] = (phase, by_tf)
             candidates = []
             for tf in MAIN_TFS:
                 phase = detect_phase(symbol, tf, _bars(by_tf, tf))
@@ -219,3 +310,15 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["phases"] = {p.phase_id: asdict(p) for p in phases}
     _save(state)
     return messages
+
+
+def mark_delivered(text: str) -> bool:
+    """Фиксирует доставку карточки фазы только после ответа Telegram."""
+    state = _load()
+    digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    if digest not in (state.get("pending") or {}):
+        return False
+    state["pending"].pop(digest, None)
+    _save(state)
+    _PENDING_CARDS.pop(text, None)
+    return True
