@@ -918,6 +918,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = chain_entries.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Chain Entry")
+            if "📅 ПРОБОЙ МАКСИМУМА ДНЯ" in text or "📅 ПРОБОЙ МИНИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МАКСИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МИНИМУМА ДНЯ" in text:
+                try:
+                    source_image = daily_high_low.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Daily High/Low")
             if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
                 try:
                     source_image = accumulation_distribution.image_for_alert(text)
@@ -1035,17 +1040,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Полные прогнозы от текущей сессии до следующей: семь пар Эхо и
         # семь пар Next Pivot. Это отдельный информационный поток, который не
         # расходует лимит торговых кандидатов и не проходит через Навигатор.
-        session_projection_due = (
-            briefing.just_opened(
-                window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20))
-            )
-            or bool(getattr(cfg, "SESSION_PROJECTIONS_CATCH_UP", False))
-        )
-        if getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True) and session_projection_due:
+        if (getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True)
+                and briefing.just_opened(
+                    window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20)))):
             try:
-                # В норме отправляем у открытия сессии. Если Railway пропустил
-                # это окно, catch-up повторно проверяет только НЕДОСТАВЛЕННЫЕ
-                # ключи текущей сессии; уже отправленные карточки не дублируются.
+                # Только начало новой сессии: расчёт использует последнюю
+                # закрытую H1 и не догоняется произвольно через несколько часов.
                 session_events = briefing.session_events(newsmod.load_events())
                 for alert in session_projection_reports.pending_reports(
                         market, session_events, state):

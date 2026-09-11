@@ -1,6 +1,7 @@
 """Максимум/минимум последнего закрытого дня и подтверждённые реакции цены."""
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.daily_high_low")
 TF_MINUTES = {"D1": 1440, "H1": 60, "M15": 15, "M5": 5}
+_PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
 
 
 def _path() -> Path:
@@ -132,7 +134,74 @@ def format_message(event: dict) -> str:
     ])
 
 
+
+def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
+    """H1-график на реальных закрытых свечах с Daily High/Low и подтверждённой реакцией."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    bars = _bars(by_tf, "H1")[-max(36, int(getattr(cfg, "DAILY_LEVEL_CHART_LOOKBACK", 60))):]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 23)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font, small = ImageFont.load_default(), ImageFont.load_default()
+    left, right, top, bottom = 72, 1135, 88, 610
+    values = [v for c in bars for v in (c.low, c.high)] + [event["day_high"], event["day_low"]]
+    pmin, pmax = min(values), max(values)
+    pad = max((pmax-pmin)*.08, abs(event["level"])*.0001)
+    pmin, pmax = pmin-pad, pmax+pad
+
+    def x_at(i: float) -> float:
+        return left + i/max(1, len(bars)-1)*(right-left)
+    def y_at(price: float) -> float:
+        return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+
+    for n in range(6):
+        y = top+n*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#293040", width=1)
+    candle_w = max(3, int((right-left)/max(1, len(bars))*.55))
+    for i, c in enumerate(bars):
+        x = x_at(i)
+        color = "#37d67a" if c.close >= c.open else "#ff5c6c"
+        draw.line((x, y_at(c.high), x, y_at(c.low)), fill=color, width=2)
+        y1, y2 = y_at(c.open), y_at(c.close)
+        draw.rectangle((x-candle_w/2, min(y1,y2), x+candle_w/2, max(y1,y2)+1), fill=color)
+
+    for label, price, color in (("DAILY HIGH", event["day_high"], "#f4c542"), ("DAILY LOW", event["day_low"], "#4aa3ff")):
+        y = y_at(price)
+        draw.line((left, y, right, y), fill=color, width=3)
+        draw.text((left+8, y-27), f"{label}  {_price(event['symbol'], price)}", fill=color, font=small)
+
+    idx = next((i for i,c in enumerate(bars) if c.dt == event.get("h1_dt")), len(bars)-1)
+    x = x_at(max(0, idx)); y = y_at(event["level"])
+    side_color = "#42e889" if event["side"] == "LONG" else "#ff6575"
+    draw.ellipse((x-10, y-10, x+10, y+10), fill=side_color, outline="#ffffff", width=2)
+    direction = -1 if event["side"] == "LONG" else 1
+    end_y = max(top+35, min(bottom-35, y + direction*110))
+    draw.line((x, y, min(right-20, x+80), end_y), fill=side_color, width=5)
+    kind = "ПРОБОЙ" if "ПРОБОЙ" in event["name"] else "ОТБОЙ"
+    draw.text((max(left, x-55), max(top, min(bottom-28, y+20))), kind, fill=side_color, font=small)
+    draw.text((left, 26), f"{event['symbol']} · {event['name']} · {event['side']}", fill="#f1f5fb", font=font)
+    draw.text((left, 657), "Реальные закрытые H1-свечи · уровни последнего закрытого D1 · подтверждение по H1", fill="#aeb7c6", font=small)
+    output = io.BytesIO()
+    output.name = f"daily_high_low_{event['symbol'].replace('/', '')}_{event['side']}.png"
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "DAILY_HIGH_LOW_CHART_IMAGES_ENABLED", True):
+        return None
+    return render_chart(card[0], card[1])
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
+    _PENDING_CARDS.clear()
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
@@ -152,7 +221,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             if event and event["event_id"] not in sent:
                 sent[event["event_id"]] = h1_dt
                 if not first:
-                    messages.append(format_message(event))
+                    text = format_message(event)
+                    messages.append(text)
+                    _PENDING_CARDS[text] = (event, by_tf)
         except Exception:
             log.exception("Дневной максимум/минимум %s", symbol)
     state["bootstrapped"] = True
