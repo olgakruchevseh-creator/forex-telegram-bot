@@ -1,6 +1,6 @@
 """Строгий структурный ретест: BOS -> удержание -> отдельный возврат к уровню."""
-_RETEST_CHART_CACHE = {}
 from __future__ import annotations
+_RETEST_CHART_CACHE = {}
 
 import json
 import logging
@@ -211,7 +211,6 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
 
                         messages.append(message)
 
-                        _RETEST_CHART_CACHE[message] = (event, by_tf)
                 bars = _bars(by_tf, tf)
                 fresh = detect_bos(symbol, tf, bars)
                 if fresh and (not existing or fresh.setup_id != existing.setup_id):
@@ -297,7 +296,6 @@ def image_for_alert(text: str):
     """One-shot chart for the exact confirmed structural Retest alert."""
     if not getattr(cfg, "RETEST_CHART_ENABLED", True):
         return None
-    card = _RETEST_CHART_CACHE.pop(text, None)
     if not card:
         return None
     event, by_tf = card
