@@ -908,6 +908,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = amd_power_of_three.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения AMD")
+            if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in text:
+                try:
+                    source_image = fibonacci_grid.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Fibonacci")
             if source_image is not None:
                 # Текущая карточка короче лимита Telegram для подписи к фото.
                 # Защитный вариант сохраняет полный текст при будущих расширениях.
@@ -945,6 +950,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         amd_power_of_three.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного AMD")
+                if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in source_text:
+                    try:
+                        fibonacci_grid.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Fibonacci")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)
