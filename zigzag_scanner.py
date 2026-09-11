@@ -148,6 +148,9 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         view = views.get(tf)
         return _side(view.structure, view.phase) if view else 0
 
+    from swing_profile import build_profiles, consensus as profile_consensus
+    profiles = build_profiles(bars_by_tf, swings_by_tf)
+
     d1, h4, h1, m15, m5 = (direction("D1"), direction("H4"),
                             direction("H1"), direction("M15"), direction("M5"))
     main = d1 if d1 and d1 == h4 else h4 if h4 else d1
@@ -236,6 +239,8 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
             }
             for tf in views
         },
+        "swing_profiles": profiles,
+        "profile_confirmation": profile_consensus(profiles, side or main_side),
         "last_dt": max((bars[-1].dt for bars in bars_by_tf.values() if bars), default=""),
     }
 
@@ -277,6 +282,11 @@ def format_message(s: dict) -> str:
         f"Структура {s['tf']}: {s['structure']}",
         f"Фаза: {s['phase']} · ADX {s['adx']}",
     ]
+    profile = (s.get("swing_profiles") or {}).get("H1") or (s.get("swing_profiles") or {}).get("H4")
+    if profile:
+        relation = "выше" if profile.get("current_relation", 0) > 0 else ("ниже" if profile.get("current_relation", 0) < 0 else "у")
+        lines.append(f"Профиль свинга {profile['tf']}: контрольная цена {_fmt_price(s['symbol'], profile['control_price'])} · цена {relation} зоны")
+        lines.append(f"Давление свечей: {profile['delta_proxy']:+.1f}% · это price/activity proxy, не биржевой объём")
     if s.get("high"):
         lines.append(f"Последний максимум: {_fmt_price(s['symbol'], s['high'])}")
     if s.get("low"):
@@ -335,6 +345,16 @@ def render_chart(s: dict, by_tf: dict) -> io.BytesIO:
     for row in range(6):
         y = top+row*(bottom-top)/5
         draw.line((left, y, right, y), fill="#293143", width=1)
+    profile = (s.get("swing_profiles") or {}).get(tf)
+    if profile:
+        va_lo, va_hi = float(profile.get("value_low") or 0), float(profile.get("value_high") or 0)
+        control = float(profile.get("control_price") or 0)
+        if va_lo and va_hi:
+            draw.rectangle((left, y_at(va_hi), right, y_at(va_lo)), fill="#77839a22")
+        if control:
+            py = y_at(control)
+            draw.line((left, py, right, py), fill="#f2c94c", width=3)
+            draw.text((right-235, py-25), "КОНТРОЛЬНАЯ ЦЕНА", fill="#f2c94c", font=small)
     candle_w = max(4, int((right-left)/max(1, len(bars))*.55))
     for index, bar in enumerate(bars):
         x = x_at(index)

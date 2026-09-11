@@ -163,6 +163,8 @@ def analyze_symbol(
     quality = 56 + (12 if senior_n == 3 else (8 if senior_n == 2 else 4))
     quality += 10 if junior_n == 3 else 7
     quality += 10 if h4_zz == side else (4 if not h4_zz else 0)
+    profile_confirmation = int(zz.get("profile_confirmation") or 0)
+    quality += 4 if profile_confirmation > 0 else 0
     quality += min(10, max(3, int(abs(gap) * 40)))
     quality += min(10, 7 + max(0, len(aligned) - 1) * 3)
     if usd_expected and dxy_bias == usd_expected:
@@ -176,6 +178,8 @@ def analyze_symbol(
         quality -= 4
     if higher_conflict:
         quality -= 4
+    if profile_confirmation < 0:
+        quality -= 3
     elif not h4_zz:
         quality -= 2
     if senior_side == -side:
