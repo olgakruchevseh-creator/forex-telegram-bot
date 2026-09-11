@@ -314,15 +314,34 @@ def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
-    if int(state.get("logic_version") or 0) != 2:
-        # Раньше событие могло попасть в sent ещё до отбора и доставки Telegram.
-        state["sent"] = {}
+    if int(state.get("logic_version") or 0) != 3:
+        # Старый pending содержал только ключ и не позволял восстановить
+        # карточку/картинку после перезапуска. Историю доставленных сохраняем.
+        state.setdefault("sent", {})
         state["pending"] = {}
-        state["logic_version"] = 2
+        state["logic_version"] = 3
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
-    pending = {}
-    messages = []
+    pending = state.setdefault("pending", {})
+    messages: list[str] = []
+
+    # Сначала восстанавливаем все подтверждённые события, которые ещё не были
+    # успешно доставлены. Они повторяются независимо от текущего детектора.
+    for digest, item in list(pending.items()):
+        event = item.get("event") if isinstance(item, dict) else None
+        if not isinstance(event, dict) or not event.get("key"):
+            pending.pop(digest, None)
+            continue
+        if event["key"] in sent:
+            pending.pop(digest, None)
+            continue
+        text = format_message(event)
+        messages.append(text)
+        _PENDING_CARDS[text] = (event, market.get(event.get("symbol")) or {})
+
+    pending_keys = {
+        item.get("key") for item in pending.values() if isinstance(item, dict)
+    }
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -332,18 +351,26 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             event = detect_amd(symbol, h1, h4, m15, strength)
             # Запоздалый AMD остаётся информационным статусом брифинга и не
             # передаётся Навигатору как новая торговая возможность.
-            if not event or event.get("late") or event["key"] in sent:
+            if (not event or event.get("late") or event["key"] in sent
+                    or event["key"] in pending_keys):
                 continue
             text = format_message(event)
             digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-            pending[digest] = {"key": event["key"]}
-            if not first:
+            if first:
+                # При первом запуске не рассылаем старые рыночные события.
+                sent[event["key"]] = event["key"]
+            else:
+                pending[digest] = {"key": event["key"], "event": event}
+                pending_keys.add(event["key"])
                 messages.append(text)
                 _PENDING_CARDS[text] = (event, by_tf)
         except Exception:
             log.exception("AMD %s", symbol)
     state["bootstrapped"] = True
-    state["pending"] = pending
+    # Защитное ограничение относится только к аварийной очереди, а не к
+    # часовому лимиту уведомлений.
+    if len(pending) > 50:
+        state["pending"] = dict(list(pending.items())[-50:])
     if len(sent) > 600:
         state["sent"] = dict(list(sent.items())[-450:])
     _save(state)
@@ -360,4 +387,5 @@ def mark_delivered(text: str) -> bool:
     state.setdefault("sent", {})[item["key"]] = item["key"]
     state["pending"].pop(digest, None)
     _save(state)
+    _PENDING_CARDS.pop(text, None)
     return True

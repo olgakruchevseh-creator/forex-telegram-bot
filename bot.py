@@ -692,6 +692,10 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 save_state(state)
 
         module_alerts: list[tuple[int, str]] = []
+        # Полностью подтверждённый AMD — редкое завершённое событие. Оно имеет
+        # собственный обязательный канал доставки и не расходует три места
+        # часового рейтинга обычных кандидатов.
+        mandatory_amd_alerts: list[str] = []
 
         if getattr(cfg, "DISBALANCE_ENABLED", True):
             try:
@@ -717,8 +721,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
             try:
                 for text in amd_power_of_three.process_market(market, strength):
-                    # Полная AMD-последовательность редкая и уже прошла строгие фильтры.
-                    module_alerts.append((0, text))
+                    mandatory_amd_alerts.append(text)
             except Exception:
                 log.exception("Ошибка модуля AMD / Power of Three")
 
@@ -793,8 +796,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # блокировать их доставку. Готовая карточка Навигатора заменит исходную
         # карточку той же пары/направления; неподтверждённый им сигнал всё равно
         # останется доступен для отправки.
-        source_alerts = list(module_alerts)
-        raw_alerts = [text for _priority, text in module_alerts]
+        source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts]
+        raw_alerts = [text for _priority, text in source_alerts]
         # События, не подтверждённые в эту H1, не теряются: они остаются
         # внутренними кандидатами ограниченное число часов.
         candidate_alerts = signal_navigator.remember_candidates(raw_alerts, closed_dt)
@@ -855,7 +858,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Часовой лимит считает исходные торговые события. Навигатор является
         # обязательным сопровождением выбранного события и этот лимит не тратит.
-        module_alerts = source_alerts
+        # AMD уже будет отправлен обязательным потоком ниже, поэтому повторно
+        # не участвует в ранжировании и не может быть вытеснен/задублирован.
 
         buckets = state.setdefault("module_alert_buckets", {})
         bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
@@ -875,7 +879,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 signal_journal.update_market(market)
             except Exception:
                 log.exception("Обновление журнала сигналов")
-        for text in selected_alerts:
+        mandatory_amd_set = set(mandatory_amd_alerts)
+        delivery_alerts = list(dict.fromkeys(mandatory_amd_alerts + selected_alerts))
+        for text in delivery_alerts:
             source_image = None
             if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
                 try:
@@ -949,9 +955,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Шестичасовой cooldown относится к итоговой торговой карточке.
             # Исходное событие не должно мешать Навигатору прислать последующее
             # подтверждение и сопровождение этого же сценария.
-            bucket["count"] = int(bucket.get("count") or 0) + 1
-            if pair and pair not in bucket.setdefault("pairs", []):
-                bucket["pairs"].append(pair)
+            # Обязательный AMD не занимает место в лимите новых сигналов и не
+            # блокирует обычного кандидата той же валютной пары.
+            if text not in mandatory_amd_set:
+                bucket["count"] = int(bucket.get("count") or 0) + 1
+                if pair and pair not in bucket.setdefault("pairs", []):
+                    bucket["pairs"].append(pair)
 
             # Сразу после исходного события отправляется связанная карточка
             # Навигатора. Строгая версия используется, если уже готова; иначе
