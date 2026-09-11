@@ -217,3 +217,72 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["setups"] = {key: asdict(value) for key, value in list(setups.items())[-500:]}
     _save(state)
     return messages
+
+def render_retest_chart(symbol, candles, event, output_path):
+    """Render a compact PNG chart for an already-confirmed structural retest.
+
+    This is presentation-only: it does not participate in signal calculation.
+    `candles` should contain closed OHLC candles; `event` may contain
+    level/direction and optional BOS/hold/retest timestamps.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    from pathlib import Path
+
+    rows = list(candles or [])[-80:]
+    if not rows:
+        return None
+
+    def val(row, key, default=None):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return getattr(row, key, default)
+
+    level = event.get("level") if isinstance(event, dict) else None
+    direction = (event.get("direction") or "").upper() if isinstance(event, dict) else ""
+
+    fig, ax = plt.subplots(figsize=(10, 5.4))
+    for i, row in enumerate(rows):
+        o = float(val(row, "open"))
+        h = float(val(row, "high"))
+        l = float(val(row, "low"))
+        c = float(val(row, "close"))
+        ax.vlines(i, l, h, linewidth=1)
+        body_low = min(o, c)
+        body_h = max(abs(c-o), max(abs(h-l)*0.015, 1e-8))
+        ax.add_patch(Rectangle((i-0.32, body_low), 0.64, body_h, fill=False, linewidth=1.2))
+
+    if level is not None:
+        ax.axhline(float(level), linestyle="--", linewidth=1.4)
+        ax.text(len(rows)-1, float(level), f" BOS / RETEST  {float(level):.5f}",
+                ha="right", va="bottom", fontsize=9)
+
+    labels = [
+        ("bos_index", "BOS"),
+        ("hold_index", "HOLD"),
+        ("retest_index", "RETEST"),
+        ("confirm_index", "CONFIRM"),
+    ]
+    if isinstance(event, dict):
+        for key, label in labels:
+            idx = event.get(key)
+            if isinstance(idx, int) and 0 <= idx < len(rows):
+                y = float(val(rows[idx], "high"))
+                ax.annotate(label, (idx, y), xytext=(0, 12),
+                            textcoords="offset points", ha="center",
+                            arrowprops={"arrowstyle": "->"})
+
+    ax.set_title(f"{symbol} · STRUCTURAL RETEST · {direction}".strip())
+    ax.set_xlabel("Closed candles")
+    ax.set_ylabel("Price")
+    ax.grid(True, alpha=0.2)
+    fig.tight_layout()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return str(output_path)
+
