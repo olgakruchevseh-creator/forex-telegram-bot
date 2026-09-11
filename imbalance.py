@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import io
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -15,6 +16,7 @@ TF_MINUTES = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 MAIN_TFS = ("D1", "H4", "H1")
 CONFIRM_TFS = ("M15", "M5")
 TF_RANK = {"D1": 3, "H4": 2, "H1": 1}
+_PENDING_CARDS: dict[str, tuple[FvgZone, str, dict]] = {}
 
 
 @dataclass
@@ -145,6 +147,81 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
     ])
 
 
+def render_chart(zone: FvgZone, event: str, by_tf: dict) -> io.BytesIO:
+    """PNG: закрытые свечи, FVG-зона и подтверждённый ретест."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    bars = closed_candles(by_tf.get(zone.tf) or [], TF_MINUTES[zone.tf])[-48:]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font, small = ImageFont.load_default(size=24), ImageFont.load_default(size=17)
+    left, right, top, bottom = 75, 1130, 80, 610
+    prices = [value for bar in bars for value in (bar.low, bar.high)] + [zone.low, zone.high]
+    lo, hi = min(prices), max(prices)
+    pad = max((hi-lo)*.08, 1e-9)
+    lo, hi = lo-pad, hi+pad
+    def x_at(index: float) -> float:
+        return left+index/max(1, len(bars)-1)*(right-left)
+    def y_at(price: float) -> float:
+        return bottom-(price-lo)/max(1e-12, hi-lo)*(bottom-top)
+    for row in range(6):
+        y = top+row*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#293143", width=1)
+    candle_w = max(4, int((right-left)/max(1, len(bars))*.55))
+    for index, bar in enumerate(bars):
+        x, color = x_at(index), ("#37d67a" if bar.close >= bar.open else "#ff5c6c")
+        draw.line((x, y_at(bar.high), x, y_at(bar.low)), fill=color, width=2)
+        draw.rectangle((x-candle_w/2, min(y_at(bar.open), y_at(bar.close)),
+                        x+candle_w/2, max(y_at(bar.open), y_at(bar.close))+1), fill=color)
+    created_index = next((i for i, bar in enumerate(bars) if bar.dt == zone.created_dt), max(0, len(bars)-1))
+    zone_x = x_at(max(0, created_index-2))
+    zone_color = "#42e889" if zone.side == "LONG" else "#ff6575"
+    draw.rectangle((zone_x, y_at(zone.high), right, y_at(zone.low)),
+                   fill=zone_color+"35", outline=zone_color, width=3)
+    draw.text((zone_x+10, y_at(zone.high)-27), "FVG ЗОНА", fill=zone_color, font=small)
+    impulse_index = max(0, created_index-1)
+    if bars:
+        x = x_at(impulse_index)
+        draw.rounded_rectangle((x-candle_w, top+8, x+candle_w, bottom-8), radius=6,
+                               outline="#ffd44d", width=3)
+        draw.text((max(left, x-75), top+14), "ИМПУЛЬС", fill="#ffd44d", font=small)
+    if event == "retest":
+        draw.text((right-300, y_at((zone.low+zone.high)/2)-28), "РЕТЕСТ ПОДТВЕРЖДЁН", fill="#ffffff", font=small)
+    title = "НОВАЯ FVG" if event == "new" else "РЕТЕСТ FVG"
+    draw.text((left, 25), f"{zone.symbol} · {zone.tf} · IMBALANCE {title} · {zone.side}", fill="#f1f5fb", font=font)
+    draw.text((left, 655), "Зона построена только по закрытым свечам · NO REPAINT", fill="#c9d1df", font=small)
+    out = io.BytesIO()
+    out.name = f"imbalance_{zone.symbol.replace('/', '')}_{zone.tf}_{event}.png"
+    image.save(out, format="PNG", optimize=True)
+    out.seek(0)
+    return out
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "IMBALANCE_CHART_IMAGES_ENABLED", True):
+        return None
+    return render_chart(card[0], card[1], card[2])
+
+
+def mark_delivered(text: str) -> None:
+    state = _load()
+    pending = state.setdefault("pending_events", {})
+    for key, raw in list(pending.items()):
+        zone = FvgZone(**raw["zone"])
+        if format_message(zone, raw["event"]) == text:
+            pending.pop(key, None)
+            break
+    state["pending_events"] = pending
+    _save(state)
+    _PENDING_CARDS.pop(text, None)
+
+
 def _update_zone(zone: FvgZone, bars: list[Candle]) -> str:
     if zone.invalid or not bars:
         return ""
@@ -173,10 +250,17 @@ def _update_zone(zone: FvgZone, bars: list[Candle]) -> str:
 
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
+    _PENDING_CARDS.clear()
     state = _load()
     first = not bool(state.get("bootstrapped"))
     stored = {k: FvgZone(**v) for k, v in (state.get("zones") or {}).items()}
+    pending_events = state.setdefault("pending_events", {})
     messages = []
+    for raw in pending_events.values():
+        zone = FvgZone(**raw["zone"])
+        text = format_message(zone, raw["event"])
+        messages.append(text)
+        _PENDING_CARDS[text] = (zone, raw["event"], market.get(zone.symbol) or {})
     for symbol in cfg.PAIRS:
         try:
             closed_map = _closed(market.get(symbol) or {})
@@ -184,7 +268,12 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             for zone in [z for z in stored.values() if z.symbol == symbol]:
                 event = _update_zone(zone, closed_map.get(zone.tf) or [])
                 if event == "retest" and validate_zone(zone, closed_map, strength) and not first:
-                    messages.append(format_message(zone, "retest"))
+                    key = f"{zone.zone_id}|retest"
+                    pending_events[key] = {"zone": asdict(zone), "event": "retest"}
+                    text = format_message(zone, "retest")
+                    if text not in messages:
+                        messages.append(text)
+                    _PENDING_CARDS[text] = (zone, "retest", market.get(symbol) or {})
             for tf in MAIN_TFS:
                 zone = newest_fvg(symbol, tf, closed_map[tf])
                 if not zone or zone.zone_id in stored:
@@ -194,12 +283,18 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 accepted = validate_zone(zone, closed_map, strength)
                 stored[zone.zone_id] = zone
                 if accepted and not first:
-                    messages.append(format_message(zone, "new"))
+                    key = f"{zone.zone_id}|new"
+                    pending_events[key] = {"zone": asdict(zone), "event": "new"}
+                    text = format_message(zone, "new")
+                    if text not in messages:
+                        messages.append(text)
+                    _PENDING_CARDS[text] = (zone, "new", market.get(symbol) or {})
         except Exception:
             log.exception("Imbalance %s", symbol)
     state["bootstrapped"] = True
     active = [z for z in stored.values() if not z.invalid]
     active.sort(key=lambda z: z.created_dt)
     state["zones"] = {z.zone_id: asdict(z) for z in active[-500:]}
+    state["pending_events"] = pending_events
     _save(state)
     return messages

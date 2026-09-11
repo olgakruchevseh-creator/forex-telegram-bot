@@ -879,6 +879,16 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             source_image = None
+            if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
+                try:
+                    source_image = disbalance.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Disbalance")
+            if "IMBALANCE —" in text:
+                try:
+                    source_image = imbalance.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Imbalance/FVG")
             if "↕️ ZIGZAG —" in text:
                 try:
                     source_image = zigzag_scanner.image_for_alert(text)
@@ -916,6 +926,16 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         zigzag_scanner.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного ZigZag")
+                if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in source_text:
+                    try:
+                        disbalance.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Disbalance")
+                if "IMBALANCE —" in source_text:
+                    try:
+                        imbalance.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Imbalance/FVG")
                 if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
                     try:
                         amd_power_of_three.mark_delivered(source_text)
