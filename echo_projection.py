@@ -76,7 +76,9 @@ def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return math.sqrt(sum(w*(a-b)**2 for a, b, w in zip(left, right, weights)))
 
 
-def analyze(symbol: str, by_tf: dict, horizons_override=None) -> dict | None:
+def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
+            minimum_analogs_override=None, max_distance_override=None,
+            minimum_confidence_override=None) -> dict | None:
     """Вернуть проекцию либо None при недостаточной/неубедительной выборке."""
     bars = closed_candles(by_tf.get("H1") or [], 60)
     horizons = tuple(int(x) for x in (
@@ -86,14 +88,16 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None) -> dict | None:
     if not horizons:
         return None
     max_h = max(horizons)
-    minimum = int(getattr(cfg, "ECHO_MIN_ANALOGS", 30))
+    minimum = int(minimum_analogs_override if minimum_analogs_override is not None
+                  else getattr(cfg, "ECHO_MIN_ANALOGS", 30))
     if len(bars) < 30 + max_h + minimum:
         return None
     current = _features(bars, len(bars)-1)
     if current is None:
         return None
     matches = []
-    max_distance = float(getattr(cfg, "ECHO_MAX_DISTANCE", 2.6))
+    max_distance = float(max_distance_override if max_distance_override is not None
+                         else getattr(cfg, "ECHO_MAX_DISTANCE", 2.6))
     for index in range(24, len(bars)-max_h-1):
         feature = _features(bars, index)
         if feature is None:
@@ -126,7 +130,8 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None) -> dict | None:
     long_probability = sum(probabilities[h]*horizon_weights[h] for h in horizons) / total
     side = "LONG" if long_probability >= .5 else "SHORT"
     confidence = long_probability if side == "LONG" else 1-long_probability
-    minimum_confidence = float(getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
+    minimum_confidence = float(minimum_confidence_override if minimum_confidence_override is not None
+                               else getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
     if confidence < minimum_confidence:
         return None
     return {
@@ -235,7 +240,8 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     for (h, _), point in zip(projected[1:], points[1:]):
         draw.ellipse((point[0]-6, point[1]-6, point[0]+6, point[1]+6), fill=wave_color)
         draw.text((point[0]-12, bottom+12), f"+{h}h", fill="#c9d1df", font=small)
-    draw.text((left, 22), f"{result['symbol']} · H1 · ЭХО {result['side']} {result['confidence']}%", fill="#f1f5fb", font=font)
+    weak_label = " · СЛАБАЯ ОЦЕНКА" if result.get("weak") else ""
+    draw.text((left, 22), f"{result['symbol']} · H1 · ЭХО {result['side']} {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
     draw.text((left, height-55), f"Аналогов: {result['sample']} · вероятностная проекция, не гарантия", fill="#9aa4b5", font=small)
     output = io.BytesIO()
     output.name = f"echo_{result['symbol'].replace('/', '')}_{result['closed_h1'].replace(':', '-')}.png"

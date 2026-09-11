@@ -48,10 +48,14 @@ def _news_context(symbol: str, events: list[newsmod.NewsEvent], confidence: int 
     lines = []
     has_high = False
     uncertain = False
+    seen_lines = set()
     for event in relevant:
         icon = "🔴" if event.impact == "HIGH" else ("🟠" if event.impact == "MEDIUM" else "🟡")
         importance = "высокая" if event.impact == "HIGH" else ("средняя" if event.impact == "MEDIUM" else "наблюдение")
-        lines.append(f"{icon} {event.local_hm} · {event.currency} · {newsmod.translate_title(event.title)} · {importance}")
+        line = f"{icon} {event.local_hm} · {event.currency} · {newsmod.translate_title(event.title)} · {importance}"
+        if line not in seen_lines:
+            lines.append(line)
+            seen_lines.add(line)
         if event.impact == "HIGH":
             has_high = True
             penalty = max(penalty, 12 if event.economic_effect == "context_dependent" else 8)
@@ -107,8 +111,17 @@ def _neutral_image(symbol: str, module: str, by_tf: dict, reason: str) -> io.Byt
 
 def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
                  current_name: str, next_name: str) -> dict:
-    checkpoints = sorted(set((1, max(2, hours // 2), hours)))
+    checkpoints = sorted(set((1, max(1, hours // 2), hours)))
     result = echo_projection.analyze(symbol, by_tf, checkpoints)
+    weak = False
+    if not result:
+        result = echo_projection.analyze(
+            symbol, by_tf, checkpoints,
+            minimum_analogs_override=12,
+            max_distance_override=999.0,
+            minimum_confidence_override=.50,
+        )
+        weak = bool(result)
     news = _news_context(symbol, events, result["confidence"] if result else None)
     if result:
         side, icon = result["side"], ("🟢" if result["side"] == "LONG" else "🔴")
@@ -116,10 +129,13 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
         route = " · ".join(f"через {h}ч: {values.get(str(h), 0)}%" for h in checkpoints)
         confidence = news["confidence"]
         scenario = [f"Направление: {side} {icon}",
+                    *((["Статус: 🟡 СЛАБАЯ ОЦЕНОЧНАЯ ТРАЕКТОРИЯ"] if weak else [])),
                     f"Техническая вероятность с учётом новостного риска: {confidence}%",
                     f"Контрольные точки: {route}",
                     f"Исторических аналогов: {result['sample']}"]
-        image = echo_projection.render_chart(result, by_tf)
+        chart_result = dict(result)
+        chart_result["weak"] = weak
+        image = echo_projection.render_chart(chart_result, by_tf)
     else:
         scenario = ["Направление: НЕЙТРАЛЬНО 🟡",
                     "Вероятность: недостаточно надёжных исторических совпадений"]

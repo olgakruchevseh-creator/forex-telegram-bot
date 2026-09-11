@@ -46,8 +46,6 @@ import market_schedule
 import master_direction
 import signal_navigator
 import signal_journal
-import next_pivot_projection
-import echo_projection
 import session_projection_reports
 try:
     import patterns
@@ -995,40 +993,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             log.exception("Сопровождение активного сценария Навигатора")
 
-        # Информационное предупреждение о вероятной зоне следующего pivot.
-        # Оно не является новым LONG/SHORT и не расходует торговый лимит H1.
-        if (getattr(cfg, "NEXT_PIVOT_ENABLED", True)
-                and getattr(cfg, "NEXT_PIVOT_HOURLY_ENABLED", True)):
-            try:
-                for alert in next_pivot_projection.process_market(market):
-                    message = await context.application.bot.send_photo(
-                        chat_id=int(chat_id), photo=alert["image"], caption=alert["text"])
-                    log.info("pivot_telegram_message_id=%s pid=%s", getattr(message, "message_id", None), briefing.instance_id())
-                    next_pivot_projection.mark_delivered(alert["text"])
-            except Exception:
-                log.exception("Проекция следующего pivot")
-
-        # Самостоятельный Echo работает вне лимита трёх торговых сигналов и
-        # ничего не блокирует. Каждая подходящая пара получает свой PNG-график.
-        if (getattr(cfg, "ECHO_STANDALONE_ENABLED", True)
-                and getattr(cfg, "ECHO_HOURLY_ENABLED", True)):
-            try:
-                for alert in echo_projection.process_market(market):
-                    message = await context.application.bot.send_photo(
-                        chat_id=int(chat_id), photo=alert["image"], caption=alert["text"])
-                    log.info("echo_telegram_message_id=%s pid=%s", getattr(message, "message_id", None), briefing.instance_id())
-                    echo_projection.mark_delivered(alert["text"])
-            except Exception:
-                log.exception("Самостоятельный модуль Echo")
-
         # Полные прогнозы от текущей сессии до следующей: семь пар Эхо и
         # семь пар Next Pivot. Это отдельный информационный поток, который не
         # расходует лимит торговых кандидатов и не проходит через Навигатор.
-        if getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True):
+        if (getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True)
+                and briefing.just_opened(
+                    window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20)))):
             try:
-                # Проверяем всю активную сессию, а не только первые 15 минут.
-                # Уже доставленные ключи отсекаются внутри модуля, поэтому это
-                # не создаёт повторов, но лечит пропущенное окно после deploy.
+                # Только начало новой сессии: расчёт использует последнюю
+                # закрытую H1 и не догоняется произвольно через несколько часов.
                 session_events = briefing.session_events(newsmod.load_events())
                 for alert in session_projection_reports.pending_reports(
                         market, session_events, state):
