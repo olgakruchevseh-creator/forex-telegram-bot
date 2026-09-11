@@ -913,6 +913,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = fibonacci_grid.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Fibonacci")
+            if "⛓️ CHAIN ENTRY" in text:
+                try:
+                    source_image = chain_entries.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Chain Entry")
             if source_image is not None:
                 # Текущая карточка короче лимита Telegram для подписи к фото.
                 # Защитный вариант сохраняет полный текст при будущих расширениях.
@@ -955,6 +960,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         fibonacci_grid.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Fibonacci")
+                if "⛓️ CHAIN ENTRY" in source_text:
+                    try:
+                        chain_entries.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Chain Entry")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
                     signal_journal.record_sent(text, market, closed_dt)

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import io
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -13,6 +15,7 @@ from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 log = logging.getLogger("fxbot.chain_entries")
 TF_MINUTES = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 SCAN_TFS = ("H4", "H1")
+_PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
 
 
 @dataclass
@@ -174,13 +177,94 @@ def format_message(event: dict, number: int) -> str:
     ])
 
 
+def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
+    """M15-график с уровнем BOS, пробоем, ретестом и подтверждением."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    bars = _bars(by_tf, "M15")[-max(60, int(getattr(cfg, "CHAIN_CHART_LOOKBACK", 96))):]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 23)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font, small = ImageFont.load_default(size=23), ImageFont.load_default(size=17)
+    left, right, top, bottom = 72, 1135, 88, 610
+    values = [v for candle in bars for v in (candle.low, candle.high)] + [event["level"]]
+    pmin, pmax = min(values), max(values)
+    pad = max((pmax-pmin)*.08, abs(event["level"])*.0001)
+    pmin, pmax = pmin-pad, pmax+pad
+
+    def x_at(index: float) -> float:
+        return left + index/max(1, len(bars)-1)*(right-left)
+
+    def y_at(price: float) -> float:
+        return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+
+    for n in range(6):
+        y = top+n*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#293040", width=1)
+    candle_w = max(3, int((right-left)/max(1, len(bars))*.55))
+    for index, candle in enumerate(bars):
+        x = x_at(index)
+        color = "#37d67a" if candle.close >= candle.open else "#ff5c6c"
+        draw.line((x, y_at(candle.high), x, y_at(candle.low)), fill=color, width=2)
+        y1, y2 = y_at(candle.open), y_at(candle.close)
+        draw.rectangle((x-candle_w/2, min(y1, y2), x+candle_w/2, max(y1, y2)+1), fill=color)
+
+    level_y = y_at(event["level"])
+    draw.line((left, level_y, right, level_y), fill="#f4c542", width=3)
+    draw.text((left+8, level_y-28), f"УРОВЕНЬ BOS  {_price(event['symbol'], event['level'])}", fill="#ffe080", font=small)
+    index_by_dt = {bar.dt: index for index, bar in enumerate(bars)}
+    bos_i = index_by_dt.get(event.get("bos_dt"), max(0, len(bars)-8))
+    entry_i = index_by_dt.get(event.get("entry_dt"), max(0, len(bars)-1))
+    bx, ex = x_at(bos_i), x_at(entry_i)
+    side_color = "#42e889" if event["side"] == "LONG" else "#ff6575"
+    draw.line((bx, top, bx, bottom), fill="#4aa3ff80", width=2)
+    draw.text((max(left, bx-55), top+8), "ПРОБОЙ", fill="#70b8ff", font=small)
+    draw.ellipse((ex-10, level_y-10, ex+10, level_y+10), fill="#f4c542", outline="#ffffff", width=2)
+    direction = -1 if event["side"] == "LONG" else 1
+    arrow_end_y = max(top+35, min(bottom-35, level_y + direction*115))
+    draw.line((ex, level_y, min(right-20, ex+80), arrow_end_y), fill=side_color, width=5)
+    draw.text((max(left, ex-90), max(top, min(bottom-28, level_y+22))), "РЕТЕСТ И УДЕРЖАНИЕ", fill="#ffe080", font=small)
+    draw.text((left, 26), f"{event['symbol']} · CHAIN ENTRY · {event['side']}", fill="#f1f5fb", font=font)
+    draw.text((left, 657), f"Реальные закрытые M15-свечи · структура {event['tf']} · подтверждение после ретеста", fill="#aeb7c6", font=small)
+    output = io.BytesIO()
+    output.name = f"chain_entry_{event['symbol'].replace('/', '')}_{event['side']}.png"
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "CHAIN_CHART_IMAGES_ENABLED", True):
+        return None
+    return render_chart(card[0], card[1])
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
+    _PENDING_CARDS.clear()
     state = _load()
+    if int(state.get("logic_version") or 0) != 2:
+        state["pending"] = {}
+        state["logic_version"] = 2
     first = not bool(state.get("bootstrapped"))
     raw = state.get("setups") or {}
     setups = {key: Setup(**value) for key, value in raw.items()}
     chain = state.setdefault("chain_count", {})
-    messages = []
+    pending = state.setdefault("pending", {})
+    messages: list[str] = []
+    for digest, item in list(pending.items()):
+        event = item.get("event") if isinstance(item, dict) else None
+        number = item.get("number") if isinstance(item, dict) else None
+        if not isinstance(event, dict) or not isinstance(number, int):
+            pending.pop(digest, None)
+            continue
+        text = format_message(event, number)
+        messages.append(text)
+        _PENDING_CARDS[text] = (event, market.get(event.get("symbol")) or {})
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -197,7 +281,13 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         opposite = f"{symbol}|{'SHORT' if existing.side == 'LONG' else 'LONG'}"
                         chain[opposite] = 0
                         chain[count_key] = int(chain.get(count_key) or 0) + 1
-                        messages.append(format_message(event, chain[count_key]))
+                        text = format_message(event, chain[count_key])
+                        digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+                        pending[digest] = {
+                            "event": event, "number": chain[count_key],
+                        }
+                        messages.append(text)
+                        _PENDING_CARDS[text] = (event, by_tf)
                 bos = detect_bos(symbol, tf, bars)
                 if bos and (not existing or bos.setup_id != existing.setup_id):
                     setups[key] = bos
@@ -208,3 +298,15 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["chain_count"] = chain
     _save(state)
     return messages
+
+
+def mark_delivered(text: str) -> bool:
+    """Удаляет карточку из очереди только после успешной доставки Telegram."""
+    state = _load()
+    digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    if digest not in (state.get("pending") or {}):
+        return False
+    state["pending"].pop(digest, None)
+    _save(state)
+    _PENDING_CARDS.pop(text, None)
+    return True
