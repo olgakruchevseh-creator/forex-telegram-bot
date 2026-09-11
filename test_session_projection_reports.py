@@ -54,3 +54,27 @@ def test_delivered_card_is_not_repeated(monkeypatch):
     output = reports.pending_reports({pair: {} for pair in cfg.PAIRS}, [], state)
     assert len(output) == len(cfg.PAIRS) * 2 - 1
 
+
+def test_one_broken_pair_does_not_cancel_other_reports(monkeypatch):
+    monkeypatch.setattr(reports, "_session_context", lambda: ("А", "Б", 6))
+    monkeypatch.setattr(reports.briefing, "briefing_id", lambda: "session")
+    broken = cfg.PAIRS[0]
+    def echo(symbol, *args):
+        if symbol == broken:
+            raise RuntimeError("bad candles")
+        return {"text": "эхо", "image": object()}
+    monkeypatch.setattr(reports, "_echo_report", echo)
+    monkeypatch.setattr(reports, "_pivot_report", lambda *args: {"text": "пивот", "image": object()})
+    output = reports.pending_reports({pair: {} for pair in cfg.PAIRS}, [], {})
+    assert len(output) == len(cfg.PAIRS) * 2 - 1
+    assert all(item["key"] != f"session|echo|{broken}" for item in output)
+
+
+def test_session_key_allows_catch_up_after_opening_window(monkeypatch):
+    monkeypatch.setattr(reports, "_session_context", lambda: ("АЗИАТСКАЯ СЕССИЯ", "ЕВРОПЕЙСКАЯ СЕССИЯ", 3))
+    monkeypatch.setattr(reports.briefing, "briefing_id", lambda: "2026-09-11:ASIA")
+    monkeypatch.setattr(reports, "_echo_report", lambda *args: {"text": "эхо", "image": object()})
+    monkeypatch.setattr(reports, "_pivot_report", lambda *args: {"text": "пивот", "image": object()})
+    # Даже через несколько часов после открытия неполученная сессия остаётся доступной.
+    output = reports.pending_reports({pair: {} for pair in cfg.PAIRS}, [], {})
+    assert len(output) == len(cfg.PAIRS) * 2

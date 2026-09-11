@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import datetime, timezone
 
 import config as cfg
@@ -15,6 +16,8 @@ import echo_projection
 import news as newsmod
 import next_pivot_projection
 from analysis import closed_candles
+
+log = logging.getLogger("fxbot.session_projections")
 
 
 def _session_context() -> tuple[str, str, int]:
@@ -173,11 +176,18 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
             if delivered.get(key):
                 continue
             by_tf = market.get(symbol) or {}
-            report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name)
-                      if module == "echo" else
-                      _pivot_report(symbol, by_tf, events, hours, current_name, next_name))
-            report["key"] = key
-            reports.append(report)
+            try:
+                report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name)
+                          if module == "echo" else
+                          _pivot_report(symbol, by_tf, events, hours, current_name, next_name))
+                report["key"] = key
+                reports.append(report)
+            except Exception:
+                # Одна повреждённая серия или картинка не отменяет отчёты по
+                # остальным парам. Эта карточка останется недоставленной и
+                # будет заново рассчитана при следующем сканировании.
+                log.exception("SESSION_REPORT_BUILD_FAILED module=%s symbol=%s session=%s",
+                              module, symbol, session_id)
     return reports
 
 
@@ -186,4 +196,3 @@ def mark_delivered(state: dict, key: str) -> None:
     delivered[key] = datetime.now(timezone.utc).timestamp()
     if len(delivered) > 100:
         state["session_projection_delivered"] = dict(list(delivered.items())[-70:])
-

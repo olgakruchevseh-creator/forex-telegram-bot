@@ -1001,11 +1001,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # расходует лимит торговых кандидатов и не проходит через Навигатор.
         if getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True):
             try:
-                window = int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 15))
-                if briefing.just_opened(window_min=window):
-                    session_events = briefing.session_events(newsmod.load_events())
-                    for alert in session_projection_reports.pending_reports(
-                            market, session_events, state):
+                # Проверяем всю активную сессию, а не только первые 15 минут.
+                # Уже доставленные ключи отсекаются внутри модуля, поэтому это
+                # не создаёт повторов, но лечит пропущенное окно после deploy.
+                session_events = briefing.session_events(newsmod.load_events())
+                for alert in session_projection_reports.pending_reports(
+                        market, session_events, state):
+                    try:
                         caption = alert["text"]
                         long_caption = len(caption) > 1000
                         if long_caption:
@@ -1021,11 +1023,16 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                             await _send_parts(context.application, int(chat_id), alert["text"])
                         session_projection_reports.mark_delivered(state, alert["key"])
                         save_state(state)
-                        log.info("session_projection_message_id=%s key=%s pid=%s",
+                        log.info("SESSION_REPORT_SENT message_id=%s key=%s pid=%s",
                                  getattr(message, "message_id", None), alert["key"],
                                  briefing.instance_id())
+                    except Exception:
+                        # Ошибка одной отправки не перекрывает остальные пары.
+                        # Ключ не фиксируется: следующий скан повторит её.
+                        log.exception("SESSION_REPORT_SEND_FAILED key=%s pid=%s",
+                                      alert.get("key", "unknown"), briefing.instance_id())
             except Exception:
-                log.exception("Сессионные отчёты Эхо / Next Pivot")
+                log.exception("SESSION_REPORT_SCAN_FAILED")
 
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:

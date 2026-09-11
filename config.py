@@ -112,7 +112,9 @@ ECHO_CHART_CANDLES = 40
 # Сессионные Эхо и Next Pivot: по одной карточке на каждую из семи пар.
 # Они не входят в лимит обычных торговых уведомлений.
 SESSION_PROJECTIONS_ENABLED = True
-SESSION_PROJECTIONS_OPEN_WINDOW_MIN = 15
+# Если Railway пропустил открытие сессии, недоставленные карточки догоняются
+# при ближайшем сканировании в пределах той же сессии.
+SESSION_PROJECTIONS_CATCH_UP = True
 # Почасовые одиночные карточки отключены, чтобы не дублировать сессионные.
 ECHO_HOURLY_ENABLED = False
 NEXT_PIVOT_HOURLY_ENABLED = False
