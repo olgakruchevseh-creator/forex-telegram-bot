@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import json
+import io
 import logging
+import math
 import os
 import re
 from pathlib import Path
+from statistics import median
 
 import config as cfg
 
 log = logging.getLogger("fxbot.zigzag")
 TF_MINUTES = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 SCAN_TFS = ("D1", "H4", "H1", "M15", "M5")
+_PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
 
 
 def _path() -> Path:
@@ -192,6 +196,17 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
     swings = swings_by_tf.get(key_tf) or []
     last_high = next((x.price for x in reversed(swings) if x.kind == "high"), 0.0)
     last_low = next((x.price for x in reversed(swings) if x.kind == "low"), 0.0)
+    # Вероятностная длительность берётся из завершённых H1-волн той же пары.
+    # Незавершённая волна не добавляется в историю и не меняет прошлые точки.
+    h1_swings = swings_by_tf.get("H1") or []
+    completed_lengths = [b.index-a.index for a, b in zip(h1_swings, h1_swings[1:]) if b.index > a.index]
+    duration_low = duration_high = duration_samples = 0
+    if len(completed_lengths) >= 3:
+        typical = float(median(completed_lengths[-10:]))
+        elapsed = max(0, len(bars_by_tf.get("H1") or []) - 1 - h1_swings[-1].index) if h1_swings else 0
+        duration_low = max(1, int(math.floor(typical * .65 - elapsed)))
+        duration_high = max(duration_low, int(math.ceil(typical * 1.35 - elapsed)))
+        duration_samples = min(10, len(completed_lengths))
     return {
         "symbol": symbol,
         "event": event,
@@ -205,6 +220,9 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         "high": last_high,
         "low": last_low,
         "sequence": _sequence(swings),
+        "duration_low": duration_low,
+        "duration_high": duration_high,
+        "duration_samples": duration_samples,
         "directions": {tf: direction(tf) for tf in views},
         "zigzag_directions": {
             tf: (_swing_side(swings_by_tf.get(tf) or []) or _sequence_side(_sequence(swings_by_tf.get(tf) or [])))
@@ -263,6 +281,12 @@ def format_message(s: dict) -> str:
         lines.append(f"Последний максимум: {_fmt_price(s['symbol'], s['high'])}")
     if s.get("low"):
         lines.append(f"Последний минимум: {_fmt_price(s['symbol'], s['low'])}")
+    if s.get("duration_samples"):
+        lines.append(
+            f"Вероятное окно движения: ещё {s['duration_low']}–{s['duration_high']} закрытых H1 "
+            f"({s['duration_low']}–{s['duration_high']} ч)"
+        )
+        lines.append(f"Основа оценки: {s['duration_samples']} завершённых исторических ZigZag-волн")
     if s["event"] == "РАННИЙ ПОДТВЕРЖДЁННЫЙ ОТКАТ":
         lines.append(f"Факт: минимум три закрытые M15-свечи и M5 подтвердили локальный откат {side} внутри основной структуры {main_side}.")
     elif s["event"] == "РАННИЙ ПОДТВЕРЖДЁННЫЙ ИМПУЛЬС":
@@ -273,9 +297,97 @@ def format_message(s: dict) -> str:
         lines.append(f"Факт: H1 вернулся в сторону основной структуры; откат завершён. Приоритет {side}.")
     elif s["event"] == "СТРУКТУРА ПРОДОЛЖЕНА":
         lines.append(f"Факт: сформирован новый подтверждённый экстремум в направлении {side}.")
+    elif s["event"] == "РАЗВОРОТ ПОДТВЕРЖДЁН":
+        lines.append(f"Факт: основная подтверждённая структура сменилась на {side}; это разворот, а не локальный откат.")
     else:
         lines.append(f"Факт: направление подтверждено минимум двумя рабочими таймфреймами.")
     return "\n".join(lines)
+
+
+def render_chart(s: dict, by_tf: dict) -> io.BytesIO:
+    """PNG со свечами, подтверждённым ZigZag и неподтверждённым хвостом."""
+    from PIL import Image, ImageDraw, ImageFont
+    from analysis import closed_candles, zigzag
+
+    tf = s.get("tf") if s.get("tf") in TF_MINUTES else "H1"
+    bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])[-48:]
+    if len(bars) < 8:
+        tf = "H1"
+        bars = closed_candles(by_tf.get(tf) or [], 60)[-48:]
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font = ImageFont.load_default(size=24)
+        small = ImageFont.load_default(size=17)
+    left, right, top, bottom = 75, 1130, 80, 610
+    prices = [value for bar in bars for value in (bar.low, bar.high)] or [0, 1]
+    lo, hi = min(prices), max(prices)
+    pad = max((hi-lo)*.08, 1e-8)
+    lo, hi = lo-pad, hi+pad
+    def x_at(index: float) -> float:
+        return left + index/max(1, len(bars)-1)*(right-left)
+    def y_at(price: float) -> float:
+        return bottom-(price-lo)/max(1e-12, hi-lo)*(bottom-top)
+    for row in range(6):
+        y = top+row*(bottom-top)/5
+        draw.line((left, y, right, y), fill="#293143", width=1)
+    candle_w = max(4, int((right-left)/max(1, len(bars))*.55))
+    for index, bar in enumerate(bars):
+        x = x_at(index)
+        color = "#37d67a" if bar.close >= bar.open else "#ff5c6c"
+        draw.line((x, y_at(bar.high), x, y_at(bar.low)), fill=color, width=2)
+        y1, y2 = y_at(bar.open), y_at(bar.close)
+        draw.rectangle((x-candle_w/2, min(y1, y2), x+candle_w/2, max(y1, y2)+1), fill=color)
+    swings = zigzag(bars, cfg.ZIGZAG_PCT.get(tf, .18), cfg.ZIGZAG_MIN_BARS)
+    confirmed = [(x_at(point.index), y_at(point.price), point) for point in swings]
+    path_color = "#42e889" if s.get("side", 0) > 0 else "#ff6575"
+    if len(confirmed) >= 2:
+        draw.line([(x, y) for x, y, _ in confirmed], fill=path_color, width=5)
+    previous_high = previous_low = None
+    for x, y, point in confirmed:
+        if point.kind == "high":
+            label = "H" if previous_high is None else ("HH" if point.price > previous_high else "LH")
+            previous_high = point.price
+        else:
+            label = "L" if previous_low is None else ("HL" if point.price > previous_low else "LL")
+            previous_low = point.price
+        draw.ellipse((x-6, y-6, x+6, y+6), fill=path_color, outline="#ffffff", width=2)
+        draw.text((x-12, y-27 if point.kind == "high" else y+10), label, fill="#ffffff", font=small)
+    if confirmed and bars:
+        # Серый пунктир показывает лишь формирующийся участок; он не входит в
+        # сигнал и может измениться до подтверждения следующего экстремума.
+        start = confirmed[-1][:2]
+        end = (x_at(len(bars)-1), y_at(bars[-1].close))
+        for n in range(0, 12, 2):
+            a, b = n/12, min(1, (n+1)/12)
+            draw.line((start[0]+(end[0]-start[0])*a, start[1]+(end[1]-start[1])*a,
+                       start[0]+(end[0]-start[0])*b, start[1]+(end[1]-start[1])*b),
+                      fill="#aeb7c6", width=3)
+        draw.text((max(left, end[0]-210), max(top, end[1]-35)), "ФОРМИРУЕТСЯ · НЕ СИГНАЛ", fill="#aeb7c6", font=small)
+    title = str(s.get("event") or "СТРУКТУРА")
+    draw.text((left, 25), f"{s['symbol']} · {tf} · ZIGZAG {title}", fill="#f1f5fb", font=font)
+    if s.get("duration_samples"):
+        draw.text((left, 655), f"Оценка: ещё {s['duration_low']}–{s['duration_high']} H1 · вероятностно, NO REPAINT",
+                  fill="#c9d1df", font=small)
+    else:
+        draw.text((left, 655), "Только закрытые свечи и подтверждённые экстремумы · NO REPAINT",
+                  fill="#c9d1df", font=small)
+    output = io.BytesIO()
+    output.name = f"zigzag_{s['symbol'].replace('/', '')}_{str(s.get('last_dt') or '').replace(':', '-')}.png"
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
+def image_for_alert(text: str) -> io.BytesIO | None:
+    card = _PENDING_CARDS.get(text)
+    if not card or not getattr(cfg, "ZIGZAG_CHART_IMAGES_ENABLED", True):
+        return None
+    return render_chart(card[0], card[1])
 
 
 def _fingerprint(snap: dict) -> str:
@@ -304,12 +416,14 @@ def mark_delivered(text: str) -> None:
     if isinstance(item, dict) and item.get("fingerprint"):
         state.setdefault("delivered", {})[symbol] = item["fingerprint"]
         _save(state)
+    _PENDING_CARDS.pop(text, None)
 
 
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
+    _PENDING_CARDS.clear()
     state = _load()
     # Новая схема запускается тихо, чтобы после обновления не прислать историю.
-    first = not bool(state.get("bootstrapped")) or state.get("schema_version") != 2
+    first = not bool(state.get("bootstrapped")) or state.get("schema_version") != 3
     # Миграция старого состояния: ранее найденное ошибочно считалось доставленным.
     delivered = state.setdefault("delivered", dict(state.get("signals") or {}))
     pending = state.setdefault("pending", {})
@@ -317,7 +431,8 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     messages = []
     for symbol in cfg.PAIRS:
         try:
-            snap = analyze_symbol(symbol, market.get(symbol) or {}, strength)
+            by_tf = market.get(symbol) or {}
+            snap = analyze_symbol(symbol, by_tf, strength)
             if not snap["event"] or not snap["side"]:
                 continue
             fingerprint = _fingerprint(snap)
@@ -325,14 +440,19 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             previous = observed.get(symbol) or {}
             previous_event = previous.get("event") if isinstance(previous, dict) else ""
             previous_fp = previous.get("fingerprint") if isinstance(previous, dict) else ""
-            observed[symbol] = {"event": base_event, "fingerprint": fingerprint}
+            previous_main = int(previous.get("main_side") or 0) if isinstance(previous, dict) else 0
+            observed[symbol] = {"event": base_event, "fingerprint": fingerprint,
+                                "main_side": int(snap.get("main_side") or 0)}
             if first:
                 delivered[symbol] = fingerprint
                 pending.pop(symbol, None)
                 continue
             if delivered.get(symbol) != fingerprint:
                 display_event = base_event
-                if previous_event == "ОТКАТ" and base_event == "СТРУКТУРА":
+                if (previous_main and snap.get("main_side") and previous_main != snap["main_side"]
+                        and base_event == "СТРУКТУРА"):
+                    display_event = "РАЗВОРОТ ПОДТВЕРЖДЁН"
+                elif previous_event == "ОТКАТ" and base_event == "СТРУКТУРА":
                     display_event = "ОТКАТ ЗАВЕРШЁН"
                 elif previous_event == base_event == "ОТКАТ" and previous_fp != fingerprint:
                     display_event = "ОТКАТ ПРОДОЛЖАЕТСЯ"
@@ -343,9 +463,10 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 if current.get("fingerprint") != fingerprint:
                     pending[symbol] = {"fingerprint": fingerprint, "message": format_message(snap)}
                 messages.append(pending[symbol]["message"])
+                _PENDING_CARDS[pending[symbol]["message"]] = (dict(snap), by_tf)
         except Exception:
             log.exception("ZigZag %s", symbol)
     state["bootstrapped"] = True
-    state["schema_version"] = 2
+    state["schema_version"] = 3
     _save(state)
     return messages

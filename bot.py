@@ -879,6 +879,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         for text in selected_alerts:
             source_image = None
+            if "↕️ ZIGZAG —" in text:
+                try:
+                    source_image = zigzag_scanner.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения ZigZag")
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
                 try:
                     source_image = patterns.image_for_alert(text)
