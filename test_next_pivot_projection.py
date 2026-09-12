@@ -143,3 +143,21 @@ class NextPivotProjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_session_projection_has_direction_when_statistical_model_is_unavailable(monkeypatch):
+    monkeypatch.setattr(projection, "analyze_symbol", lambda *args, **kwargs: None)
+    result = projection.analyze_session_symbol("EUR/USD", {"H1": wave_bars(80)}, 8)
+    assert result is not None
+    assert result["side"] in ("LONG", "SHORT")
+    assert result["estimated"] is True
+    assert result["bars_high"] == 8
+    assert result["probability"] >= 50
+
+
+def test_session_chart_can_show_news_layer(monkeypatch):
+    monkeypatch.setattr(projection, "analyze_symbol", lambda *args, **kwargs: None)
+    result = projection.analyze_session_symbol("EUR/USD", {"H1": wave_bars(80)}, 8)
+    result["news_markers"] = [{"time": "14:30", "currency": "USD", "impact": "HIGH"}]
+    image = projection.render_chart(result, {"H1": wave_bars(80)})
+    assert image.read(8) == b"\x89PNG\r\n\x1a\n"

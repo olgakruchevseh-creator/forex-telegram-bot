@@ -161,6 +161,83 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict | None:
     return result
 
 
+
+def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8) -> dict | None:
+    """Сессионная версия Next Pivot: всегда даёт оценочный путь при наличии H1.
+
+    Сначала используется полноценная статистическая Pivot-модель. Если истории
+    недостаточно, строится консервативная оценка по закрытым H1/H4/D1 и ATR.
+    Это не подменяет подтверждённый Pivot: поле ``estimated`` явно отделяет
+    резервную оценку от статистической проекции.
+    """
+    result = analyze_symbol(symbol, by_tf)
+    if result:
+        result = dict(result)
+        result["estimated"] = False
+    else:
+        bars = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+        if len(bars) < 20:
+            return None
+        av = atr(bars, 14)
+        if not av:
+            return None
+        # Закрытые свечи: H1 задаёт импульс, H4/D1 подтверждают режим.
+        votes = []
+        for tf, lookback, weight in (("H1", 6, 3), ("H4", 4, 2), ("D1", 3, 1)):
+            tfbars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+            if len(tfbars) >= lookback + 1:
+                delta = tfbars[-1].close - tfbars[-1-lookback].close
+                if delta:
+                    votes.extend(([1 if delta > 0 else -1] * weight))
+        if not votes:
+            delta = bars[-1].close - bars[-7].close
+            votes = [1 if delta >= 0 else -1]
+        score = sum(votes)
+        direction = 1 if score >= 0 else -1
+        agreement = sum(1 for vote in votes if vote == direction) / max(1, len(votes))
+        current = bars[-1].close
+        # Цель ограничена горизонтом сессии: слабый сценарий рисуется ближе,
+        # сильный — дальше, но не выдаётся за точную будущую цену.
+        travel = av * (0.65 + 0.55 * agreement)
+        middle = current + direction * travel
+        half = max(av * float(getattr(cfg, "NEXT_PIVOT_MIN_ZONE_ATR", .25)) / 2, av * .18)
+        zone_low, zone_high = sorted((middle-half, middle+half))
+        probability = int(round(51 + 14 * agreement))
+        result = {
+            "tf": "H1", "side": "LONG" if direction > 0 else "SHORT",
+            "kind": "high" if direction > 0 else "low",
+            "structure": "HH" if direction > 0 else "LL",
+            "zone_low": zone_low, "zone_high": zone_high,
+            "bars_low": max(1, min(int(session_hours), 2)),
+            "bars_high": max(3, int(session_hours)), "samples": 0,
+            "probability": probability, "near": True, "distance_atr": round(abs(middle-current)/av, 2),
+            "pivot_dt": bars[-1].dt, "current": current, "symbol": symbol,
+            "aligned": sum(1 for vote in votes if vote == direction), "available": len(votes),
+            "closed_h1": bars[-1].dt, "estimated": True,
+            "main_score": probability, "flat_score": max(25, 100-probability),
+            "reaction_score": max(35, 92-probability),
+        }
+    # Независимая структурная сверка с ансамблем ZigZag. Она не переворачивает
+    # статистическую модель, а снижает/повышает доверие и отображается в карточке.
+    try:
+        import zigzag_scanner
+        zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+        directions = zz.get("zigzag_directions") or {}
+        side_n = 1 if result["side"] == "LONG" else -1
+        checks = [int(directions.get(tf) or 0) for tf in ("D1", "H4", "H1") if tf in directions]
+        agree = sum(v == side_n for v in checks)
+        oppose = sum(v == -side_n for v in checks)
+        result["zigzag_check"] = f"{agree}/{len(checks)}" if checks else "нет данных"
+        result["zigzag_conflict"] = oppose > agree and oppose >= 2
+        if checks:
+            result["probability"] = max(50, min(92, int(result["probability"]) + agree*2 - oppose*3))
+            result["main_score"] = result["probability"]
+    except Exception:
+        log.exception("NEXT_PIVOT_ZIGZAG_CONTEXT_FAILED symbol=%s", symbol)
+        result["zigzag_check"] = "ошибка сверки"
+        result["zigzag_conflict"] = False
+    return result
+
 def _price(symbol: str, value: float) -> str:
     return f"{value:.3f}" if "JPY" in symbol else f"{value:.5f}"
 
@@ -289,8 +366,18 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.text((legend_x, legend_y+62),
               f"После Pivot {reaction} → {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
               fill="#d889ff", font=small)
-    draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']}", fill="#f1f5fb", font=font)
-    draw.text((left, height-58), "Сценарии независимы · вероятностная проекция, не торговая гарантия",
+    mode = "ОЦЕНОЧНЫЙ" if result.get("estimated") else "СТАТИСТИЧЕСКИЙ"
+    draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']} · {mode}", fill="#f1f5fb", font=font)
+    # Новостной слой входит прямо в картинку: маркер предупреждает, что
+    # траектория после публикации может измениться и должна пересчитываться.
+    markers = result.get("news_markers") or []
+    if markers:
+        risk_color = "#ff6575" if any(m.get("impact") == "HIGH" for m in markers) else "#ffd44d"
+        label = " · ".join(f"{m.get('time')} {m.get('currency')}" for m in markers[:3])
+        draw.rounded_rectangle((left, 625, 720, 681), radius=10, fill="#171c29dd", outline=risk_color, width=2)
+        draw.text((left+12, 640), f"НОВОСТИ СЕССИИ: {label}", fill=risk_color, font=small)
+    footer = "Оценочный путь" if result.get("estimated") else "Статистическая проекция"
+    draw.text((740 if markers else left, height-58), f"{footer} · не торговая гарантия",
               fill="#9aa4b5", font=small)
     output = io.BytesIO()
     output.name = f"next_pivot_{result['symbol'].replace('/', '')}_{result['pivot_dt'].replace(':', '-')}.png"

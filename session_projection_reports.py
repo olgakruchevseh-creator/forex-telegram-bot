@@ -213,23 +213,34 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
 
 def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
                   current_name: str, next_name: str) -> dict:
-    result = next_pivot_projection.analyze_symbol(symbol, by_tf)
-    news = _news_context(symbol, events, result["probability"] if result else None)
+    result = next_pivot_projection.analyze_session_symbol(symbol, by_tf, hours)
+    news = _news_context(symbol, events, result["probability"] if result else None, hours)
     if result:
         side, icon = result["side"], ("🟢" if result["side"] == "LONG" else "🔴")
         reaction = "SHORT 🔴" if side == "LONG" else "LONG 🟢"
         kind = "ВЕРШИНЫ" if result["kind"] == "high" else "ОСНОВАНИЯ"
         decimals = 3 if "JPY" in symbol else 5
         inside_window = int(result["bars_low"]) <= hours
+        mode = ("ОЦЕНОЧНАЯ СЕССИОННАЯ ПРОЕКЦИЯ" if result.get("estimated")
+                else "СТАТИСТИЧЕСКАЯ PIVOT-ПРОЕКЦИЯ")
+        conflict = " · ⚠️ есть структурное противоречие" if result.get("zigzag_conflict") else ""
         scenario = [
-            f"Текущее движение к зоне: {side} {icon}",
+            f"Режим расчёта: {mode}",
+            f"Направление до следующей сессии: {side} {icon}",
             f"Ожидаемая зона {kind}: {result['zone_low']:.{decimals}f}–{result['zone_high']:.{decimals}f}",
             f"Окно Pivot: через {result['bars_low']}–{result['bars_high']} закрытых H1",
             f"Попадает в текущий сессионный период: {'ДА' if inside_window else 'НЕТ'}",
+            f"Сверка с ZigZag D1/H4/H1: {result.get('zigzag_check', 'нет данных')}{conflict}",
             f"Вероятность с учётом новостного риска: {news['confidence']}%",
             f"Возможная реакция после зоны: {reaction} · только после подтверждения M15/H1",
         ]
-        image = next_pivot_projection.render_chart(result, by_tf)
+        chart_result = dict(result)
+        chart_result["news_risk"] = news.get("risk", "NONE")
+        chart_result["news_markers"] = [
+            {"time": e.local_hm, "impact": e.impact, "currency": e.currency,
+             "title": newsmod.translate_title(e.title)} for e in news.get("events", [])
+        ]
+        image = next_pivot_projection.render_chart(chart_result, by_tf)
     else:
         scenario = ["Состояние: НЕЙТРАЛЬНО 🟡", "Надёжная следующая Pivot-зона пока не рассчитана"]
         image = _neutral_image(symbol, "СЛЕДУЮЩИЙ PIVOT", by_tf, "Недостаточно подтверждённых исторических Pivot")
@@ -237,7 +248,7 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
         "━━━━━━━━━━━━━━━━━━", "🔭 СЛЕДУЮЩИЙ PIVOT — СЕССИОННАЯ ПРОЕКЦИЯ", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {symbol}", f"Период: {current_name} → {next_name} · около {hours} ч",
         *scenario, "", news["headline"], *news["lines"], news["status"], "",
-        "⚠️ Pivot — вероятная зона реакции, а не гарантированная точка разворота.", "━━━━━━━━━━━━━━━━━━",
+        "⚠️ Даже слабая сессионная оценка показывает наиболее вероятный путь, но не является торговой гарантией. Pivot — зона реакции, а не точная точка разворота.", "━━━━━━━━━━━━━━━━━━",
     ])
     return {"text": text, "image": image}
 
