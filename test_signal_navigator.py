@@ -329,3 +329,11 @@ class SignalNavigatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class NavigatorTimeHorizonTests(unittest.TestCase):
+    def test_horizon_lines_are_probabilistic_and_not_exit_timer(self):
+        h = {"label":"импульса","low":1,"high":3,"samples":8,"end_low":"11:00","end_high":"13:00"}
+        text = "\n".join(signal_navigator._time_horizon_lines(h))
+        self.assertIn("1–3 закрытых H1", text)
+        self.assertIn("Europe/Amsterdam", text)
+        self.assertIn("не отменяет сценарий", text)

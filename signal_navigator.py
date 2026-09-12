@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import config as cfg
@@ -311,13 +312,64 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
         "zigzag_h4": zz_text, "evidence": ["исходный модуль подтвердил событие"],
         "source_accepted": True, "tf_biases": views,
-        "next_pivot": pivot,
+        "next_pivot": pivot, "by_tf": by_tf,
     }
     if same_active:
         previous_names = [part.strip() for part in str(active.get("sources") or "").split("·") if part.strip()]
         master["source_names_override"] = list(dict.fromkeys(previous_names + [_source_name(source_text)]))
         master["evidence"] = ["новый модуль дополнительно подтвердил действующий маршрут"]
     return format_confirmed(master, _scale_route(route), [source_text]), [source_text]
+
+
+def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict | None = None) -> dict:
+    """Вероятностное окно сценария. Не является таймером выхода или новым сигналом."""
+    master = master or {}
+    low, high, samples = 1, 3, 0
+    try:
+        zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+        if int(zz.get("duration_samples") or 0) >= int(getattr(cfg, "NAVIGATOR_TIME_MIN_SAMPLES", 5)):
+            low = max(1, int(zz.get("duration_low") or low))
+            high = max(low, int(zz.get("duration_high") or high))
+            samples = int(zz.get("duration_samples") or 0)
+    except Exception:
+        pass
+    mode = route.get("mode") or "LOCAL"
+    if mode == "PULLBACK":
+        high = min(high, int(getattr(cfg, "NAVIGATOR_TIME_PULLBACK_MAX_H1", 4)))
+    elif mode == "LOCAL":
+        high = min(high, int(getattr(cfg, "NAVIGATOR_TIME_LOCAL_MAX_H1", 3)))
+    else:
+        high = min(high, int(getattr(cfg, "NAVIGATOR_TIME_IMPULSE_MAX_H1", 6)))
+    low = min(low, high)
+    direction = 1 if side == "LONG" else -1
+    directed_gap = float(master.get("gap") or 0) * direction
+    senior = int(master.get("senior_n") or 0)
+    junior = int(master.get("junior_n") or 0)
+    # Сильное согласие допускает верхнюю часть окна; конфликт сжимает горизонт.
+    if directed_gap < 0 or senior <= 1 or junior <= 1:
+        high = max(low, min(high, 2))
+    h1 = movement_progress.closed_candles(by_tf.get("H1") or [], 60)
+    end_low = end_high = ""
+    if h1:
+        try:
+            raw = str(h1[-1].dt).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(raw)
+            end_low = (dt + timedelta(hours=low)).strftime("%H:%M")
+            end_high = (dt + timedelta(hours=high)).strftime("%H:%M")
+        except (TypeError, ValueError):
+            pass
+    label = {"PULLBACK": "отката", "IMPULSE": "импульса", "LOCAL": "локального движения"}.get(mode, "сценария")
+    return {"low": low, "high": high, "samples": samples, "end_low": end_low, "end_high": end_high, "label": label}
+
+
+def _time_horizon_lines(h: dict) -> list[str]:
+    lines = [f"⏱ Вероятное окно {h['label']}: ещё {h['low']}–{h['high']} закрытых H1 ({h['low']}–{h['high']} ч)"]
+    if h.get("end_low") and h.get("end_high"):
+        lines.append(f"• Ориентир по времени: {h['end_low']}–{h['end_high']} · Europe/Amsterdam")
+    if h.get("samples"):
+        lines.append(f"• Статистическая база: {h['samples']} завершённых ZigZag-волн")
+    lines.append("• После каждой закрытой H1 окно пересчитывается; истечение окна само по себе не отменяет сценарий")
+    return lines
 
 
 def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bool = False) -> str:
@@ -406,6 +458,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         lines.append(f"• 🎯 Следующий pivot: {next_pivot_projection.compact_line(next_pivot)}")
         if route.get("pivot_inside"):
             lines.append("• 📍 Цена уже находится внутри ожидаемой Pivot-зоны; потенциал текущего движения ограничен")
+    horizon = _time_horizon(master["symbol"], side, master.get("by_tf") or {}, route, master)
+    lines.extend(["", *_time_horizon_lines(horizon)])
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     final_fact = ("Факт: подтверждённое событие исходного модуля принято Навигатором; таймфреймы, сила валют и ZigZag показаны как контекст сопровождения, а не как повторный запрет."
                   if source_accepted else
@@ -464,6 +518,8 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
             result["next_pivot"] = pivot
         previous = active.get(symbol) or {}
         reversal = bool(previous and previous.get("side") != side)
+        result = dict(result)
+        result["by_tf"] = pair_market
         output.append((format_confirmed(result, route, sources, reversal=reversal), sources))
     return output
 
