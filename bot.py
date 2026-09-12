@@ -45,6 +45,7 @@ import daily_high_low
 import chain_entries
 import retest_confirmation
 import fibonacci_grid
+import fib_smc
 import market_schedule
 import master_direction
 import signal_navigator
@@ -795,6 +796,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля сетки Фибоначчи")
 
+        if getattr(cfg, "FIB_SMC_ENABLED", True):
+            try:
+                try:
+                    fib_smc_events = newsmod.load_events()
+                except Exception:
+                    log.exception("Новости для Fib+SMC")
+                    fib_smc_events = []
+                for text in fib_smc.process_market(
+                    market, strength, fib_smc_events, datetime.now(timezone.utc)
+                ):
+                    module_alerts.append((0, text))
+            except Exception:
+                log.exception("Ошибка модуля Fib+SMC")
+
         mandatory_level_breakouts: list[str] = []
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
@@ -957,6 +972,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = fibonacci_grid.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Fibonacci")
+            if "🧬 FIB + SMC —" in text:
+                try:
+                    source_image = fib_smc.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Fib+SMC")
             if "🧱 РЕТЕСТ ORDER BLOCK" in text:
                 try:
                     source_image = order_block.image_for_alert(text)
@@ -1055,6 +1075,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         fibonacci_grid.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Fibonacci")
+                if "🧬 FIB + SMC —" in source_text:
+                    try:
+                        fib_smc.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Fib+SMC")
                 if "⛓️ CHAIN ENTRY" in source_text:
                     try:
                         chain_entries.mark_delivered(source_text)
