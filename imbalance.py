@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import displacement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.imbalance")
@@ -115,6 +116,16 @@ def newest_fvg(symbol: str, tf: str, bars: list[Candle]) -> FvgZone | None:
 
 def validate_zone(zone: FvgZone, closed_map: dict, strength: dict[str, float]) -> bool:
     wanted = 1 if zone.side == "LONG" else -1
+    # FVG remains a three-candle structure. Displacement independently confirms
+    # that the middle impulse was efficient rather than a wick-heavy spike.
+    if getattr(cfg, "DISPLACEMENT_ENABLED", True):
+        disp = displacement.detect(zone.tf, closed_map.get(zone.tf) or [])
+        # newest_fvg is completed one candle after its impulse, so direct newest
+        # detection may refer to candle C. Fall back to the stored FVG impulse metrics.
+        if disp and disp.side != zone.side:
+            return False
+        if zone.impulse_atr < float(getattr(cfg, "IMBALANCE_MIN_IMPULSE_ATR", .80)):
+            return False
     main = {tf: _bias(tf, closed_map[tf]) for tf in MAIN_TFS if len(closed_map[tf]) >= 20}
     aligned_main = [tf for tf, value in main.items() if value == wanted]
     conflicts = [tf for tf, value in main.items() if value == -wanted]

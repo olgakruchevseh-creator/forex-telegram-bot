@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config as cfg
+import displacement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.disbalance")
@@ -133,6 +134,11 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float]) -> Sign
         if not confirms:
             continue
         if (wanted > 0 and gap < min_gap) or (wanted < 0 and gap > -min_gap):
+            continue
+        # Displacement is an independent impulse-quality layer. Disbalance still
+        # requires its own BOS; this only rejects weak/inefficient breakout candles.
+        disp = displacement.detect(sig.tf, by_tf.get(sig.tf) or []) if getattr(cfg, "DISPLACEMENT_ENABLED", True) else None
+        if getattr(cfg, "DISPLACEMENT_ENABLED", True) and (not disp or disp.side != sig.side or disp.score < int(getattr(cfg, "DISPLACEMENT_MIN_SCORE", 72))):
             continue
         sig.aligned = aligned_main + confirms
         sig.strength_gap = gap
