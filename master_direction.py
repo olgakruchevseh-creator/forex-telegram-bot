@@ -9,6 +9,7 @@ import config as cfg
 import news as newsmod
 import zigzag_scanner
 import htf_irl
+import ltf_confirmation
 import imd
 import idm
 import daily_high_low
@@ -147,6 +148,7 @@ def analyze_symbol(
 
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
     irl = htf_irl.analyze_symbol(symbol, by_tf, side)
+    ltf_ctx = ltf_confirmation.analyze_symbol(symbol, by_tf, side)
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
     idm_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pd_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
@@ -166,6 +168,11 @@ def analyze_symbol(
     conflict_groups = sum((higher_conflict, dxy_conflict))
     if conflict_groups >= 2:
         return None
+    # HTF -> LTF handshake: when HTF IRL supports the candidate, an explicitly
+    # opposite M15/M5 structure blocks timing. Neutral LTF stays internal and
+    # does not create a Telegram WAIT message.
+    if irl and irl.alignment > 0 and ltf_ctx and ltf_ctx.alignment < 0:
+        return None
 
     senior_n = sum(stack.views[k].bias == side for k in ("D1", "H4", "H1") if k in stack.views)
     junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
@@ -181,6 +188,8 @@ def analyze_symbol(
     # HTF IRL — контекст местоположения, а не самостоятельный триггер.
     if irl and irl.alignment > 0:
         quality += int(getattr(cfg, "HTF_IRL_ALIGN_BONUS", 5))
+    if ltf_ctx and ltf_ctx.alignment > 0:
+        quality += int(getattr(cfg, "LTF_CONFIRM_ALIGN_BONUS", 5))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     if idm_ctx and idm_ctx.alignment > 0:
@@ -198,6 +207,8 @@ def analyze_symbol(
         quality -= 4
     if irl and irl.alignment < 0:
         quality -= int(getattr(cfg, "HTF_IRL_CONFLICT_PENALTY", 3))
+    if ltf_ctx and ltf_ctx.alignment < 0:
+        quality -= int(getattr(cfg, "LTF_CONFIRM_CONFLICT_PENALTY", 5))
     if imd_ctx and imd_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
     if idm_ctx and idm_ctx.alignment < 0:
@@ -229,6 +240,8 @@ def analyze_symbol(
         "conflict_groups": conflict_groups,
         "htf_irl": htf_irl.describe(irl),
         "htf_irl_alignment": irl.alignment if irl else 0,
+        "ltf_confirmation": ltf_confirmation.describe(ltf_ctx),
+        "ltf_confirmation_alignment": ltf_ctx.alignment if ltf_ctx else 0,
         "imd": imd.describe(imd_ctx),
         "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
         "idm": idm.describe(idm_ctx),
