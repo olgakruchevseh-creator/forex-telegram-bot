@@ -35,12 +35,12 @@ import disbalance
 import imbalance
 import accumulation_distribution
 import amd_power_of_three
+import crt_candle_range
 import movement_progress
 import liquidity_sweep
 import order_block
 import breaker_block
 import smart_money_62_26
-import ats_reversal_point
 import daily_high_low
 import chain_entries
 import retest_confirmation
@@ -730,6 +730,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля AMD / Power of Three")
 
+        if getattr(cfg, "CRT_CANDLE_RANGE_ENABLED", True):
+            try:
+                for text in crt_candle_range.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля CRT / Candle Range Theory")
+
         if getattr(cfg, "LIQUIDITY_SWEEP_ENABLED", True):
             try:
                 for text in liquidity_sweep.process_market(market, strength):
@@ -759,13 +766,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 log.exception("Ошибка модуля Smart Money 62-26")
-
-        if getattr(cfg, "ATS_REVERSAL_ENABLED", True):
-            try:
-                for text in ats_reversal_point.process_market(market, strength):
-                    module_alerts.append((1, text))
-            except Exception:
-                log.exception("Ошибка модуля ATS Reversal Point")
 
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
@@ -947,6 +947,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = amd_power_of_three.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения AMD")
+            if "🕯 CRT — CANDLE RANGE THEORY" in text:
+                try:
+                    source_image = crt_candle_range.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения CRT")
             if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in text:
                 try:
                     source_image = fibonacci_grid.image_for_alert(text)
@@ -962,11 +967,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = breaker_block.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Breaker Block")
-            if "🎯 ATS REVERSAL POINT" in text:
-                try:
-                    source_image = ats_reversal_point.image_for_alert(text)
-                except Exception:
-                    log.exception("Подготовка изображения ATS Reversal Point")
             if "🏦 SMART MONEY 62-26" in text:
                 try:
                     source_image = smart_money_62_26.image_for_alert(text)
@@ -1045,6 +1045,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         amd_power_of_three.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного AMD")
+                if "🕯 CRT — CANDLE RANGE THEORY" in source_text:
+                    try:
+                        crt_candle_range.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного CRT")
                 if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in source_text:
                     try:
                         fibonacci_grid.mark_delivered(source_text)
