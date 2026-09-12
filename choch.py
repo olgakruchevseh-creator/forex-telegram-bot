@@ -24,6 +24,7 @@ class ChochContext:
     timeframe: str
     level: float
     displacement_atr: float
+    mss_confirmed: bool
     reason: str
 
 
@@ -76,9 +77,14 @@ def _confirmed_choch(by_tf: dict, tf: str, candidate_side: int) -> ChochContext 
     score = 2 + (2 if disp >= 0.9 else 1) + (2 if tf == "H1" else (1 if tf == "M15" else 0))
     direction = "bullish" if choch_side > 0 else "bearish"
     relation = "подтверждает кандидата" if alignment > 0 else "противоречит кандидату"
+    follow = bars[-1]
+    # MSS here means the CHOCH close itself also establishes a decisive structural shift;
+    # it is a stricter tag inside CHOCH, not a separate signal.
+    mss = disp >= float(getattr(cfg, "MSS_DISPLACEMENT_ATR", 0.85))
+    if mss: score += 2
     return ChochContext(
-        alignment, score, tf, level, disp,
-        f"{direction} CHOCH подтверждён закрытием и displacement; {relation}"
+        alignment, score, tf, level, disp, mss,
+        f"{direction} CHOCH подтверждён закрытием и displacement" + (" + MSS" if mss else "") + f"; {relation}"
     )
 
 
@@ -100,7 +106,7 @@ def analyze_symbol(symbol: str, by_tf: dict, candidate_side: int) -> ChochContex
         strongest = max(found, key=lambda c: c.score)
         return ChochContext(
             0, strongest.score, strongest.timeframe, strongest.level,
-            strongest.displacement_atr,
+            strongest.displacement_atr, strongest.mss_confirmed,
             "CHOCH на H1/M15/M5 противоречат друг другу — влияние отключено"
         )
     return max(found, key=lambda c: c.score)

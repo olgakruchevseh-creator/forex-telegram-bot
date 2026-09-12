@@ -517,3 +517,36 @@ CHOCH_DISPLACEMENT_ATR = 0.55
 CHOCH_CLOSE_BUFFER_ATR = 0.05
 CHOCH_ALIGN_BONUS = 5
 CHOCH_CONFLICT_PENALTY = 6
+
+
+# ERL — External Range Liquidity (internal only)
+ERL_ENABLED = True
+ERL_TIMEFRAMES = ("H4", "H1")
+ERL_LOOKBACK = 40
+ERL_OVERSHOOT_ATR = 0.20
+ERL_ALIGN_BONUS = 3
+ERL_CONFLICT_PENALTY = 3
+
+# Premium / Discount / Equilibrium (internal only)
+PD_ENABLED = True
+PD_LOOKBACK = 48
+PD_EQ_BAND = 0.08
+PD_ALIGN_BONUS = 2
+PD_CONFLICT_PENALTY = 2
+
+# Inducement / IDM (internal only)
+IDM_ENABLED = True
+IDM_LOOKBACK = 40
+IDM_NEAR_ATR = 1.20
+IDM_ALIGN_BONUS = 3
+IDM_CONFLICT_PENALTY = 2
+
+# MSS is a stricter tag inside CHOCH, not a standalone notifier.
+MSS_DISPLACEMENT_ATR = 0.85
+
+# Market Regime Controller — weights context, never direction by itself.
+REGIME_HIGH_VOL_RATIO = 1.45
+REGIME_TREND_EFF = 0.48
+REGIME_RANGE_EFF = 0.24
+REGIME_RANGE_PENALTY = 3
+REGIME_HIGH_VOL_PENALTY = 2

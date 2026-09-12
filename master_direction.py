@@ -13,6 +13,10 @@ import ltf_confirmation
 import bpr
 import propulsion_block
 import choch
+import erl
+import premium_discount
+import inducement
+import market_regime
 import imd
 import idm
 import daily_high_low
@@ -155,6 +159,10 @@ def analyze_symbol(
     bpr_ctx = bpr.analyze_symbol(symbol, by_tf, side)
     propulsion_ctx = propulsion_block.analyze_symbol(symbol, by_tf, side)
     choch_ctx = choch.analyze_symbol(symbol, by_tf, side)
+    erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
+    pd_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
+    idm_ctx = inducement.analyze_symbol(symbol, by_tf, side)
+    regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
     idm_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pd_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
@@ -202,6 +210,9 @@ def analyze_symbol(
         quality += int(getattr(cfg, "PROPULSION_ALIGN_BONUS", 4))
     if choch_ctx and choch_ctx.alignment > 0:
         quality += int(getattr(cfg, "CHOCH_ALIGN_BONUS", 5))
+    if erl_ctx and erl_ctx.alignment > 0: quality += int(getattr(cfg, "ERL_ALIGN_BONUS", 3))
+    if pd_ctx and pd_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
+    if idm_ctx and idm_ctx.alignment > 0: quality += int(getattr(cfg, "IDM_ALIGN_BONUS", 3))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     if idm_ctx and idm_ctx.alignment > 0:
@@ -227,6 +238,9 @@ def analyze_symbol(
         quality -= int(getattr(cfg, "PROPULSION_CONFLICT_PENALTY", 4))
     if choch_ctx and choch_ctx.alignment < 0:
         quality -= int(getattr(cfg, "CHOCH_CONFLICT_PENALTY", 6))
+    if erl_ctx and erl_ctx.alignment < 0: quality -= int(getattr(cfg, "ERL_CONFLICT_PENALTY", 3))
+    if pd_ctx and pd_ctx.alignment < 0: quality -= int(getattr(cfg, "PD_CONFLICT_PENALTY", 2))
+    if idm_ctx and idm_ctx.alignment < 0: quality -= int(getattr(cfg, "IDM_CONFLICT_PENALTY", 2))
     if imd_ctx and imd_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
     if idm_ctx and idm_ctx.alignment < 0:
@@ -266,6 +280,10 @@ def analyze_symbol(
         "propulsion_block_alignment": propulsion_ctx.alignment if propulsion_ctx else 0,
         "choch": choch.describe(choch_ctx),
         "choch_alignment": choch_ctx.alignment if choch_ctx else 0,
+        "erl": erl.describe(erl_ctx), "erl_alignment": erl_ctx.alignment if erl_ctx else 0,
+        "premium_discount": premium_discount.describe(pd_ctx), "pd_alignment": pd_ctx.alignment if pd_ctx else 0,
+        "inducement": inducement.describe(idm_ctx), "idm_alignment": idm_ctx.alignment if idm_ctx else 0,
+        "market_regime": market_regime.describe(regime_ctx),
         "imd": imd.describe(imd_ctx),
         "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
         "idm": idm.describe(idm_ctx),
