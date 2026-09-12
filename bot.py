@@ -40,6 +40,7 @@ import liquidity_sweep
 import order_block
 import breaker_block
 import smart_money_62_26
+import ats_reversal_point
 import daily_high_low
 import chain_entries
 import retest_confirmation
@@ -759,6 +760,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля Smart Money 62-26")
 
+        if getattr(cfg, "ATS_REVERSAL_ENABLED", True):
+            try:
+                for text in ats_reversal_point.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля ATS Reversal Point")
+
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
                 for text in daily_high_low.process_market(market, strength):
@@ -954,6 +962,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = breaker_block.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Breaker Block")
+            if "🎯 ATS REVERSAL POINT" in text:
+                try:
+                    source_image = ats_reversal_point.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения ATS Reversal Point")
             if "🏦 SMART MONEY 62-26" in text:
                 try:
                     source_image = smart_money_62_26.image_for_alert(text)
