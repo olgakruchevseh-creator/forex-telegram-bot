@@ -609,12 +609,19 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 save_state(state)
             if newsmod.has_actual(event) and event.event_id not in state["news_actual_sent"]:
                 verdict = newsmod.interpret_print(event)
-                msg = briefing.format_actual_update(event, verdict, dxy, strength.get("USD", 0.0))
+                msg = briefing.format_actual_update(
+                    event, verdict, dxy, strength.get("USD", 0.0), all_events
+                )
                 if msg:
                     await _send_parts(context.application, int(chat_id), msg)
-                # Пустое обновление считается обработанным; непустое — только
-                # после успешного подтверждения доставки Telegram.
-                state["news_actual_sent"][event.event_id] = time.time()
+                # Для одновременных headline/core CPI отправляем одну сводную карточку
+                # и помечаем весь кластер, чтобы не получить два противоречивых сообщения.
+                if newsmod.is_cpi_event(event):
+                    cluster = newsmod.cpi_release_consensus(all_events, event.currency, event).get("events") or [event]
+                    for cluster_event in cluster:
+                        state["news_actual_sent"][cluster_event.event_id] = time.time()
+                else:
+                    state["news_actual_sent"][event.event_id] = time.time()
                 save_state(state)
     except Exception:
         log.exception("Ошибка брифинга")
@@ -935,7 +942,18 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         mandatory_amd_set = set(mandatory_amd_alerts)
         mandatory_level_set = set(mandatory_level_breakouts)
         delivery_alerts = list(dict.fromkeys(mandatory_amd_alerts + mandatory_level_breakouts + selected_alerts))
+        # CPI — единый защитный слой поверх всех модулей: сам факт модуля не теряется,
+        # но карточка явно запрещает трактовать новостной импульс как готовый вход.
+        try:
+            cpi_events = newsmod.load_events()
+        except Exception:
+            log.exception("CPI guard calendar")
+            cpi_events = []
         for text in delivery_alerts:
+            pair_for_cpi = _alert_pair(text)
+            cpi_note = newsmod.cpi_pair_guard(pair_for_cpi, cpi_events) if pair_for_cpi else ""
+            if cpi_note and cpi_note not in text:
+                text = text.rstrip() + "\n\n" + cpi_note
             source_image = None
             if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
                 try:

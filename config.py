@@ -167,6 +167,11 @@ DXY_MAX_PRICE = 200.0
 BRIEFING_ENABLED = True
 NEWS_WARN_MINUTES = 60
 NEWS_CACHE_MAX_AGE_HOURS = 168
+# CPI — отдельный строгий фундаментальный слой.
+# Сюрприз измеряется в процентных пунктах (например 3.2 vs 3.1 = +0.1 п.п.).
+CPI_MIN_SURPRISE_PP = 0.05
+CPI_BLOCK_BEFORE_MINUTES = 60
+CPI_BLOCK_AFTER_MINUTES = 30
 BRIEFING_OPEN_WINDOW_MIN = 15
 LEVELS_ENABLED = True
 LEVEL_NOTIFY_NEW = False

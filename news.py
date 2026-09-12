@@ -60,6 +60,9 @@ SPEECH_MARKERS = ("speech", "speaks", "testimony", "press conference")
 BRIEFING_LOW_WATCH_MARKERS = ("trade balance", "balance of trade")
 
 TITLE_RU = (
+    # Более специфичные названия должны идти раньше общих подстрок.
+    ("core cpi", "Базовый CPI"),
+    ("core consumer price", "Базовый CPI"),
     ("nonfarm payrolls", "Занятость вне сельского хозяйства (NFP)"),
     ("non-farm payrolls", "Занятость вне сельского хозяйства (NFP)"),
     ("unemployment rate", "Уровень безработицы"),
@@ -75,7 +78,7 @@ TITLE_RU = (
     ("fomc minutes", "Протокол FOMC"),
     ("fomc press conference", "Пресс-конференция FOMC"),
     ("cpi", "Индекс потребительских цен (CPI)"),
-    ("core cpi", "Базовый CPI"),
+    ("consumer price index", "Индекс потребительских цен (CPI)"),
     ("ppi", "Индекс цен производителей (PPI)"),
     ("core ppi", "Базовый PPI"),
     ("gdp", "ВВП"),
@@ -130,6 +133,87 @@ class NewsEvent:
     @property
     def local_hm(self) -> str:
         return self.local.strftime("%H:%M")
+
+
+CPI_MARKERS = ("cpi", "consumer price index")
+CORE_CPI_MARKERS = ("core cpi", "core consumer price")
+
+def is_cpi_event(event: NewsEvent) -> bool:
+    title = (event.title or "").lower()
+    return any(marker in title for marker in CPI_MARKERS)
+
+def is_core_cpi_event(event: NewsEvent) -> bool:
+    title = (event.title or "").lower()
+    return any(marker in title for marker in CORE_CPI_MARKERS)
+
+def cpi_surprise(event: NewsEvent) -> Optional[dict]:
+    """Оценивает CPI в процентных пунктах, а не относительным % от прогноза.
+
+    Для CPI разница 3.2% против 3.1% (=0.1 п.п.) уже значима, хотя это лишь
+    3.2% относительного отклонения и старый общий фильтр ошибочно её игнорировал.
+    """
+    if not is_cpi_event(event) or not has_actual(event):
+        return None
+    actual, forecast, previous = _num(event.actual), _num(event.forecast), _num(event.previous)
+    if actual is None or forecast is None:
+        return None
+    diff = actual - forecast
+    threshold = float(getattr(cfg, "CPI_MIN_SURPRISE_PP", 0.05))
+    if abs(diff) + 1e-12 < threshold:
+        verdict = "neutral"
+    else:
+        verdict = "positive" if diff > 0 else "negative"
+    return {
+        "verdict": verdict, "diff_pp": diff, "actual": actual, "forecast": forecast,
+        "previous": previous, "core": is_core_cpi_event(event),
+    }
+
+def cpi_release_consensus(events: list[NewsEvent], currency: str, anchor: NewsEvent | None = None) -> dict:
+    """Сводит одновременные headline/core CPI. Смешанный релиз не превращаем в направление."""
+    if anchor is not None:
+        center = anchor.dt_utc
+    else:
+        center = datetime.now(timezone.utc)
+    cluster = [e for e in events if e.currency == currency and is_cpi_event(e)
+               and abs((e.dt_utc-center).total_seconds()) <= 5*60 and has_actual(e)]
+    prints = [cpi_surprise(e) for e in cluster]
+    prints = [x for x in prints if x]
+    directional = {x["verdict"] for x in prints if x["verdict"] in ("positive", "negative")}
+    if len(directional) > 1:
+        verdict = "mixed"
+    elif directional:
+        verdict = next(iter(directional))
+    else:
+        verdict = "neutral"
+    return {"verdict": verdict, "prints": prints, "events": cluster}
+
+def cpi_pair_guard(symbol: str, events: list[NewsEvent], now_utc: datetime | None = None) -> str:
+    """Строгий CPI-слой для всех торговых карточек пары; факты не скрывает, но запрещает ранний вход."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    try:
+        currencies = set(symbol.split("/"))
+    except Exception:
+        return ""
+    before = int(getattr(cfg, "CPI_BLOCK_BEFORE_MINUTES", 60))
+    after = int(getattr(cfg, "CPI_BLOCK_AFTER_MINUTES", 30))
+    relevant = []
+    for event in events or []:
+        if event.currency not in currencies or not is_cpi_event(event) or event.impact != "HIGH":
+            continue
+        delta = int((event.dt_utc-now_utc).total_seconds()/60)
+        if -after <= delta <= before:
+            relevant.append((abs(delta), delta, event))
+    if not relevant:
+        return ""
+    _, delta, event = min(relevant, key=lambda x: x[0])
+    title = translate_title(event.title)
+    if delta > 0:
+        return f"⛔ CPI-ФИЛЬТР: вход запрещён до публикации {event.currency} {title} (через {delta} мин) и подтверждения реакции цены."
+    consensus = cpi_release_consensus(events, event.currency, event)
+    state = consensus.get("verdict")
+    label = {"positive":"выше ожиданий / поддержка валюты", "negative":"ниже ожиданий / давление на валюту",
+             "mixed":"смешанный headline/core CPI", "neutral":"без значимого сюрприза"}.get(state, "неопределённый релиз")
+    return f"⛔ CPI-ФИЛЬТР: {event.currency} · {label}. После релиза прошло {abs(delta)} мин; новый вход только после пост-CPI стабилизации и подтверждения цены."
 
 
 def _cache_path() -> Path:
@@ -378,6 +462,11 @@ def interpret_print(event: NewsEvent) -> Optional[str]:
     Возвращает 'positive' / 'negative' / None.
     None = нет цифр, смысл неопределён или отклонение мелкое.
     """
+    if is_cpi_event(event):
+        surprise = cpi_surprise(event)
+        if not surprise or surprise["verdict"] == "neutral":
+            return None
+        return surprise["verdict"]
     if event.economic_effect == "context_dependent":
         return None
     act = _num(event.actual)

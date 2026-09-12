@@ -896,27 +896,46 @@ def format_actual_update(
     verdict: Optional[str],
     dxy: Optional[IndexView],
     usd_score: float,
+    events: Optional[list[newsmod.NewsEvent]] = None,
 ) -> Optional[str]:
+    cpi_consensus = None
+    if newsmod.is_cpi_event(event):
+        cpi_consensus = newsmod.cpi_release_consensus(events or [event], event.currency, event)
+        cpi_verdict = cpi_consensus.get("verdict")
+        if cpi_verdict in ("positive", "negative"):
+            verdict = cpi_verdict
+        elif cpi_verdict in ("mixed", "neutral"):
+            verdict = cpi_verdict
     if verdict is None:
         return None
-    tone = "ПОЛОЖИТЕЛЬНО ДЛЯ ВАЛЮТЫ" if verdict == "positive" else "ОТРИЦАТЕЛЬНО ДЛЯ ВАЛЮТЫ"
+    tone = {
+        "positive": "ПОЛОЖИТЕЛЬНО ДЛЯ ВАЛЮТЫ",
+        "negative": "ОТРИЦАТЕЛЬНО ДЛЯ ВАЛЮТЫ",
+        "mixed": "СМЕШАННЫЙ CPI — НАПРАВЛЕНИЕ НЕ УТВЕРЖДАЕМ",
+        "neutral": "CPI БЕЗ ЗНАЧИМОГО СЮРПРИЗА",
+    }.get(verdict, "КОНТЕКСТ ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ ЦЕНОЙ")
     lines = [
-        "📰 ФАКТ ПО НОВОСТИ",
-        "",
-        f"{event.local_hm} · {event.currency}",
+        "📰 ФАКТ ПО НОВОСТИ", "", f"{event.local_hm} · {event.currency}",
         newsmod.translate_title(event.title),
-        f"Предыдущее: {event.previous}",
-        f"Прогноз: {event.forecast}",
-        f"Факт: {event.actual}",
-        "",
-        tone,
-        "",
     ]
+    if cpi_consensus and cpi_consensus.get("prints"):
+        # Headline/Core показываем вместе: это предотвращает ложный вывод по одной цифре.
+        for item in cpi_consensus["prints"]:
+            kind = "Core CPI" if item.get("core") else "CPI"
+            lines.append(f"{kind}: факт {item['actual']:g} · прогноз {item['forecast']:g} · сюрприз {item['diff_pp']:+.2f} п.п.")
+    else:
+        lines.extend([
+            f"Предыдущее: {event.previous}", f"Прогноз: {event.forecast}", f"Факт: {event.actual}",
+        ])
+    lines.extend(["", tone, ""])
     if event.currency == "USD" and dxy and dxy.available:
         lines.append(f"DXY: {dxy.price:.2f} · {_dir_word(dxy.bias)}")
         lines.append(dxy_context(usd_score, dxy))
         lines.append("")
-    lines.append("Это контекст, не торговый сигнал LONG/SHORT.")
+    if newsmod.is_cpi_event(event):
+        lines.append("После CPI первый импульс не считаем самостоятельным входом: ждём пост-CPI стабилизацию и подтверждение цены.")
+        lines.append("")
+    lines.append("Это фундаментальный контекст, не самостоятельный торговый сигнал LONG/SHORT.")
     return "\n".join(lines)
 
 
