@@ -46,6 +46,7 @@ import chain_entries
 import retest_confirmation
 import fibonacci_grid
 import fib_smc
+import ats_reversal_point
 import market_schedule
 import master_direction
 import signal_navigator
@@ -803,6 +804,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля сетки Фибоначчи")
 
+        if getattr(cfg, "ATS_REVERSAL_ENABLED", True):
+            try:
+                for text in ats_reversal_point.process_market(market, strength):
+                    module_alerts.append((0, text))
+            except Exception:
+                log.exception("Ошибка модуля ATS Reversal Point")
+
         if getattr(cfg, "FIB_SMC_ENABLED", True):
             try:
                 try:
@@ -949,7 +957,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             log.exception("CPI guard calendar")
             cpi_events = []
-        for text in delivery_alerts:
+        for source_text in delivery_alerts:
+            text = source_text
             pair_for_cpi = _alert_pair(text)
             cpi_note = newsmod.cpi_pair_guard(pair_for_cpi, cpi_events) if pair_for_cpi else ""
             if cpi_note and cpi_note not in text:
@@ -957,82 +966,87 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             source_image = None
             if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
                 try:
-                    source_image = disbalance.image_for_alert(text)
+                    source_image = disbalance.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Disbalance")
             if "IMBALANCE —" in text:
                 try:
-                    source_image = imbalance.image_for_alert(text)
+                    source_image = imbalance.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Imbalance/FVG")
             if "↕️ ZIGZAG —" in text:
                 try:
-                    source_image = zigzag_scanner.image_for_alert(text)
+                    source_image = zigzag_scanner.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения ZigZag")
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
                 try:
-                    source_image = patterns.image_for_alert(text)
+                    source_image = patterns.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения паттерна")
             if "🎯 AMD / POWER OF THREE" in text:
                 try:
-                    source_image = amd_power_of_three.image_for_alert(text)
+                    source_image = amd_power_of_three.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения AMD")
             if "🕯 CRT — CANDLE RANGE THEORY" in text:
                 try:
-                    source_image = crt_candle_range.image_for_alert(text)
+                    source_image = crt_candle_range.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения CRT")
             if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in text:
                 try:
-                    source_image = fibonacci_grid.image_for_alert(text)
+                    source_image = fibonacci_grid.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Fibonacci")
+            if "🎯 ATS REVERSAL POINT" in text:
+                try:
+                    source_image = ats_reversal_point.image_for_alert(source_text)
+                except Exception:
+                    log.exception("Подготовка изображения ATS Reversal Point")
             if "🧬 FIB + SMC —" in text:
                 try:
-                    source_image = fib_smc.image_for_alert(text)
+                    source_image = fib_smc.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Fib+SMC")
             if "🧱 РЕТЕСТ ORDER BLOCK" in text:
                 try:
-                    source_image = order_block.image_for_alert(text)
+                    source_image = order_block.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Order Block")
             if "🔄 BREAKER BLOCK ПОДТВЕРЖДЁН" in text:
                 try:
-                    source_image = breaker_block.image_for_alert(text)
+                    source_image = breaker_block.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Breaker Block")
             if "🏦 SMART MONEY 62-26" in text:
                 try:
-                    source_image = smart_money_62_26.image_for_alert(text)
+                    source_image = smart_money_62_26.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Smart Money 62-26")
             if "СНЯТИЕ ЛИКВИДНОСТИ" in text.upper():
                 try:
-                    source_image = liquidity_sweep.image_for_alert(text)
+                    source_image = liquidity_sweep.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения снятия ликвидности")
             if "РЕТЕСТ" in text.upper() and "ORDER BLOCK" not in text.upper() and "УРОВНЯ" not in text.upper():
                 try:
-                    source_image = retest_confirmation.image_for_alert(text)
+                    source_image = retest_confirmation.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Retest")
             if "⛓️ CHAIN ENTRY" in text:
                 try:
-                    source_image = chain_entries.image_for_alert(text)
+                    source_image = chain_entries.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Chain Entry")
             if "📅 ПРОБОЙ МАКСИМУМА ДНЯ" in text or "📅 ПРОБОЙ МИНИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МАКСИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МИНИМУМА ДНЯ" in text:
                 try:
-                    source_image = daily_high_low.image_for_alert(text)
+                    source_image = daily_high_low.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Daily High/Low")
             if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
                 try:
-                    source_image = accumulation_distribution.image_for_alert(text)
+                    source_image = accumulation_distribution.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения фазы накопления/распределения")
             if any(tag in text for tag in (
@@ -1043,7 +1057,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 "🔄 СМЕНА РОЛИ УРОВНЯ", "❌ УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН",
             )):
                 try:
-                    source_image = levels.image_for_alert(text)
+                    source_image = levels.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Levels")
             if source_image is not None:
@@ -1061,7 +1075,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     patterns.mark_card_delivered(text)
             else:
                 await _send_parts(context.application, int(chat_id), text)
-            delivered_sources = [text]
+            delivered_sources = [source_text]
             for source_text in delivered_sources:
                 if "↕️ ZIGZAG —" in source_text:
                     try:
