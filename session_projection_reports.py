@@ -15,7 +15,7 @@ import briefing
 import echo_projection
 import news as newsmod
 import next_pivot_projection
-from analysis import closed_candles
+from analysis import closed_candles, currency_strength
 
 log = logging.getLogger("fxbot.session_projections")
 
@@ -35,14 +35,21 @@ def _pair_events(symbol: str, events: list[newsmod.NewsEvent]) -> list[newsmod.N
             and (event.impact in ("HIGH", "MEDIUM") or newsmod.is_briefing_low_watch(event))]
 
 
-def _news_context(symbol: str, events: list[newsmod.NewsEvent], confidence: int | None) -> dict:
+def _news_context(symbol: str, events: list[newsmod.NewsEvent], confidence: int | None,
+                  hours: int | None = None) -> dict:
     relevant = _pair_events(symbol, events)
+    if hours is not None:
+        from datetime import timedelta
+        now_utc = datetime.now(timezone.utc)
+        end_utc = now_utc + timedelta(hours=max(1, hours))
+        relevant = [e for e in relevant if now_utc <= e.dt_utc <= end_utc]
     if not relevant:
         return {
             "confidence": confidence,
             "headline": "📰 До следующей сессии значимых новостей по паре нет.",
             "lines": [],
             "status": "Технический сценарий не зависит от запланированной новости.",
+            "risk": "NONE", "events": [],
         }
     penalty = 0
     lines = []
@@ -74,6 +81,8 @@ def _news_context(symbol: str, events: list[newsmod.NewsEvent], confidence: int 
         "headline": "📰 Новости, способные повлиять на пару:",
         "lines": lines,
         "status": status,
+        "risk": "HIGH" if has_high else "MEDIUM",
+        "events": relevant,
     }
 
 
@@ -109,33 +118,86 @@ def _neutral_image(symbol: str, module: str, by_tf: dict, reason: str) -> io.Byt
     return out
 
 
+
+def _minimal_echo_ray(symbol: str, by_tf: dict, side: str) -> io.BytesIO:
+    """Last-resort image; rendering failure must not block a session card."""
+    from PIL import Image, ImageDraw, ImageFont
+    image = Image.new("RGB", (1200, 720), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 25)
+    except OSError:
+        font = ImageFont.load_default(size=25)
+    bars = closed_candles(by_tf.get("H1") or [], 60)[-30:]
+    left, right, top, bottom = 80, 1120, 100, 590
+    if bars:
+        lo, hi = min(b.low for b in bars), max(b.high for b in bars); span=max(hi-lo,1e-9)
+        step=(right-left)*.72/max(1,len(bars)-1)
+        pts=[(left+i*step,bottom-(b.close-lo)/span*(bottom-top)) for i,b in enumerate(bars)]
+        if len(pts)>1: draw.line(pts, fill="#8d98aa", width=3)
+        sx,sy=pts[-1]
+    else: sx,sy=820,350
+    ex=min(right,sx+230); ey=max(top,min(bottom,sy+(-90 if side=="LONG" else 90)))
+    color="#42e889" if side=="LONG" else "#ff6575"
+    draw.line((sx,sy,ex,ey),fill=color,width=7); draw.ellipse((ex-7,ey-7,ex+7,ey+7),fill=color)
+    draw.text((80,35),f"{symbol} · ЭХО {side} · резервный луч",fill="#f1f5fb",font=font)
+    out=io.BytesIO(); out.name=f"echo_minimal_{symbol.replace('/', '')}.png"
+    image.save(out,format="PNG"); out.seek(0); return out
+
 def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
-                 current_name: str, next_name: str) -> dict:
-    checkpoints = sorted(set((1, max(1, hours // 2), hours)))
-    result = echo_projection.analyze(symbol, by_tf, checkpoints)
+                 current_name: str, next_name: str, strength: dict | None = None) -> dict:
+    # Вся оставшаяся сессия разбита на контрольные участки.
+    # Последняя точка всегда совпадает с границей следующей сессии.
+    checkpoints = sorted(set((
+        max(1, int(round(hours * 0.25))),
+        max(1, int(round(hours * 0.50))),
+        max(1, int(round(hours * 0.75))),
+        hours,
+    )))
+    result = echo_projection.analyze(symbol, by_tf, checkpoints, strength=strength or {})
     weak = False
-    if not result:
-        result = echo_projection.analyze(
-            symbol, by_tf, checkpoints,
-            minimum_analogs_override=12,
-            max_distance_override=999.0,
-            minimum_confidence_override=.50,
-        )
-        weak = bool(result)
-    news = _news_context(symbol, events, result["confidence"] if result else None)
+    news = _news_context(symbol, events, result["confidence"] if result else None, hours)
     if result:
         side, icon = result["side"], ("🟢" if result["side"] == "LONG" else "🔴")
         values = result.get("horizons") or {}
-        route = " · ".join(f"через {h}ч: {values.get(str(h), 0)}%" for h in checkpoints)
+        route = " · ".join(f"+{h}ч: {values.get(str(h), 0)}%" for h in checkpoints)
         confidence = news["confidence"]
-        scenario = [f"Направление: {side} {icon}",
+        endpoint = result.get("session_end_probability", values.get(str(hours), 0))
+        path = result.get("expected_by_horizon") or {}
+        signed = [float(path.get(str(h), 0.0)) for h in checkpoints]
+        turns = sum(1 for a, b in zip(signed, signed[1:])
+                    if (b-a) * (1 if side == "LONG" else -1) < 0)
+        shape = "волна с вероятным откатом" if turns else "направленное движение"
+        high_news = [e for e in news.get("events", []) if e.impact == "HIGH"]
+        if high_news:
+            first_news = high_news[0]
+            news_split = (f"до {first_news.local_hm} — техническая траектория; "
+                          "после новости — участок повышенного риска")
+        elif news.get("risk") == "MEDIUM":
+            news_split = "средние новости учтены снижением надёжности траектории"
+        else:
+            news_split = "значимого новостного разрыва нет"
+        scenario = [f"Направление до следующей сессии: {side} {icon}",
+                    f"Вероятность направления у границы сессии: {endpoint}%",
+                    f"Форма ожидаемого пути: {shape}",
+                    f"Новостной слой: {news_split}",
                     *((["Статус: 🟡 СЛАБАЯ ОЦЕНОЧНАЯ ТРАЕКТОРИЯ"] if weak else [])),
-                    f"Техническая вероятность с учётом новостного риска: {confidence}%",
-                    f"Контрольные точки: {route}",
+                    f"Общая надёжность с учётом контекста/новостей: {confidence}%",
+                    f"Траектория внутри сессии: {route}",
                     f"Исторических аналогов: {result['sample']}"]
         chart_result = dict(result)
         chart_result["weak"] = weak
-        image = echo_projection.render_chart(chart_result, by_tf)
+        chart_result["news_risk"] = news.get("risk", "NONE")
+        chart_result["news_markers"] = [
+            {"time": e.local_hm, "impact": e.impact, "currency": e.currency,
+             "title": newsmod.translate_title(e.title)}
+            for e in news.get("events", [])
+        ]
+        try:
+            image = echo_projection.render_chart(chart_result, by_tf)
+        except Exception:
+            log.exception("ECHO_CHART_FAILED symbol=%s; using minimal ray", symbol)
+            image = _minimal_echo_ray(symbol, by_tf, side)
     else:
         scenario = ["Направление: НЕЙТРАЛЬНО 🟡",
                     "Вероятность: недостаточно надёжных исторических совпадений"]
@@ -185,6 +247,12 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
     session_id = briefing.briefing_id()
     delivered = state.setdefault("session_projection_delivered", {})
     current_name, next_name, hours = _session_context()
+    try:
+        h1_market = {symbol: (market.get(symbol) or {}).get("H1") or [] for symbol in cfg.PAIRS}
+        strength = currency_strength(h1_market, 8)
+    except Exception:
+        log.exception("ECHO_STRENGTH_CONTEXT_FAILED; continuing without strength")
+        strength = {}
     reports = []
     for module in ("echo", "pivot"):
         for symbol in cfg.PAIRS:
@@ -193,7 +261,7 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
                 continue
             by_tf = market.get(symbol) or {}
             try:
-                report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name)
+                report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name, strength)
                           if module == "echo" else
                           _pivot_report(symbol, by_tf, events, hours, current_name, next_name))
                 report["key"] = key

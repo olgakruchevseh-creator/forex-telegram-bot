@@ -15,7 +15,7 @@ from pathlib import Path
 from statistics import median
 
 import config as cfg
-from analysis import Candle, closed_candles
+from analysis import Candle, closed_candles, analyze_tf, atr as calc_atr
 
 log = logging.getLogger(__name__)
 
@@ -76,9 +76,71 @@ def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return math.sqrt(sum(w*(a-b)**2 for a, b, w in zip(left, right, weights)))
 
 
+
+def _side_of_view(view) -> int:
+    if not view:
+        return 0
+    return 1 if view.bias > 0 else (-1 if view.bias < 0 else 0)
+
+
+def _context_score(symbol: str, by_tf: dict, side: int, strength: dict[str, float] | None = None, dxy_bias: int = 0) -> dict:
+    """Independent context check. Missing inputs are neutral, never fatal."""
+    tf_minutes = {"D1": 1440, "H4": 240, "H1": 60}
+    tf_sides = {}
+    adx_h1 = 0.0
+    for tf in ("D1", "H4", "H1"):
+        try:
+            bars = closed_candles(by_tf.get(tf) or [], tf_minutes[tf])
+            view = analyze_tf(tf, tf, bars) if len(bars) >= 20 else None
+            tf_sides[tf] = _side_of_view(view)
+            if tf == "H1" and view:
+                adx_h1 = float(view.adx or 0)
+        except Exception:
+            tf_sides[tf] = 0
+
+    aligned = sum(v == side for v in tf_sides.values())
+    opposed = sum(v == -side for v in tf_sides.values())
+    score = aligned * 7 - opposed * 9
+
+    # ZigZag is a separate structural check. Failure here must never stop Echo.
+    zz_side = 0
+    try:
+        import zigzag_scanner
+        zz = zigzag_scanner.analyze_symbol(symbol, by_tf, strength or {})
+        zz_side = int((zz.get("zigzag_directions") or {}).get("H4", 0))
+        score += 7 if zz_side == side else (-8 if zz_side == -side else 0)
+    except Exception:
+        pass
+
+    strength_gap = 0.0
+    try:
+        base, quote = symbol.split("/")
+        strength_gap = float((strength or {}).get(base, 0)) - float((strength or {}).get(quote, 0))
+        if abs(strength_gap) >= float(getattr(cfg, "ECHO_STRENGTH_MIN_GAP", .04)):
+            score += 6 if strength_gap * side > 0 else -7
+    except Exception:
+        pass
+
+    # DXY is only a confirming vote; absent DXY is neutral.
+    if dxy_bias and "USD" in symbol:
+        base = symbol.startswith("USD/")
+        expected_usd = side if base else -side
+        score += 4 if dxy_bias == expected_usd else -5
+
+    # Momentum/regime: reward a directional market, but never invent direction from ADX.
+    if adx_h1 >= 25:
+        score += 3
+    elif adx_h1 and adx_h1 < 16:
+        score -= 4
+
+    return {"score": score, "tf_sides": tf_sides, "zigzag_h4": zz_side,
+            "strength_gap": round(strength_gap, 4), "adx_h1": round(adx_h1, 1),
+            "dxy_bias": int(dxy_bias or 0)}
+
+
 def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
             minimum_analogs_override=None, max_distance_override=None,
-            minimum_confidence_override=None) -> dict | None:
+            minimum_confidence_override=None, strength=None, dxy_bias=0) -> dict | None:
     """Вернуть проекцию либо None при недостаточной/неубедительной выборке."""
     bars = closed_candles(by_tf.get("H1") or [], 60)
     horizons = tuple(int(x) for x in (
@@ -123,9 +185,11 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
         probabilities[horizon] = up_weight / total_weight if total_weight else .5
         expected[horizon] = median(moves) if moves else 0.0
 
-    # Средний вердикт не зависит от одной случайной будущей свечи аналога.
-    # Чем дальше горизонт, тем больше его вес в итоговом сессионном выводе.
-    horizon_weights = {h: float(index + 1) for index, h in enumerate(horizons)}
+    # ЭХО V3: главная цель — направление ДО СЛЕДУЮЩЕЙ СЕССИИ.
+    # Последняя точка — главный голос; промежуточные точки формируют траекторию.
+    end_h = horizons[-1]
+    horizon_weights = {h: (1.0 if h != end_h else max(4.0, float(len(horizons) + 1)))
+                       for h in horizons}
     total = sum(horizon_weights.values())
     long_probability = sum(probabilities[h]*horizon_weights[h] for h in horizons) / total
     side = "LONG" if long_probability >= .5 else "SHORT"
@@ -134,16 +198,43 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
                                else getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
     if confidence < minimum_confidence:
         return None
+
+    # Конец сессии обязан подтверждать итоговое направление.
+    # Один встречный участок внутри пути разрешён как вероятный откат.
+    side_sign = 1 if side == "LONG" else -1
+    endpoint_ok = (probabilities[end_h] >= .5) if side_sign > 0 else (probabilities[end_h] < .5)
+    if not endpoint_ok:
+        return None
+    aligned_h = sum(((probabilities[h] >= .5) if side_sign > 0 else (probabilities[h] < .5))
+                    for h in horizons)
+    if len(horizons) >= 3 and aligned_h < 2:
+        return None
+
+    context = _context_score(symbol, by_tf, side_sign, strength, dxy_bias)
+    # Blend historical probability with independent market context. Context can veto
+    # a weak analogue, but cannot manufacture a direction without analogues.
+    adjusted = int(round(confidence * 100 + max(-18, min(18, context["score"]))))
+    adjusted = max(50, min(95, adjusted))
+    hard_conflict = sum(v == -side_sign for v in context["tf_sides"].values()) >= 2
+    if context["zigzag_h4"] == -side_sign and hard_conflict:
+        return None
+    if adjusted < int(round(float(getattr(cfg, "ECHO_CONTEXT_MIN_SCORE", .68)) * 100)):
+        return None
     return {
         "symbol": symbol,
         "side": side,
-        "confidence": int(round(confidence*100)),
+        "confidence": adjusted,
+        "raw_confidence": int(round(confidence*100)),
+        "context": context,
         "sample": len(matches),
         "horizons": {
             str(h): int(round((probabilities[h] if side == "LONG" else 1-probabilities[h])*100))
             for h in horizons
         },
         "expected_atr": round(abs(expected[horizons[-1]]), 2),
+        "session_hours": int(end_h),
+        "session_end_probability": int(round(
+            (probabilities[end_h] if side == "LONG" else 1-probabilities[end_h]) * 100)),
         "expected_by_horizon": {str(h): round(expected[h], 4) for h in horizons},
         "atr": _atr_at(bars, len(bars)-1),
         "current": bars[-1].close,
@@ -241,7 +332,22 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
         draw.ellipse((point[0]-6, point[1]-6, point[0]+6, point[1]+6), fill=wave_color)
         draw.text((point[0]-12, bottom+12), f"+{h}h", fill="#c9d1df", font=small)
     weak_label = " · СЛАБАЯ ОЦЕНКА" if result.get("weak") else ""
-    draw.text((left, 22), f"{result['symbol']} · H1 · ЭХО {result['side']} {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
+    draw.text((left, 22), f"{result['symbol']} · ЭХО ДО СЛЕДУЮЩЕЙ СЕССИИ · {result['side']} {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
+    # News Risk Layer: заранее не угадываем факт новости, а явно помечаем
+    # участок, после которого траектория имеет повышенную неопределённость.
+    markers = result.get("news_markers") or []
+    if markers:
+        risk = result.get("news_risk", "MEDIUM")
+        label = "НОВОСТНОЙ РИСК: ВЫСОКИЙ" if risk == "HIGH" else "НОВОСТНОЙ РИСК: СРЕДНИЙ"
+        draw.rounded_rectangle((left, 58, min(right, left+430), 94), radius=10,
+                               fill="#2a2430dd", outline="#ffd44d", width=2)
+        draw.text((left+12, 64), label, fill="#ffd44d", font=small)
+        y = 105
+        for marker in markers[:3]:
+            draw.text((left, y),
+                      f"{marker.get('time','')} · {marker.get('currency','')} · {marker.get('impact','')}",
+                      fill="#ffdca0", font=small)
+            y += 25
     draw.text((left, height-55), f"Аналогов: {result['sample']} · вероятностная проекция, не гарантия", fill="#9aa4b5", font=small)
     output = io.BytesIO()
     output.name = f"echo_{result['symbol'].replace('/', '')}_{result['closed_h1'].replace(':', '-')}.png"

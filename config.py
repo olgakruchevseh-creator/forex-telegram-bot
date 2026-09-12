@@ -101,17 +101,20 @@ MASTER_REQUIRE_MODULE_TRIGGER = True
 MASTER_MAX_SIGNALS_PER_H1 = 2
 # Echo — историческая проекция, только внутренний фильтр Master Direction.
 ECHO_ENABLED = True
+ECHO_SESSION_MODE = True  # прогноз от текущей до следующей сессии
 ECHO_HORIZONS_H1 = (1, 2, 4, 8)
 ECHO_MIN_ANALOGS = 30
 ECHO_MAX_ANALOGS = 50
 ECHO_MAX_DISTANCE = 2.6
-ECHO_MIN_CONFIDENCE = 0.60
+ECHO_MIN_CONFIDENCE = 0.62
 # Только уверенная противоположная проекция блокирует торговую карточку.
 ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.75
 # Самостоятельный Echo: отдельная карточка с графиком, вне торгового лимита.
-ECHO_STANDALONE_ENABLED = True
-ECHO_ALERT_MIN_CONFIDENCE = 0.70
+ECHO_STANDALONE_ENABLED = False
+ECHO_ALERT_MIN_CONFIDENCE = 0.72
 ECHO_CHART_CANDLES = 40
+ECHO_CONTEXT_MIN_SCORE = 0.68
+ECHO_STRENGTH_MIN_GAP = 0.04
 # Сессионные Эхо и Next Pivot: по одной карточке на каждую из семи пар.
 # Они не входят в лимит обычных торговых уведомлений.
 SESSION_PROJECTIONS_ENABLED = True
@@ -322,3 +325,9 @@ NAVIGATOR_TIME_MIN_SAMPLES = 5
 NAVIGATOR_TIME_PULLBACK_MAX_H1 = 4
 NAVIGATOR_TIME_LOCAL_MAX_H1 = 3
 NAVIGATOR_TIME_IMPULSE_MAX_H1 = 6
+
+# Echo V4 — News Risk Layer
+ECHO_NEWS_RISK_ENABLED = True
+ECHO_NEWS_HIGH_PENALTY = 8
+ECHO_NEWS_CONTEXT_DEPENDENT_PENALTY = 12
+ECHO_NEWS_MEDIUM_PENALTY = 5
