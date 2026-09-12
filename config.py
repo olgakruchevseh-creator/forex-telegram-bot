@@ -307,6 +307,8 @@ PATTERN_MAIN_TFS = ["W1", "D1", "H4", "H1"]
 PATTERN_CONFIRM_TFS = ["M15", "M5"]
 PATTERN_CHART_IMAGES_ENABLED = True
 PATTERN_CHART_LOOKBACK = 55
+PATTERN_NEWS_BEFORE_MINUTES = 60
+PATTERN_NEWS_AFTER_MINUTES = 30
 # Гармоническая геометрия сама по себе не является торговым сигналом.
 # Для отправки требуется подтвержденный импульс H1 и слом структуры M15,
 # поддержанные относительной силой валют.

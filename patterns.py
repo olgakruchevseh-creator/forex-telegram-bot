@@ -6,10 +6,11 @@ import io
 import logging
 import os
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config as cfg
+import news as newsmod
 from analysis import Candle, analyze_tf, atr, closed_candles
 
 log = logging.getLogger("fxbot.patterns")
@@ -445,7 +446,7 @@ def _pattern_allowed(p: Pattern, context_side: str) -> bool:
     return bool(context_side) and p.side == context_side
 
 
-def _fmt(symbol: str, p: Pattern, context_side: str = "") -> str:
+def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "") -> str:
     price = f"{p.level:.3f}" if "JPY" in symbol else f"{p.level:.5f}"
     side_icon = "🟢" if p.side == "LONG" else "🔴"
     if p.name in CANDLE_PATTERN_NAMES and context_side and p.side != context_side:
@@ -462,7 +463,9 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "") -> str:
         "━━━━━━━━━━━━━━━━━━", "🧩 ПАТТЕРН ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {symbol}", f"Паттерн: {p.name}", f"Таймфрейм: {p.tf} ({TF_LABEL[p.tf]})",
         f"Направление: {p.side} {side_icon}", f"Качество: {p.quality}/100", f"Вероятность: {p.confidence}%",
-        f"Ключевой уровень: {price}", "", f"Факт: {p.fact}", f"Что означает: {meaning}."
+        f"Ключевой уровень: {price}",
+        *( [f"Новости: {news_note}"] if news_note else [] ),
+        "", f"Факт: {p.fact}", f"Что означает: {meaning}."
     ])
 
 
@@ -576,69 +579,99 @@ def _confirmed_by_next_close(pattern: Pattern, trigger_close: float, bar: Candle
     return bar.close >= trigger_close if pattern.side == "LONG" else bar.close <= trigger_close
 
 
+def _pattern_news_context(symbol: str, now_utc: datetime | None = None, events=None) -> tuple[str, int]:
+    """Контекст новостей для паттерна: не отменяет геометрию, но помечает риск ложного пробоя."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    try:
+        base, quote = symbol.split("/")
+        currencies = {base, quote}
+        events = newsmod.load_events() if events is None else events
+    except Exception:
+        log.exception("Новости для паттернов %s", symbol)
+        return "календарь временно недоступен; подтверждение основано на цене", 0
+    nearby = []
+    for event in events:
+        if event.currency not in currencies or event.impact not in ("HIGH", "MEDIUM"):
+            continue
+        minutes = int((event.dt_utc - now_utc).total_seconds() / 60)
+        before = int(getattr(cfg, "PATTERN_NEWS_BEFORE_MINUTES", 60))
+        after = int(getattr(cfg, "PATTERN_NEWS_AFTER_MINUTES", 30))
+        if -after <= minutes <= before:
+            nearby.append((abs(minutes), minutes, event))
+    if not nearby:
+        return "рядом нет важных запланированных событий по валютам пары", 0
+    _, minutes, event = min(nearby, key=lambda item: item[0])
+    title = newsmod.translate_title(event.title)
+    when = (f"через {minutes} мин" if minutes >= 0 else f"{abs(minutes)} мин назад")
+    if event.impact == "HIGH":
+        return f"ВЫСОКИЙ РИСК · {event.currency} · {title} · {when}; возможен ложный пробой/резкий пересмотр", 6
+    return f"средний риск · {event.currency} · {title} · {when}", 3
+
+
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
+    """Скан каждые несколько минут; готовая фигура отправляется в первый скан после её закрытия.
+
+    Никакой дополнительной M15/M5 свечи после уже завершённого паттерна не ждём:
+    это устраняет запаздывание. Незавершённые фигуры остаются внутренними и наружу не идут.
+    """
     _PENDING_CARDS.clear()
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
-    pending = state.setdefault("pending_confirmation", {})
-    messages = []
+    observed = state.setdefault("observed", {})
+    messages: list[str] = []
+    strength = strength or {}
+    now_utc = datetime.now(timezone.utc)
+    try:
+        pattern_events = newsmod.load_events()
+    except Exception:
+        log.exception("Новости для сканера паттернов")
+        pattern_events = []
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
             context_side = _market_context_side(by_tf)
-            # Сначала завершаем ранее найденные сетапы. Первая более поздняя
-            # закрытая свеча либо подтверждает паттерн, либо молча снимает его.
-            for key, raw in list(pending.items()):
-                if raw.get("symbol") != symbol:
-                    continue
-                pattern = Pattern(**raw["pattern"])
-                bar = _confirmation_bar(pattern, by_tf)
-                if bar is None:
-                    continue
-                pending.pop(key, None)
-                sent[key] = pattern.dt
-                if _confirmed_by_next_close(pattern, float(raw.get("trigger_close") or 0), bar):
-                    text = _fmt(symbol, pattern, context_side)
-                    text = text.replace(
-                        "\nФакт:",
-                        f"\nПодтверждение удержания: закрытая {_confirmation_tf(pattern.tf)}-свеча\n\nФакт:",
-                        1,
-                    )
-                    messages.append(text)
-                    _PENDING_CARDS[text] = (symbol, pattern, by_tf)
-
             candidates = scan_symbol(symbol, by_tf)
-            strength = strength or {}
             candidates = [
                 p for p in candidates
                 if not p.name.startswith("Гармонический")
                 or harmonic_confirmation(symbol, p.side, by_tf, strength)
             ]
             candidates = [p for p in candidates if _pattern_allowed(p, context_side)]
+
+            # Внутренний журнал наблюдения: бот знает, какую свежую геометрию видел,
+            # но пользователь получает только полностью подтверждённую фигуру.
+            observed[symbol] = [
+                {"name": p.name, "side": p.side, "tf": p.tf, "dt": p.dt, "level": p.level}
+                for p in candidates[:8]
+            ]
             if first:
-                # Mark the complete historical snapshot, not only the first
-                # candidate per pair. Otherwise old patterns leak out one by
-                # one on every following scan.
                 for p in candidates:
                     sent[f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"] = p.dt
                 continue
+
+            news_note, penalty = _pattern_news_context(symbol, now_utc, pattern_events)
             for p in candidates:
                 key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
-                if key in sent or key in pending:
+                if key in sent:
                     continue
-                pending[key] = {
-                    "symbol": symbol,
-                    "pattern": asdict(p),
-                    "trigger_close": _trigger_close(p, by_tf),
-                }
+                # Новости не стирают уже сформированную фигуру. Они снижают оценку
+                # уверенности и явно предупреждают о риске ложного продолжения.
+                if penalty:
+                    p = Pattern(p.name, p.side, p.tf, p.quality, max(1, p.confidence-penalty),
+                                p.fact, p.level, p.dt)
+                text = _fmt(symbol, p, context_side, news_note)
+                messages.append(text)
+                _PENDING_CARDS[text] = (symbol, p, by_tf)
+                sent[key] = p.dt
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:
             log.exception("Паттерны %s", symbol)
     state["bootstrapped"] = True
-    # Ограничиваем файл состояния, не теряя свежую защиту от повторов.
     if len(sent) > 1500:
         state["sent"] = dict(list(sent.items())[-1200:])
-    state["pending_confirmation"] = pending
+    # Старое ожидание следующей свечи больше не используется.
+    state.pop("pending_confirmation", None)
+    state["observed"] = observed
     _save(state)
     return messages
