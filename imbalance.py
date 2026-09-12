@@ -37,6 +37,9 @@ class FvgZone:
     retest_sent: bool = False
     invalid: bool = False
     last_seen_dt: str = ""
+    gap_atr: float = 0.0
+    impulse_atr: float = 0.0
+    fill_pct: float = 0.0
 
 
 def _path() -> Path:
@@ -93,7 +96,11 @@ def newest_fvg(symbol: str, tf: str, bars: list[Candle]) -> FvgZone | None:
     else:
         return None
     gap_atr = (high - low) / av
-    if not directional or gap_atr < min_gap_atr or body_ratio < 0.55:
+    impulse_atr = body / av
+    min_impulse_atr = float(getattr(cfg, "IMBALANCE_MIN_IMPULSE_ATR", 0.80))
+    min_body_ratio = float(getattr(cfg, "IMBALANCE_MIN_BODY_RATIO", 0.60))
+    if (not directional or gap_atr < min_gap_atr or body_ratio < min_body_ratio
+            or impulse_atr < min_impulse_atr):
         return None
     size_pts = min(18, int(gap_atr * 24))
     impulse_pts = min(14, int(body / av * 8))
@@ -102,6 +109,7 @@ def newest_fvg(symbol: str, tf: str, bars: list[Candle]) -> FvgZone | None:
     return FvgZone(
         _zone_id(symbol, tf, side, c.dt), symbol, tf, side, low, high, c.dt,
         quality, max(70, min(92, quality - 4)), [], 0.0, last_seen_dt=c.dt,
+        gap_atr=gap_atr, impulse_atr=impulse_atr,
     )
 
 
@@ -143,7 +151,9 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
         f"Таймфрейм: {zone.tf}", f"Направление: {zone.side}",
         f"Зона FVG: {_price(zone.symbol, zone.low)}–{_price(zone.symbol, zone.high)}",
         f"Состояние: {zone.status}", f"Согласованные ТФ: {' · '.join(zone.aligned)}",
-        f"Разница силы валют: {zone.strength_gap:+.2f}", f"Качество: {zone.quality}/100",
+        f"Разница силы валют: {zone.strength_gap:+.2f}",
+        f"Размер FVG: {zone.gap_atr:.2f} ATR · импульс: {zone.impulse_atr:.2f} ATR",
+        f"Заполнение зоны: {zone.fill_pct:.0f}%", f"Качество: {zone.quality}/100",
         f"Вероятность: {zone.confidence}%", "", f"Факт: {fact}"
     ])
 
@@ -233,18 +243,29 @@ def _update_zone(zone: FvgZone, bars: list[Candle]) -> str:
     if c.dt == zone.last_seen_dt:
         return ""
     zone.last_seen_dt = c.dt
+    width = max(zone.high - zone.low, 1e-12)
+    min_penetration = float(getattr(cfg, "IMBALANCE_RETEST_MIN_PENETRATION", 0.20))
+    min_rejection_body = float(getattr(cfg, "IMBALANCE_RETEST_MIN_BODY_RATIO", 0.45))
+    body_ratio = abs(c.close - c.open) / max(c.high - c.low, 1e-12)
     if zone.side == "LONG":
+        penetration = max(0.0, min(1.0, (zone.high - c.low) / width)) if c.low <= zone.high else 0.0
+        zone.fill_pct = max(zone.fill_pct, penetration * 100.0)
+        # A close through the far edge means the bullish inefficiency failed.
         if c.close < zone.low:
             zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"
             return ""
-        if not zone.retest_sent and c.low <= zone.high and c.close > zone.high and c.close > c.open:
+        if (not zone.retest_sent and penetration >= min_penetration and c.close > zone.high
+                and c.close > c.open and body_ratio >= min_rejection_body):
             zone.retest_sent, zone.status = True, "РЕТЕСТ ПОДТВЕРЖДЁН"
             return "retest"
     else:
+        penetration = max(0.0, min(1.0, (c.high - zone.low) / width)) if c.high >= zone.low else 0.0
+        zone.fill_pct = max(zone.fill_pct, penetration * 100.0)
         if c.close > zone.high:
             zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"
             return ""
-        if not zone.retest_sent and c.high >= zone.low and c.close < zone.low and c.close < c.open:
+        if (not zone.retest_sent and penetration >= min_penetration and c.close < zone.low
+                and c.close < c.open and body_ratio >= min_rejection_body):
             zone.retest_sent, zone.status = True, "РЕТЕСТ ПОДТВЕРЖДЁН"
             return "retest"
     return ""

@@ -62,5 +62,22 @@ class ImbalanceTests(unittest.TestCase):
             self.assertEqual(imbalance.process_market({"EUR/USD": by_tf}, {"EUR": .2, "USD": 0}), [])
 
 
+    def test_weak_impulse_rejected(self):
+        bars = fvg_bars("LONG")
+        impulse = bars[-2]
+        bars[-2] = Candle(impulse.dt, 1.1001, 1.1012, 1.1000, 1.1008)
+        self.assertIsNone(imbalance.newest_fvg("EUR/USD", "H1", bars))
+
+    def test_retest_requires_meaningful_penetration(self):
+        zone = imbalance.newest_fvg("EUR/USD", "H1", fvg_bars("LONG"))
+        self.assertIsNotNone(zone)
+        # Tiny touch (<20% of the zone) must not be promoted to a retest.
+        width = zone.high - zone.low
+        dt = "2099-01-01 01:00:00"
+        c = Candle(dt, zone.high + width*.20, zone.high + width*.30, zone.high - width*.05, zone.high + width*.25)
+        self.assertEqual(imbalance._update_zone(zone, [c]), "")
+        self.assertFalse(zone.retest_sent)
+
+
 if __name__ == "__main__":
     unittest.main()
