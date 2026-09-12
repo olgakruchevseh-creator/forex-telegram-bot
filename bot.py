@@ -34,6 +34,7 @@ import zigzag_scanner
 import disbalance
 import imbalance
 import accumulation_distribution
+import consolidation_zone
 import amd_power_of_three
 import crt_candle_range
 import movement_progress
@@ -725,6 +726,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля Imbalance/FVG")
 
+        if getattr(cfg, "CONSOLIDATION_ZONE_ENABLED", True):
+            try:
+                for text in consolidation_zone.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля Consolidation Zone")
+
         if getattr(cfg, "ACCUMULATION_DISTRIBUTION_ENABLED", True):
             try:
                 for text in accumulation_distribution.process_market(market, strength):
@@ -1044,6 +1052,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = daily_high_low.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Daily High/Low")
+            if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in text:
+                try:
+                    source_image = consolidation_zone.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Consolidation Zone")
             if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
                 try:
                     source_image = accumulation_distribution.image_for_alert(source_text)
@@ -1117,6 +1130,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         chain_entries.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Chain Entry")
+                if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in source_text:
+                    try:
+                        consolidation_zone.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Consolidation Zone")
                 if "🚀 ВЫХОД ИЗ ФАЗЫ" in source_text or "📦 ФАЗА " in source_text:
                     try:
                         accumulation_distribution.mark_delivered(source_text)
