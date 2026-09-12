@@ -38,6 +38,7 @@ import amd_power_of_three
 import movement_progress
 import liquidity_sweep
 import order_block
+import smart_money_62_26
 import daily_high_low
 import chain_entries
 import retest_confirmation
@@ -741,6 +742,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля Order Block")
 
+        if getattr(cfg, "SMART_MONEY_62_26_ENABLED", True):
+            try:
+                for text in smart_money_62_26.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля Smart Money 62-26")
+
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
                 for text in daily_high_low.process_market(market, strength):
@@ -931,6 +939,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = order_block.image_for_alert(text)
                 except Exception:
                     log.exception("Подготовка изображения Order Block")
+            if "🏦 SMART MONEY 62-26" in text:
+                try:
+                    source_image = smart_money_62_26.image_for_alert(text)
+                except Exception:
+                    log.exception("Подготовка изображения Smart Money 62-26")
             if "СНЯТИЕ ЛИКВИДНОСТИ" in text.upper():
                 try:
                     source_image = liquidity_sweep.image_for_alert(text)
