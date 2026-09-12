@@ -100,6 +100,45 @@ def _sequence_side(sequence: str) -> int:
     return 0
 
 
+
+
+def _ensemble_zigzag(bars: list, tf: str, zigzag_fn) -> dict:
+    """Три масштаба ZigZag: быстрый, базовый и медленный.
+
+    Сигнальное направление существует только при согласии минимум двух
+    независимых масштабов. Это оставляет быстрый ZigZag чувствительным, но
+    не позволяет ему в одиночку перевернуть итоговую структуру.
+    """
+    base_pct = float(cfg.ZIGZAG_PCT.get(tf, 0.18))
+    factors = tuple(getattr(cfg, "ZIGZAG_ENSEMBLE_FACTORS", (0.72, 1.0, 1.45)))
+    names = ("fast", "base", "slow")
+    variants = {}
+    votes = []
+    for name, factor in zip(names, factors):
+        swings = zigzag_fn(bars, base_pct * float(factor), cfg.ZIGZAG_MIN_BARS)
+        side = _swing_side(swings) or _sequence_side(_sequence(swings))
+        variants[name] = {"swings": swings, "side": side, "sequence": _sequence(swings)}
+        if side:
+            votes.append(side)
+    long_votes, short_votes = votes.count(1), votes.count(-1)
+    side = 1 if long_votes >= 2 else (-1 if short_votes >= 2 else 0)
+    agreement = max(long_votes, short_votes)
+    return {"side": side, "agreement": agreement, "variants": variants}
+
+
+def _ensemble_quality(ensemble: dict, adx_value: float = 0.0) -> int:
+    """Консервативная оценка качества, не являющаяся вероятностью сделки."""
+    agreement = int((ensemble or {}).get("agreement") or 0)
+    if agreement < 2:
+        return 0
+    score = 72 if agreement == 2 else 88
+    if adx_value >= 25:
+        score += 7
+    elif adx_value >= 22:
+        score += 4
+    return min(95, score)
+
+
 def _candle_run(bars: list, need: int, min_body_atr: float = 0.0) -> tuple[int, str]:
     """Направление непрерывной серии закрытых свечей и время её начала."""
     if len(bars) < need:
@@ -130,7 +169,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
     # Lazy import avoids a circular import: analysis uses the same primitives.
     from analysis import analyze_tf, closed_candles, zigzag
 
-    views, swings_by_tf, bars_by_tf = {}, {}, {}
+    views, swings_by_tf, bars_by_tf, ensembles_by_tf = {}, {}, {}, {}
     for tf in SCAN_TFS:
         bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
         if len(bars) < 20:
@@ -139,12 +178,21 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         if view:
             views[tf] = view
             bars_by_tf[tf] = bars
-            swings_by_tf[tf] = zigzag(bars, cfg.ZIGZAG_PCT.get(tf, 0.18), cfg.ZIGZAG_MIN_BARS)
+            ensemble = _ensemble_zigzag(bars, tf, zigzag)
+            ensembles_by_tf[tf] = ensemble
+            # Базовый путь сохраняется для графика/экстремумов; решение ниже
+            # принимает только ансамбль, а не один чувствительный вариант.
+            swings_by_tf[tf] = ensemble["variants"]["base"]["swings"]
 
     def direction(tf: str) -> int:
-        structural = _swing_side(swings_by_tf.get(tf) or [])
+        ensemble = ensembles_by_tf.get(tf) or {}
+        structural = int(ensemble.get("side") or 0)
         if structural:
             return structural
+        # При наличии ZigZag-данных конфликт масштабов трактуется как RANGE,
+        # а не маскируется индикаторной фазой. Это ключевой фильтр ложных входов.
+        if ensemble:
+            return 0
         view = views.get(tf)
         return _side(view.structure, view.phase) if view else 0
 
@@ -241,6 +289,16 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         },
         "swing_profiles": profiles,
         "profile_confirmation": profile_consensus(profiles, side or main_side),
+        "zigzag_ensemble": {
+            tf: {
+                "side": int((ensembles_by_tf.get(tf) or {}).get("side") or 0),
+                "agreement": int((ensembles_by_tf.get(tf) or {}).get("agreement") or 0),
+                "quality": _ensemble_quality(ensembles_by_tf.get(tf) or {}, getattr(views.get(tf), "adx", 0.0)),
+                "fast": ((ensembles_by_tf.get(tf) or {}).get("variants") or {}).get("fast", {}).get("sequence", ""),
+                "base": ((ensembles_by_tf.get(tf) or {}).get("variants") or {}).get("base", {}).get("sequence", ""),
+                "slow": ((ensembles_by_tf.get(tf) or {}).get("variants") or {}).get("slow", {}).get("sequence", ""),
+            } for tf in views
+        },
         "last_dt": max((bars[-1].dt for bars in bars_by_tf.values() if bars), default=""),
     }
 
@@ -282,6 +340,9 @@ def format_message(s: dict) -> str:
         f"Структура {s['tf']}: {s['structure']}",
         f"Фаза: {s['phase']} · ADX {s['adx']}",
     ]
+    ensemble = (s.get("zigzag_ensemble") or {}).get(s.get("tf")) or {}
+    if ensemble.get("agreement"):
+        lines.append(f"Фильтр ZigZag: {ensemble['agreement']}/3 масштаба согласны · качество {ensemble.get('quality', 0)}/100")
     profile = (s.get("swing_profiles") or {}).get("H1") or (s.get("swing_profiles") or {}).get("H4")
     if profile:
         relation = "выше" if profile.get("current_relation", 0) > 0 else ("ниже" if profile.get("current_relation", 0) < 0 else "у")
@@ -443,7 +504,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     _PENDING_CARDS.clear()
     state = _load()
     # Новая схема запускается тихо, чтобы после обновления не прислать историю.
-    first = not bool(state.get("bootstrapped")) or state.get("schema_version") != 3
+    first = not bool(state.get("bootstrapped")) or state.get("schema_version") != 4
     # Миграция старого состояния: ранее найденное ошибочно считалось доставленным.
     delivered = state.setdefault("delivered", dict(state.get("signals") or {}))
     pending = state.setdefault("pending", {})
@@ -487,6 +548,6 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
         except Exception:
             log.exception("ZigZag %s", symbol)
     state["bootstrapped"] = True
-    state["schema_version"] = 3
+    state["schema_version"] = 4
     _save(state)
     return messages

@@ -74,5 +74,16 @@ class ZigZagRebuildTests(unittest.TestCase):
         self.assertTrue(text.startswith("H1:"))
 
 
+    def test_ensemble_requires_two_matching_scales(self):
+        ens = zigzag_scanner._ensemble_zigzag(wave_bars(), "H1", zigzag)
+        self.assertIn(ens["side"], (-1, 0, 1))
+        if ens["side"]:
+            self.assertGreaterEqual(ens["agreement"], 2)
+
+    def test_ensemble_quality_is_zero_without_consensus(self):
+        self.assertEqual(0, zigzag_scanner._ensemble_quality({"agreement": 1}, 40))
+
+
+
 if __name__ == "__main__":
     unittest.main()
