@@ -1,5 +1,6 @@
 """Сканер Imbalance/FVG: трёхсвечные неэффективности и подтверждённые ретесты."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import io
@@ -260,7 +261,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         zone = FvgZone(**raw["zone"])
         text = format_message(zone, raw["event"])
         messages.append(text)
-        _PENDING_CARDS[text] = (zone, raw["event"], market.get(zone.symbol) or {})
+        _PENDING_CARDS[text] = (zone, raw["event"], freeze_by_tf(market.get(zone.symbol) or {}))
     for symbol in cfg.PAIRS:
         try:
             closed_map = _closed(market.get(symbol) or {})
@@ -273,7 +274,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     text = format_message(zone, "retest")
                     if text not in messages:
                         messages.append(text)
-                    _PENDING_CARDS[text] = (zone, "retest", market.get(symbol) or {})
+                    _PENDING_CARDS[text] = (zone, "retest", freeze_by_tf(market.get(symbol) or {}))
             for tf in MAIN_TFS:
                 zone = newest_fvg(symbol, tf, closed_map[tf])
                 if not zone or zone.zone_id in stored:
@@ -288,7 +289,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     text = format_message(zone, "new")
                     if text not in messages:
                         messages.append(text)
-                    _PENDING_CARDS[text] = (zone, "new", market.get(symbol) or {})
+                    _PENDING_CARDS[text] = (zone, "new", freeze_by_tf(market.get(symbol) or {}))
         except Exception:
             log.exception("Imbalance %s", symbol)
     state["bootstrapped"] = True

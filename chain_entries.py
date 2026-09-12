@@ -1,5 +1,6 @@
 """Цепные входы: новый BOS -> ретест пробитого уровня -> продолжение тренда."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import hashlib
@@ -264,7 +265,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             continue
         text = format_message(event, number)
         messages.append(text)
-        _PENDING_CARDS[text] = (event, market.get(event.get("symbol")) or {})
+        _PENDING_CARDS[text] = (event, freeze_by_tf(market.get(event.get("symbol")) or {}))
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -287,7 +288,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                             "event": event, "number": chain[count_key],
                         }
                         messages.append(text)
-                        _PENDING_CARDS[text] = (event, by_tf)
+                        _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))
                 bos = detect_bos(symbol, tf, bars)
                 if bos and (not existing or bos.setup_id != existing.setup_id):
                     setups[key] = bos

@@ -1,5 +1,6 @@
 """Сканер дисбаланса: сильное направленное смещение цены, не FVG."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import io
@@ -254,7 +255,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         signal = Signal(**raw)
         text = format_message(signal)
         messages.append(text)
-        _PENDING_CARDS[text] = (signal, market.get(signal.symbol) or {})
+        _PENDING_CARDS[text] = (signal, freeze_by_tf(market.get(signal.symbol) or {}))
     for symbol in cfg.PAIRS:
         try:
             signal = analyze_symbol(symbol, market.get(symbol) or {}, strength)
@@ -269,7 +270,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 pending[key] = signal.__dict__
                 text = format_message(signal)
                 messages.append(text)
-                _PENDING_CARDS[text] = (signal, market.get(symbol) or {})
+                _PENDING_CARDS[text] = (signal, freeze_by_tf(market.get(symbol) or {}))
         except Exception:
             log.exception("Дисбаланс %s", symbol)
     state["bootstrapped"] = True

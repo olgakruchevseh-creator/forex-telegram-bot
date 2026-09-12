@@ -1,5 +1,6 @@
 """Подтверждённый сканер свечных, структурных и гармонических паттернов."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import io
@@ -662,7 +663,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                                 p.fact, p.level, p.dt)
                 text = _fmt(symbol, p, context_side, news_note)
                 messages.append(text)
-                _PENDING_CARDS[text] = (symbol, p, by_tf)
+                _PENDING_CARDS[text] = (symbol, p, freeze_by_tf(by_tf))
                 sent[key] = p.dt
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:

@@ -1,5 +1,6 @@
 """Отдельный ZigZag-сканер: структура, откат и подтверждённое нарушение."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import io
@@ -544,7 +545,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 if current.get("fingerprint") != fingerprint:
                     pending[symbol] = {"fingerprint": fingerprint, "message": format_message(snap)}
                 messages.append(pending[symbol]["message"])
-                _PENDING_CARDS[pending[symbol]["message"]] = (dict(snap), by_tf)
+                _PENDING_CARDS[pending[symbol]["message"]] = (dict(snap), freeze_by_tf(by_tf))
         except Exception:
             log.exception("ZigZag %s", symbol)
     state["bootstrapped"] = True

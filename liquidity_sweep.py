@@ -1,5 +1,6 @@
 """Снятие ликвидности с последующим подтверждённым CHOCH/BOS на H1."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import logging
@@ -222,7 +223,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
 
                     messages.append(message)
 
-                    _LAST_CHART_CARDS[message] = (event, by_tf)
+                    _LAST_CHART_CARDS[message] = (event, freeze_by_tf(by_tf))
             fresh = detect_new_sweep(symbol, d1, h4, h1)
             if fresh and fresh.setup_id not in setups:
                 # Один активный sweep каждого направления на пару.

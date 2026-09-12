@@ -1,5 +1,6 @@
 """Строгий структурный ретест: BOS -> удержание -> отдельный возврат к уровню."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 _RETEST_CHART_CACHE = {}
 
 import json
@@ -209,6 +210,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     if event and not first:
                         message = format_message(event)
 
+                        _RETEST_CHART_CACHE[message] = (event, freeze_by_tf(by_tf))
                         messages.append(message)
 
                 bars = _bars(by_tf, tf)
@@ -296,6 +298,7 @@ def image_for_alert(text: str):
     """One-shot chart for the exact confirmed structural Retest alert."""
     if not getattr(cfg, "RETEST_CHART_ENABLED", True):
         return None
+    card = _RETEST_CHART_CACHE.pop(text, None)
     if not card:
         return None
     event, by_tf = card

@@ -1,5 +1,6 @@
 """Максимум/минимум последнего закрытого дня и подтверждённые реакции цены."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import io
 import json
@@ -223,7 +224,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if not first:
                     text = format_message(event)
                     messages.append(text)
-                    _PENDING_CARDS[text] = (event, by_tf)
+                    _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))
         except Exception:
             log.exception("Дневной максимум/минимум %s", symbol)
     state["bootstrapped"] = True

@@ -1,5 +1,6 @@
 """Фазы накопления/распределения по цене и подтверждённый выход из диапазона."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import hashlib
@@ -269,7 +270,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         phase = Phase(**raw_phase)
         text = format_message(phase, item.get("event", "exit"))
         messages.append(text)
-        _PENDING_CARDS[text] = (phase, market.get(phase.symbol) or {})
+        _PENDING_CARDS[text] = (phase, freeze_by_tf(market.get(phase.symbol) or {}))
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -282,7 +283,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                     pending[digest] = {"phase": asdict(phase), "event": "exit"}
                     messages.append(text)
-                    _PENDING_CARDS[text] = (phase, by_tf)
+                    _PENDING_CARDS[text] = (phase, freeze_by_tf(by_tf))
             candidates = []
             for tf in MAIN_TFS:
                 phase = detect_phase(symbol, tf, _bars(by_tf, tf))

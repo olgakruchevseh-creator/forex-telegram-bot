@@ -1,5 +1,6 @@
 """AMD / Power of Three: накопление -> манипуляция -> направленный выход."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import hashlib
@@ -337,7 +338,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             continue
         text = format_message(event)
         messages.append(text)
-        _PENDING_CARDS[text] = (event, market.get(event.get("symbol")) or {})
+        _PENDING_CARDS[text] = (event, freeze_by_tf(market.get(event.get("symbol")) or {}))
 
     pending_keys = {
         item.get("key") for item in pending.values() if isinstance(item, dict)
@@ -363,7 +364,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 pending[digest] = {"key": event["key"], "event": event}
                 pending_keys.add(event["key"])
                 messages.append(text)
-                _PENDING_CARDS[text] = (event, by_tf)
+                _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))
         except Exception:
             log.exception("AMD %s", symbol)
     state["bootstrapped"] = True

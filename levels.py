@@ -1,5 +1,6 @@
 """Уровни поддержки и сопротивления. Только закрытые свечи, только факты."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import hashlib
 import io
@@ -1423,7 +1424,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None, news_
                         news_context=(breakout_news_context(z.symbol, news_events) if ev == "break" else ""),
                     )
                     messages.append(message)
-                    _PENDING_CARDS[message] = (z, ev, side, closed_map)
+                    _PENDING_CARDS[message] = (z, ev, side, freeze_by_tf(closed_map))
                     remember_pair_direction(store, z.symbol, side, ev)
             except Exception:
                 log.exception("Уровни %s", symbol)

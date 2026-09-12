@@ -1,5 +1,6 @@
 """Order Block: импульсный BOS, сохранение зоны и подтверждённый H1-ретест."""
 from __future__ import annotations
+from chart_snapshot import freeze_by_tf
 
 import json
 import logging
@@ -213,7 +214,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 best = max(confirmed, key=lambda e: (e["quality"], e["tf"] == "H4"))
                 message = format_message(best)
                 messages.append(message)
-                _LAST_CHART_CARDS[message] = (best, by_tf)
+                _LAST_CHART_CARDS[message] = (best, freeze_by_tf(by_tf))
             for tf in SCAN_TFS:
                 source_bars = h4 if tf == "H4" else h1
                 block = newest_block(symbol, tf, source_bars)
