@@ -306,19 +306,26 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
     master = {
         "symbol": symbol, "side": side,
         "quality": _source_number(source_text, "💪 Качество", _source_number(source_text, "Качество", 75)),
-        "confidence": _source_number(source_text, "📈 Вероятность", _source_number(source_text, "Вероятность", 70)),
+        "confidence": _source_number(source_text, "📈 Уверенность модели", _source_number(source_text, "📈 Вероятность", _source_number(source_text, "Вероятность", 70))),
         "gap": gap,
         "senior_n": sum(views[tf] == direction for tf in ("D1", "H4", "H1")),
         "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
-        "zigzag_h4": zz_text, "evidence": ["исходный модуль подтвердил событие"],
+        "zigzag_h4": zz_text, "evidence": [f"{_source_name(source_text)} подтвердил событие"],
         "source_accepted": True, "tf_biases": views,
         "next_pivot": pivot, "by_tf": by_tf,
     }
     if same_active:
         previous_names = [part.strip() for part in str(active.get("sources") or "").split("·") if part.strip()]
         master["source_names_override"] = list(dict.fromkeys(previous_names + [_source_name(source_text)]))
-        master["evidence"] = ["новый модуль дополнительно подтвердил действующий маршрут"]
-    return format_confirmed(master, _scale_route(route), [source_text]), [source_text]
+        master["evidence"] = [f"{_source_name(source_text)} дополнительно подтвердил действующий маршрут"]
+    scaled = _scale_route(route)
+    max_initial = int(getattr(cfg, "SIGNAL_INITIAL_MAX_PROGRESS_PCT", 35))
+    # A fresh module event may be valid, but Navigator must not present it as a
+    # new entry after most of TR1 has already been consumed. Existing routes
+    # continue through lifecycle updates instead.
+    if not same_active and scaled.get("tr1_progress", scaled.get("progress", 100)) > max_initial:
+        return None
+    return format_confirmed(master, scaled, [source_text]), [source_text]
 
 
 def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict | None = None) -> dict:
@@ -423,6 +430,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         else:
             navigator_status = "🟡 ПРИНЯТ НА СОПРОВОЖДЕНИЕ · ПОДТВЕРЖДЕНИЕ ЧАСТИЧНОЕ"
             assessment = f"🟡 сигнал {side} принят на сопровождение; часть таймфреймов пока нейтральна."
+            if int(master.get("junior_n") or 0) < 2:
+                display_mode = "РАННЯЯ СТАДИЯ ИМПУЛЬСА"
     title = ("🧭 НАВИГАТОР СОПРОВОЖДАЕТ СИГНАЛ" if source_accepted else
              ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
               ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР")))
@@ -436,7 +445,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"💱 Пара: {master['symbol']}", f"Направление: {side} {icon}",
         f"Режим: {display_mode}",
         f"💪 Качество: {master['quality']}/100",
-        f"📈 Вероятность: {master['confidence']}%", "",
+        f"📈 Уверенность модели: {master['confidence']}/100", "",
         *([f"Статус Навигатора: {navigator_status}", ""] if navigator_status else []),
         f"Источники модулей: {' · '.join(source_names)}",
         "Подтверждено:",

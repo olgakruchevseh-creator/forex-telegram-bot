@@ -139,6 +139,12 @@ LOCAL_AMD_MAX_PROGRESS_PCT = 45
 # Новая карточка Навигатора допустима только в ранней части всего маршрута
 # от anchor до последней доступной структурной цели TR3.
 SIGNAL_INITIAL_MAX_PROGRESS_PCT = 35
+# Levels breakout is a time-sensitive market fact: never let the hourly module
+# budget hide it. Navigator still rejects a late NEW entry after TR1 progress.
+LEVEL_BREAKOUT_MANDATORY_DELIVERY = True
+LEVEL_NEWS_CONTEXT_ENABLED = True
+LEVEL_NEWS_HIGH_WINDOW_MINUTES = 60
+LEVEL_NEWS_MEDIUM_WINDOW_MINUTES = 30
 # Не присылать предположительные предупреждения о близости к цели:
 # только фактическое достижение TR1/TR2/TR3 или подтверждённая отмена.
 SIGNAL_NEAR_TARGET_ALERTS = False

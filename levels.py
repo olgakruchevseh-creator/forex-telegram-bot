@@ -205,6 +205,34 @@ def breakout_fact(zone: Zone, candle: Candle, side: str, atr_v: float) -> str:
     )
 
 
+
+def breakout_news_context(symbol: str, events, now_utc=None) -> str:
+    """Compact risk context for a fresh breakout; never turns news into direction."""
+    if not getattr(cfg, "LEVEL_NEWS_CONTEXT_ENABLED", True) or not events:
+        return ""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    currencies = set(symbol.split("/"))
+    hits = []
+    for event in events:
+        try:
+            if str(getattr(event, "currency", "")).upper() not in currencies:
+                continue
+            impact = str(getattr(event, "impact", "")).upper()
+            window = (int(getattr(cfg, "LEVEL_NEWS_HIGH_WINDOW_MINUTES", 60)) if impact == "HIGH"
+                      else int(getattr(cfg, "LEVEL_NEWS_MEDIUM_WINDOW_MINUTES", 30)) if impact == "MEDIUM" else 0)
+            if not window:
+                continue
+            delta = int(round((getattr(event, "dt_utc") - now_utc).total_seconds() / 60))
+            if abs(delta) <= window:
+                when = f"через {delta} мин" if delta >= 0 else f"{abs(delta)} мин назад"
+                hits.append((abs(delta), f"{getattr(event, 'currency', '')} {impact} · {getattr(event, 'title', '')} · {when}"))
+        except Exception:
+            continue
+    if not hits:
+        return ""
+    hits.sort(key=lambda x: x[0])
+    return "⚠️ Новостной контекст: " + hits[0][1] + ". Пробой технически подтверждён, но новость повышает риск резкого возврата/расширения волатильности."
+
 def load_store() -> dict:
     dest = levels_state_path()
     src = DEFAULT_STATE_PATH if DEFAULT_STATE_PATH.exists() else STATE_PATH
@@ -868,6 +896,7 @@ def build_message(
     confidence: int | None = None,
     cancelled_side: str = "",
     confirmation_dt: str = "",
+    news_context: str = "",
 ) -> str:
     lines = [
         "━━━━━━━━━━━━━━━━━━",
@@ -908,7 +937,9 @@ def build_message(
     if quality is not None and confidence is not None:
         quality_label = "Качество пробоя" if event == "break" else "Качество реакции"
         lines.append(f"💪 {quality_label}: {quality}/100")
-        lines.append(f"📈 Вероятность: {confidence}%")
+        lines.append(f"📈 Уверенность модели: {confidence}/100")
+    if news_context:
+        lines.append(news_context)
     lines.append(f"✅ Факт: {extra}")
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━")
@@ -1280,7 +1311,7 @@ def image_for_alert(text: str) -> io.BytesIO | None:
     return render_chart(card[0], card[1], card[2], card[3])
 
 
-def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
+def process_market(market: dict, strength: dict[str, float] | None = None, news_events=None) -> list[str]:
     """Считает уровни по уже полученному рынку. Возвращает тексты новых фактов."""
     _PENDING_CARDS.clear()
     store = load_store()
@@ -1389,6 +1420,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                         quality=quality if ev != "new_level" else None,
                         confidence=confidence if ev != "new_level" else None,
                         cancelled_side=cancelled_side,
+                        news_context=(breakout_news_context(z.symbol, news_events) if ev == "break" else ""),
                     )
                     messages.append(message)
                     _PENDING_CARDS[message] = (z, ev, side, closed_map)

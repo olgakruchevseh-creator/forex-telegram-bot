@@ -515,7 +515,9 @@ def _alert_rank(item: tuple[int, str]) -> tuple[float, int, int]:
     """Качество/вероятность главнее прежнего фиксированного порядка модулей."""
     priority, text = item
     quality = _alert_metric(text, "Качество")
-    probability = _alert_metric(text, "Вероятность")
+    probability = _alert_metric(text, "Уверенность модели")
+    if probability is None:
+        probability = _alert_metric(text, "Вероятность")
     # У ZigZag и некоторых структурных событий числовой оценки нет. Для них
     # сохраняется спокойный базовый балл и прежний приоритет как tie-breaker.
     default = {0: 78, 1: 75, 2: 70, 3: 68}.get(priority, 70)
@@ -767,10 +769,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля сетки Фибоначчи")
 
+        mandatory_level_breakouts: list[str] = []
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
-                for text in levels.process_market(market, strength):
-                    module_alerts.append((0, text))
+                try:
+                    level_events = newsmod.load_events()
+                except Exception:
+                    log.exception("Новости для Levels")
+                    level_events = []
+                for text in levels.process_market(market, strength, level_events):
+                    if (getattr(cfg, "LEVEL_BREAKOUT_MANDATORY_DELIVERY", True)
+                            and "⚡ ПРОБОЙ УРОВНЯ" in text):
+                        mandatory_level_breakouts.append(text)
+                    else:
+                        module_alerts.append((0, text))
             except Exception:
                 log.exception("Ошибка модуля уровней")
 
@@ -796,7 +808,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # блокировать их доставку. Готовая карточка Навигатора заменит исходную
         # карточку той же пары/направления; неподтверждённый им сигнал всё равно
         # останется доступен для отправки.
-        source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts]
+        source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts + mandatory_level_breakouts]
         raw_alerts = [text for _priority, text in source_alerts]
         # События, не подтверждённые в эту H1, не теряются: они остаются
         # внутренними кандидатами ограниченное число часов.
@@ -880,7 +892,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Обновление журнала сигналов")
         mandatory_amd_set = set(mandatory_amd_alerts)
-        delivery_alerts = list(dict.fromkeys(mandatory_amd_alerts + selected_alerts))
+        mandatory_level_set = set(mandatory_level_breakouts)
+        delivery_alerts = list(dict.fromkeys(mandatory_amd_alerts + mandatory_level_breakouts + selected_alerts))
         for text in delivery_alerts:
             source_image = None
             if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
@@ -1018,7 +1031,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             # подтверждение и сопровождение этого же сценария.
             # Обязательный AMD не занимает место в лимите новых сигналов и не
             # блокирует обычного кандидата той же валютной пары.
-            if text not in mandatory_amd_set:
+            if text not in mandatory_amd_set and text not in mandatory_level_set:
                 bucket["count"] = int(bucket.get("count") or 0) + 1
                 if pair and pair not in bucket.setdefault("pairs", []):
                     bucket["pairs"].append(pair)
