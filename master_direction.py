@@ -10,6 +10,7 @@ import news as newsmod
 import zigzag_scanner
 import htf_irl
 import ltf_confirmation
+import bpr
 import imd
 import idm
 import daily_high_low
@@ -149,6 +150,7 @@ def analyze_symbol(
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
     irl = htf_irl.analyze_symbol(symbol, by_tf, side)
     ltf_ctx = ltf_confirmation.analyze_symbol(symbol, by_tf, side)
+    bpr_ctx = bpr.analyze_symbol(symbol, by_tf, side)
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
     idm_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pd_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
@@ -190,6 +192,8 @@ def analyze_symbol(
         quality += int(getattr(cfg, "HTF_IRL_ALIGN_BONUS", 5))
     if ltf_ctx and ltf_ctx.alignment > 0:
         quality += int(getattr(cfg, "LTF_CONFIRM_ALIGN_BONUS", 5))
+    if bpr_ctx and bpr_ctx.alignment > 0:
+        quality += int(getattr(cfg, "BPR_ALIGN_BONUS", 4))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     if idm_ctx and idm_ctx.alignment > 0:
@@ -209,6 +213,8 @@ def analyze_symbol(
         quality -= int(getattr(cfg, "HTF_IRL_CONFLICT_PENALTY", 3))
     if ltf_ctx and ltf_ctx.alignment < 0:
         quality -= int(getattr(cfg, "LTF_CONFIRM_CONFLICT_PENALTY", 5))
+    if bpr_ctx and bpr_ctx.alignment < 0:
+        quality -= int(getattr(cfg, "BPR_CONFLICT_PENALTY", 4))
     if imd_ctx and imd_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
     if idm_ctx and idm_ctx.alignment < 0:
@@ -242,6 +248,8 @@ def analyze_symbol(
         "htf_irl_alignment": irl.alignment if irl else 0,
         "ltf_confirmation": ltf_confirmation.describe(ltf_ctx),
         "ltf_confirmation_alignment": ltf_ctx.alignment if ltf_ctx else 0,
+        "bpr": bpr.describe(bpr_ctx),
+        "bpr_alignment": bpr_ctx.alignment if bpr_ctx else 0,
         "imd": imd.describe(imd_ctx),
         "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
         "idm": idm.describe(idm_ctx),
