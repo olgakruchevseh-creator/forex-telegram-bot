@@ -77,6 +77,34 @@ EMA_SLOW = 50
 FVG_NEAR_ATR = 1.2
 ATR_PERIOD = 14
 
+# HTF IRL (Internal Range Liquidity): внутренний контекст Master Direction.
+# Не создаёт отдельные сигналы и не дублирует Imbalance/FVG.
+HTF_IRL_ENABLED = True
+HTF_IRL_TIMEFRAMES = ("H4", "D1")
+HTF_IRL_FVG_LOOKBACK = 80
+HTF_IRL_MIN_RANGE_ATR = 1.5
+HTF_IRL_NEAR_ATR = 1.25
+HTF_IRL_ALIGN_BONUS = 5
+HTF_IRL_CONFLICT_PENALTY = 3
+
+# IMD (Intermarket Divergence): внутренний межрыночный контроль.
+# Сравнивает закрытые H1/H4 семи USD-major; самостоятельных уведомлений нет.
+IMD_ENABLED = True
+IMD_H1_LOOKBACK = 3
+IMD_H4_LOOKBACK = 2
+IMD_MIN_PEERS = 2
+IMD_MAJORITY_MARGIN = 1
+IMD_MIN_MOVE_PCT = 0.025
+IMD_MIN_MOVE_ATR = 0.20
+IMD_ALIGN_BONUS = 4
+IMD_CONFLICT_PENALTY = 4
+
+# IDM (Inducement): внутренний SMC-фильтр качества входа.
+IDM_ENABLED = True
+IDM_NEAR_ATR = 1.25
+IDM_SWEEP_BONUS = 4
+IDM_UNSWEPT_PENALTY = 3
+
 HTF_KEYS = ["W1", "D1", "H4"]
 HTF_MIN_AGREE = 2
 

@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 import config as cfg
 import news as newsmod
 import zigzag_scanner
+import htf_irl
+import imd
+import idm
 from analysis import PairStack, build_stack, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
@@ -123,6 +126,7 @@ def analyze_symbol(
     dxy_bias: int = 0,
     events: list[newsmod.NewsEvent] | None = None,
     now_utc: datetime | None = None,
+    market: dict | None = None,
 ) -> dict | None:
     stack = build_stack(symbol, by_tf, strength)
     if not stack:
@@ -141,6 +145,9 @@ def analyze_symbol(
         return None
 
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+    irl = htf_irl.analyze_symbol(symbol, by_tf, side)
+    imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
+    idm_ctx = idm.analyze_symbol(symbol, by_tf, side)
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     aligned, opposite = _module_evidence(symbol, side, alerts)
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
@@ -169,6 +176,13 @@ def analyze_symbol(
     quality += min(10, 7 + max(0, len(aligned) - 1) * 3)
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
+    # HTF IRL — контекст местоположения, а не самостоятельный триггер.
+    if irl and irl.alignment > 0:
+        quality += int(getattr(cfg, "HTF_IRL_ALIGN_BONUS", 5))
+    if imd_ctx and imd_ctx.alignment > 0:
+        quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
+    if idm_ctx and idm_ctx.alignment > 0:
+        quality += int(getattr(cfg, "IDM_SWEEP_BONUS", 4))
     quality = min(94, quality)
     # Штрафы применяются после верхнего лимита, чтобы сильная базовая оценка
     # не скрывала одиночное противоречие за значением 94/100.
@@ -178,6 +192,12 @@ def analyze_symbol(
         quality -= 4
     if higher_conflict:
         quality -= 4
+    if irl and irl.alignment < 0:
+        quality -= int(getattr(cfg, "HTF_IRL_CONFLICT_PENALTY", 3))
+    if imd_ctx and imd_ctx.alignment < 0:
+        quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
+    if idm_ctx and idm_ctx.alignment < 0:
+        quality -= int(getattr(cfg, "IDM_UNSWEPT_PENALTY", 3))
     if profile_confirmation < 0:
         quality -= 3
     elif not h4_zz:
@@ -201,6 +221,12 @@ def analyze_symbol(
         "zigzag_h4": "LONG" if h4_zz > 0 else ("SHORT" if h4_zz < 0 else "RANGE"),
         "senior_side": "LONG" if senior_side > 0 else ("SHORT" if senior_side < 0 else "RANGE"),
         "conflict_groups": conflict_groups,
+        "htf_irl": htf_irl.describe(irl),
+        "htf_irl_alignment": irl.alignment if irl else 0,
+        "imd": imd.describe(imd_ctx),
+        "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
+        "idm": idm.describe(idm_ctx),
+        "idm_alignment": idm_ctx.alignment if idm_ctx else 0,
     }
 
 
@@ -353,7 +379,7 @@ def analyze_market(
         try:
             result = analyze_symbol(
                 symbol, market.get(symbol) or {}, strength, module_alerts,
-                dxy_bias=dxy_bias, events=events, now_utc=now_utc,
+                dxy_bias=dxy_bias, events=events, now_utc=now_utc, market=market,
             )
             if result:
                 candidates.append(result)
