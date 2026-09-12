@@ -15,6 +15,7 @@ log = logging.getLogger("fxbot.order_block")
 TF_MINUTES = {"H4": 240, "H1": 60, "M15": 15}
 SCAN_TFS = ("H4", "H1")
 _LAST_CHART_CARDS: dict[str, tuple[dict, dict]] = {}
+_LAST_INVALIDATED: list[dict] = []
 
 
 @dataclass
@@ -33,6 +34,7 @@ class OrderBlock:
     last_dt: str = ""
     retest_sent: bool = False
     invalid: bool = False
+    invalidation_reason: str = ""
 
 
 def _path() -> Path:
@@ -140,11 +142,13 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
         return None
     if block.age > int(getattr(cfg, "ORDER_BLOCK_MAX_RETEST_H1_BARS", 24)):
         block.invalid = True
+        block.invalidation_reason = "expired"
         return None
     invalid_buffer = av * float(getattr(cfg, "ORDER_BLOCK_INVALIDATION_ATR", .12))
     if block.side == "LONG":
         if current.close < block.low-invalid_buffer:
             block.invalid = True
+            block.invalidation_reason = "price_break"
             return None
         touched = current.low <= block.high and current.high >= block.low
         held = current.close > block.high and current.close > current.open
@@ -152,6 +156,7 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
     else:
         if current.close > block.high+invalid_buffer:
             block.invalid = True
+            block.invalidation_reason = "price_break"
             return None
         touched = current.high >= block.low and current.low <= block.high
         held = current.close < block.low and current.close < current.open
@@ -195,6 +200,8 @@ def format_message(event: dict) -> str:
 
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
+    global _LAST_INVALIDATED
+    _LAST_INVALIDATED = []
     state = _load()
     first = not bool(state.get("bootstrapped"))
     blocks = {k: OrderBlock(**v) for k, v in (state.get("blocks") or {}).items()}
@@ -207,7 +214,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             for block in blocks.values():
                 if block.symbol != symbol or block.retest_sent or block.invalid:
                     continue
+                was_invalid = block.invalid
                 event = confirm_retest(block, h1, h4, m15, strength)
+                if not was_invalid and block.invalid and block.invalidation_reason == "price_break":
+                    _LAST_INVALIDATED.append(asdict(block))
                 if event:
                     confirmed.append(event)
             if confirmed and not first:
@@ -228,6 +238,18 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["blocks"] = {b.block_id: asdict(b) for b in kept[-500:]}
     _save(state)
     return messages
+
+
+def pop_invalidated_blocks() -> list[dict]:
+    """Return Order Blocks invalidated by a real price break in the latest scan.
+
+    Breaker Block consumes these candidates immediately after Order Block processing.
+    Expired blocks are deliberately excluded.
+    """
+    global _LAST_INVALIDATED
+    out = list(_LAST_INVALIDATED)
+    _LAST_INVALIDATED = []
+    return out
 
 
 def render_chart(event: dict, by_tf: dict):
