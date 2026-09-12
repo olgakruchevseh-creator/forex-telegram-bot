@@ -460,6 +460,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         lines.append(f"• {master['imd']}")
     if master.get("idm"):
         lines.append(f"• {master['idm']}")
+    if master.get("pdh_pdl"):
+        lines.append(f"• {master['pdh_pdl']}")
     if source_accepted and h1_bias == -direction:
         lines.append(f"• H1: коррекция против маршрута {side}")
     elif source_accepted and h1_bias == 0:

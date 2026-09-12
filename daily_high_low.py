@@ -7,12 +7,23 @@ import json
 import logging
 import os
 from pathlib import Path
+from dataclasses import dataclass
 
 import config as cfg
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.daily_high_low")
 TF_MINUTES = {"D1": 1440, "H1": 60, "M15": 15, "M5": 5}
+
+@dataclass(frozen=True)
+class PDContext:
+    alignment: int  # +1 PDH/PDL liquidity action confirms candidate, -1 nearby target opposes/risks entry
+    level_name: str
+    level: float
+    swept: bool
+    reclaimed: bool
+    distance_atr: float
+
 _PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
 
 
@@ -53,6 +64,51 @@ def _strength_ok(symbol: str, side: str, strength: dict[str, float]) -> bool:
     return gap >= need if side == "LONG" else gap <= -need
 
 
+def analyze_pdh_pdl(by_tf: dict, candidate_side: int) -> PDContext | None:
+    """Internal ICT/SMC context from Previous Day High/Low using closed candles only."""
+    if not getattr(cfg, "PDH_PDL_CONTEXT_ENABLED", True) or candidate_side not in (-1, 1):
+        return None
+    daily, hourly = _bars(by_tf, "D1"), _bars(by_tf, "H1")
+    if len(daily) < 1 or len(hourly) < 5:
+        return None
+    ref = daily[-1]
+    av = atr(hourly, 14)
+    if av <= 0:
+        return None
+    current = hourly[-1]
+    lookback = max(2, int(getattr(cfg, "PDH_PDL_SWEEP_LOOKBACK_H1", 12)))
+    recent = hourly[-lookback:]
+    # LONG confirmation: sell-side liquidity below PDL is swept and H1 reclaims PDL.
+    # SHORT confirmation: buy-side liquidity above PDH is swept and H1 closes back below PDH.
+    if candidate_side > 0:
+        level, name = ref.low, "PDL"
+        swept = any(c.low < level for c in recent)
+        reclaimed = any(c.low < level and c.close > level for c in recent)
+        distance = abs(current.close - level) / av
+    else:
+        level, name = ref.high, "PDH"
+        swept = any(c.high > level for c in recent)
+        reclaimed = any(c.high > level and c.close < level for c in recent)
+        distance = abs(current.close - level) / av
+    if reclaimed:
+        return PDContext(1, name, level, swept, True, distance)
+    near = float(getattr(cfg, "PDH_PDL_NEAR_ATR", 1.0))
+    # An unswept nearby external-liquidity target is a caution, never a standalone reversal command.
+    return PDContext(-1 if (not swept and distance <= near) else 0, name, level, swept, False, distance)
+
+
+def describe_pdh_pdl(ctx: PDContext | None) -> str:
+    if ctx is None:
+        return "PDH/PDL: контекст не определён"
+    if ctx.alignment > 0:
+        state = "ликвидность снята и уровень возвращён — подтверждает сценарий"
+    elif ctx.alignment < 0:
+        state = "близкая внешняя ликвидность ещё не снята — риск раннего входа"
+    else:
+        state = "нейтрально"
+    return f"{ctx.level_name}: {state} · {ctx.level:.5f} · {ctx.distance_atr:.2f} ATR"
+
+
 def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     """Возвращает только событие на новой закрытой H1 относительно закрытой D1."""
     daily, hourly = _bars(by_tf, "D1"), _bars(by_tf, "H1")
@@ -69,14 +125,14 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
 
     # Пробой требует перехода через уровень и направленного закрытия H1.
     if prev.close <= reference.high + buffer < current.close and current.close > current.open:
-        event = ("HIGH", "ПРОБОЙ МАКСИМУМА ДНЯ", "LONG", reference.high)
+        event = ("HIGH", "ПРОБОЙ PDH — МАКСИМУМА ПРЕДЫДУЩЕГО ДНЯ", "LONG", reference.high)
     elif prev.close >= reference.low - buffer > current.close and current.close < current.open:
-        event = ("LOW", "ПРОБОЙ МИНИМУМА ДНЯ", "SHORT", reference.low)
+        event = ("LOW", "ПРОБОЙ PDL — МИНИМУМА ПРЕДЫДУЩЕГО ДНЯ", "SHORT", reference.low)
     # Отбой требует касания уровня и возврата закрытия внутрь дневного диапазона.
     elif current.high >= reference.high - touch and current.close < reference.high - buffer and current.close < current.open:
-        event = ("HIGH", "ОТБОЙ ОТ МАКСИМУМА ДНЯ", "SHORT", reference.high)
+        event = ("HIGH", "СНЯТИЕ PDH И ВОЗВРАТ", "SHORT", reference.high)
     elif current.low <= reference.low + touch and current.close > reference.low + buffer and current.close > current.open:
-        event = ("LOW", "ОТБОЙ ОТ МИНИМУМА ДНЯ", "LONG", reference.low)
+        event = ("LOW", "СНЯТИЕ PDL И ВОЗВРАТ", "LONG", reference.low)
     if not event:
         return None
 
@@ -117,17 +173,16 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(event: dict) -> str:
-    action = (
-        "Цена закрылась выше дневного максимума." if event["name"] == "ПРОБОЙ МАКСИМУМА ДНЯ" else
-        "Цена коснулась дневного максимума и закрылась ниже него." if event["name"] == "ОТБОЙ ОТ МАКСИМУМА ДНЯ" else
-        "Цена закрылась ниже дневного минимума." if event["name"] == "ПРОБОЙ МИНИМУМА ДНЯ" else
-        "Цена коснулась дневного минимума и закрылась выше него."
-    )
+    is_break = "ПРОБОЙ" in event["name"]
+    if event["level_kind"] == "HIGH":
+        action = "Цена закрылась выше PDH." if is_break else "Цена сняла ликвидность над PDH и закрылась обратно ниже уровня."
+    else:
+        action = "Цена закрылась ниже PDL." if is_break else "Цена сняла ликвидность под PDL и закрылась обратно выше уровня."
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", f"📅 {event['name']}", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {event['symbol']}", f"Направление: {event['side']}",
-        f"Максимум закрытого дня: {_price(event['symbol'], event['day_high'])}",
-        f"Минимум закрытого дня: {_price(event['symbol'], event['day_low'])}",
+        f"PDH · максимум предыдущего закрытого дня: {_price(event['symbol'], event['day_high'])}",
+        f"PDL · минимум предыдущего закрытого дня: {_price(event['symbol'], event['day_low'])}",
         f"Ключевой уровень: {_price(event['symbol'], event['level'])}",
         f"Подтверждение: H1 и младшие ТФ — {event['confirmations']}/3",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
@@ -171,7 +226,7 @@ def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
         y1, y2 = y_at(c.open), y_at(c.close)
         draw.rectangle((x-candle_w/2, min(y1,y2), x+candle_w/2, max(y1,y2)+1), fill=color)
 
-    for label, price, color in (("DAILY HIGH", event["day_high"], "#f4c542"), ("DAILY LOW", event["day_low"], "#4aa3ff")):
+    for label, price, color in (("PDH", event["day_high"], "#f4c542"), ("PDL", event["day_low"], "#4aa3ff")):
         y = y_at(price)
         draw.line((left, y, right, y), fill=color, width=3)
         draw.text((left+8, y-27), f"{label}  {_price(event['symbol'], price)}", fill=color, font=small)
@@ -186,7 +241,7 @@ def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
     kind = "ПРОБОЙ" if "ПРОБОЙ" in event["name"] else "ОТБОЙ"
     draw.text((max(left, x-55), max(top, min(bottom-28, y+20))), kind, fill=side_color, font=small)
     draw.text((left, 26), f"{event['symbol']} · {event['name']} · {event['side']}", fill="#f1f5fb", font=font)
-    draw.text((left, 657), "Реальные закрытые H1-свечи · уровни последнего закрытого D1 · подтверждение по H1", fill="#aeb7c6", font=small)
+    draw.text((left, 657), "Реальные закрытые H1-свечи · PDH/PDL последнего закрытого D1 · подтверждение по H1", fill="#aeb7c6", font=small)
     output = io.BytesIO()
     output.name = f"daily_high_low_{event['symbol'].replace('/', '')}_{event['side']}.png"
     image.save(output, format="PNG", optimize=True)

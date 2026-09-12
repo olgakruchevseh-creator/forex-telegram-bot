@@ -44,13 +44,13 @@ class DailyHighLowTests(unittest.TestCase):
     def test_break_high_is_long(self, _bias):
         event = dhl.detect_event("EUR/USD", candles("LONG"), {"EUR": .2, "USD": 0})
         self.assertIsNotNone(event)
-        self.assertEqual((event["name"], event["side"]), ("ПРОБОЙ МАКСИМУМА ДНЯ", "LONG"))
+        self.assertEqual((event["name"], event["side"]), ("ПРОБОЙ PDH — МАКСИМУМА ПРЕДЫДУЩЕГО ДНЯ", "LONG"))
 
     @patch.object(dhl, "_bias", return_value=-1)
     def test_break_low_is_short(self, _bias):
         event = dhl.detect_event("EUR/USD", candles("SHORT"), {"EUR": 0, "USD": .2})
         self.assertIsNotNone(event)
-        self.assertEqual((event["name"], event["side"]), ("ПРОБОЙ МИНИМУМА ДНЯ", "SHORT"))
+        self.assertEqual((event["name"], event["side"]), ("ПРОБОЙ PDL — МИНИМУМА ПРЕДЫДУЩЕГО ДНЯ", "SHORT"))
 
     @patch.object(dhl, "_bias", return_value=-1)
     def test_reject_high_is_short(self, _bias):
@@ -59,7 +59,7 @@ class DailyHighLowTests(unittest.TestCase):
         by_tf["H1"][-1] = Candle(last.dt, 1.0998, 1.1001, 1.0988, 1.0990)
         event = dhl.detect_event("EUR/USD", by_tf, {"EUR": 0, "USD": .2})
         self.assertIsNotNone(event)
-        self.assertEqual((event["name"], event["side"]), ("ОТБОЙ ОТ МАКСИМУМА ДНЯ", "SHORT"))
+        self.assertEqual((event["name"], event["side"]), ("СНЯТИЕ PDH И ВОЗВРАТ", "SHORT"))
 
     @patch.object(dhl, "_bias", return_value=1)
     def test_reject_low_is_long(self, _bias):
@@ -68,7 +68,7 @@ class DailyHighLowTests(unittest.TestCase):
         by_tf["H1"][-1] = Candle(last.dt, 1.0902, 1.0912, 1.0899, 1.0910)
         event = dhl.detect_event("EUR/USD", by_tf, {"EUR": .2, "USD": 0})
         self.assertIsNotNone(event)
-        self.assertEqual((event["name"], event["side"]), ("ОТБОЙ ОТ МИНИМУМА ДНЯ", "LONG"))
+        self.assertEqual((event["name"], event["side"]), ("СНЯТИЕ PDL И ВОЗВРАТ", "LONG"))
 
     @patch.object(dhl, "detect_event")
     def test_bootstrap_is_silent(self, detect):

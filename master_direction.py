@@ -11,6 +11,7 @@ import zigzag_scanner
 import htf_irl
 import imd
 import idm
+import daily_high_low
 from analysis import PairStack, build_stack, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
@@ -148,6 +149,7 @@ def analyze_symbol(
     irl = htf_irl.analyze_symbol(symbol, by_tf, side)
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
     idm_ctx = idm.analyze_symbol(symbol, by_tf, side)
+    pd_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     aligned, opposite = _module_evidence(symbol, side, alerts)
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
@@ -183,6 +185,8 @@ def analyze_symbol(
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     if idm_ctx and idm_ctx.alignment > 0:
         quality += int(getattr(cfg, "IDM_SWEEP_BONUS", 4))
+    if pd_ctx and pd_ctx.alignment > 0:
+        quality += int(getattr(cfg, "PDH_PDL_SWEEP_BONUS", 4))
     quality = min(94, quality)
     # Штрафы применяются после верхнего лимита, чтобы сильная базовая оценка
     # не скрывала одиночное противоречие за значением 94/100.
@@ -198,6 +202,8 @@ def analyze_symbol(
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
     if idm_ctx and idm_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IDM_UNSWEPT_PENALTY", 3))
+    if pd_ctx and pd_ctx.alignment < 0:
+        quality -= int(getattr(cfg, "PDH_PDL_UNSWEPT_PENALTY", 2))
     if profile_confirmation < 0:
         quality -= 3
     elif not h4_zz:
@@ -227,6 +233,8 @@ def analyze_symbol(
         "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
         "idm": idm.describe(idm_ctx),
         "idm_alignment": idm_ctx.alignment if idm_ctx else 0,
+        "pdh_pdl": daily_high_low.describe_pdh_pdl(pd_ctx),
+        "pdh_pdl_alignment": pd_ctx.alignment if pd_ctx else 0,
     }
 
 
