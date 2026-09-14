@@ -25,8 +25,11 @@ def rising_bars(count=180):
 
 
 class EchoProjectionTests(unittest.TestCase):
-    def test_insufficient_history_is_silent(self):
-        self.assertIsNone(echo.analyze("EUR/USD", {"H1": rising_bars(40)}))
+    def test_insufficient_history_uses_context_fallback(self):
+        result = echo.analyze("EUR/USD", {"H1": rising_bars(40)})
+        self.assertIsNotNone(result)
+        self.assertTrue(result.get("estimated"))
+        self.assertEqual(0, result.get("sample"))
 
     def test_historical_analogs_project_repeated_direction(self):
         result = echo.analyze("EUR/USD", {"H1": rising_bars()})

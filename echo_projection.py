@@ -141,7 +141,11 @@ def _context_score(symbol: str, by_tf: dict, side: int, strength: dict[str, floa
 
 
 def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
-    """Grouped SMC confirmation for Echo. Each family contributes once to avoid double counting."""
+    """Grouped cross-module confirmation for Echo without mutating scanner state.
+
+    Families are capped so several closely-related SMC modules cannot overwhelm
+    the independent H1 analogue vote. Missing/broken modules stay neutral.
+    """
     score = 0
     notes = []
     # Impulse family
@@ -164,7 +168,43 @@ def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
             pass
     if loc_votes:
         score += min(7, 3 + 2 * len(loc_votes)); notes.append("SMC-zone")
-    return {"score": score, "notes": notes}
+
+    # Structure/timing family. These are read-only analyzers and therefore do
+    # not consume anti-spam state or create Telegram alerts. One family vote.
+    structure_votes = []
+    structure_conflicts = []
+    for module_name in ("ltf_confirmation", "choch", "propulsion_block", "inducement"):
+        try:
+            mod = __import__(module_name)
+            ctx = mod.analyze_symbol(symbol, by_tf, side)
+            alignment = getattr(ctx, "alignment", None)
+            if alignment is None and isinstance(ctx, dict):
+                alignment = ctx.get("alignment")
+            if alignment is not None:
+                (structure_votes if float(alignment) > 0 else structure_conflicts if float(alignment) < 0 else []).append(module_name)
+        except Exception:
+            pass
+    if structure_votes:
+        score += min(6, 2 + 2 * len(structure_votes)); notes.append("structure/LTF")
+    if structure_conflicts:
+        score -= min(7, 3 + 2 * len(structure_conflicts)); notes.append("structure-conflict")
+
+    # HTF dealing-range family is deliberately capped separately.
+    htf_votes = []
+    for module_name in ("htf_irl", "premium_discount", "erl", "bpr"):
+        try:
+            mod = __import__(module_name)
+            ctx = mod.analyze_symbol(symbol, by_tf, side)
+            alignment = getattr(ctx, "alignment", None)
+            if alignment is None and isinstance(ctx, dict):
+                alignment = ctx.get("alignment")
+            if ctx is not None and (alignment is None or float(alignment) >= 0):
+                htf_votes.append(module_name)
+        except Exception:
+            pass
+    if htf_votes:
+        score += min(5, 1 + len(htf_votes)); notes.append("HTF-location")
+    return {"score": max(-12, min(18, score)), "notes": sorted(set(notes))}
 
 def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], strength=None, dxy_bias=0) -> dict | None:
     """Always choose the more likely session direction when H1 data exists, even without analogues."""
@@ -181,7 +221,7 @@ def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], stren
     ctx = long_ctx if side_sign > 0 else short_ctx
     smc = long_smc if side_sign > 0 else short_smc
     margin = abs(long_score-short_score)
-    confidence = max(51, min(68, 52 + int(round(margin * .45))))
+    confidence = max(51, min(72, 52 + int(round(margin * .45))))
     av = _atr_at(bars, len(bars)-1)
     # Conservative path: low-confidence context projection, capped below 1 ATR/session.
     end_move = side_sign * min(.90, .25 + margin/60.0)

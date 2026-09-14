@@ -189,6 +189,8 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
                     (f"Исторических аналогов: {result['sample']}" if result['sample'] else
                      "Исторических аналогов недостаточно — направление рассчитано по текущей структуре/SMC") ]
         chart_result = dict(result)
+        # The chart must show the same post-news confidence as the Telegram text.
+        chart_result["confidence"] = confidence
         chart_result["weak"] = weak
         chart_result["news_risk"] = news.get("risk", "NONE")
         chart_result["news_markers"] = [
