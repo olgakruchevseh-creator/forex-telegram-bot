@@ -75,6 +75,7 @@ def _side(text: str) -> str:
 def _source_name(text: str) -> str:
     upper = (text or "").upper()
     names = (
+        ("ICT SILVER BULLET", "Silver Bullet ICT"),
         ("POWER OF THREE", "AMD"), ("СНЯТИЕ ЛИКВИДНОСТИ", "Liquidity Sweep"),
         ("ORDER BLOCK", "Order Block"), ("ВЫХОД ИЗ ФАЗЫ", "Accumulation/Distribution"),
         ("CHAIN ENTRY", "Chain Entries"), ("ПАТТЕРН", "Patterns"),

@@ -46,14 +46,49 @@ def _news_block(symbol,events,now):
         except Exception: continue
     return False
 
+def _recent_pivots(bars, left=2, right=2):
+    """Confirmed local M5 pivots only; the right-side candles must already be closed."""
+    out=[]
+    for i in range(left, len(bars)-right):
+        area=bars[i-left:i+right+1]
+        if bars[i].high >= max(c.high for c in area): out.append((i, bars[i].high, "high"))
+        if bars[i].low <= min(c.low for c in area): out.append((i, bars[i].low, "low"))
+    return out
+
+def _mss_level(bars, sweep_i, side):
+    """Last confirmed opposite pivot before the sweep: the level MSS must close through."""
+    piv=[x for x in _recent_pivots(bars[:sweep_i+1]) if x[0] < sweep_i]
+    kind="high" if side=="LONG" else "low"
+    vals=[x for x in piv if x[2]==kind]
+    return vals[-1][1] if vals else None
+
+def _context(symbol, by_tf, side):
+    """Read-only confluence. Context improves quality but never invents a Silver Bullet."""
+    wanted=1 if side=="LONG" else -1
+    support=[]; conflict=[]
+    for name in ("ltf_confirmation","choch","premium_discount","htf_irl"):
+        try:
+            mod=__import__(name); ctx=mod.analyze_symbol(symbol,by_tf,wanted)
+            a=getattr(ctx,"alignment",0) if ctx is not None else 0
+            if a>0: support.append(name)
+            elif a<0: conflict.append(name)
+        except Exception:
+            continue
+    try:
+        import displacement
+        if displacement.confirm_direction(by_tf,side,"M5"): support.append("displacement")
+    except Exception:
+        pass
+    return support, conflict
+
 def detect(symbol,by_tf,strength,events=None,now_utc=None):
     m5,m15,h1,h4=(_bars(by_tf,t) for t in ("M5","M15","H1","H4"))
-    if len(m5)<35 or len(m15)<20 or len(h1)<20: return None
+    if len(m5)<35 or len(m15)<20 or len(h1)<20 or len(h4)<20: return None
     now=now_utc or _dt(m5[-1]); window=active_window(now)
     if not window or _news_block(symbol,events,now): return None
     av=atr(m5,14) or atr(m15,14)
     if not av: return None
-    # Liquidity pool excludes the last 3 bars; a recent bar must sweep and close back inside.
+    # Stage 1 — liquidity raid. Pool excludes the last three closed M5 candles.
     look=m5[-23:-3]; hi=max(c.high for c in look); lo=min(c.low for c in look)
     sweep=None; side=None; level=None
     for i in range(len(m5)-3,len(m5)):
@@ -64,36 +99,58 @@ def detect(symbol,by_tf,strength,events=None,now_utc=None):
     wanted=1 if side=="LONG" else -1
     gap=_gap(symbol,strength)
     if (wanted*gap) < float(getattr(cfg,"SILVER_BULLET_MIN_STRENGTH_GAP",.05)): return None
+    # H1/H4 are regime filters. Silver Bullet is an execution setup, not a reason
+    # to reverse an explicitly opposite higher-timeframe market.
     if _bias("H4",h4)==-wanted or _bias("H1",h1)==-wanted: return None
-    # Displacement + 3-candle FVG after the sweep. This is the completion trigger.
+
+    # Stage 2 — real MSS: after the raid price must CLOSE through the last
+    # confirmed opposite M5 pivot. A large candle alone is not called MSS.
+    mss_level=_mss_level(m5,sweep,side)
+    if mss_level is None: return None
+    max_age=max(1,int(getattr(cfg,"SILVER_BULLET_MAX_SETUP_AGE_M5",12)))
     min_disp=av*float(getattr(cfg,"SILVER_BULLET_MIN_DISPLACEMENT_ATR",.55))
     min_fvg=av*float(getattr(cfg,"SILVER_BULLET_MIN_FVG_ATR",.08))
-    fvg=None; trigger=None
-    start=max(2,sweep)
-    for i in range(start,len(m5)):
-        c=m5[i]
-        body=abs(c.close-c.open)
-        if body < min_disp: continue
-        if side=="LONG" and c.close>c.open and m5[i].low-m5[i-2].high >= min_fvg:
-            fvg=(m5[i-2].high,m5[i].low); trigger=c; break
-        if side=="SHORT" and c.close<c.open and m5[i-2].low-m5[i].high >= min_fvg:
-            fvg=(m5[i].high,m5[i-2].low); trigger=c; break
+    fvg=None; trigger=None; trigger_i=None
+    for i in range(max(2,sweep+1),len(m5)):
+        if i-sweep > max_age: break
+        c=m5[i]; body=abs(c.close-c.open)
+        mss=(c.close>mss_level if side=="LONG" else c.close<mss_level)
+        impulse=(c.close>c.open if side=="LONG" else c.close<c.open)
+        if not (mss and impulse and body>=min_disp): continue
+        if side=="LONG" and m5[i].low-m5[i-2].high >= min_fvg:
+            fvg=(m5[i-2].high,m5[i].low); trigger=c; trigger_i=i; break
+        if side=="SHORT" and m5[i-2].low-m5[i].high >= min_fvg:
+            fvg=(m5[i].high,m5[i-2].low); trigger=c; trigger_i=i; break
     if not fvg: return None
-    # Late-entry ban: current close may not already have run >1 ATR from FVG midpoint.
+
+    # Stage 3 — freshness / late-entry ban. The setup must still be executable.
+    if len(m5)-1-trigger_i > max_age: return None
     mid=sum(fvg)/2; current=m5[-1].close
     if (current-mid)*wanted > av: return None
-    quality=min(94,78 + (5 if _bias("H1",h1)==wanted else 0)+(4 if _bias("H4",h4)==wanted else 0)+min(7,int(abs(gap)*30)))
+    # If price has already closed through the far side of the FVG against the setup,
+    # the execution zone is invalid rather than a delayed signal.
+    if side=="LONG" and current < min(fvg)-.10*av: return None
+    if side=="SHORT" and current > max(fvg)+.10*av: return None
+
+    support,conflict=_context(symbol,by_tf,side)
+    quality=76
+    quality += 5 if _bias("H1",h1)==wanted else 0
+    quality += 4 if _bias("H4",h4)==wanted else 0
+    quality += min(6,int(abs(gap)*30))
+    quality += min(5,2*len(support))
+    quality -= min(6,3*len(conflict))
+    quality=max(70,min(94,quality))
     return {"symbol":symbol,"side":side,"window":window,"liquidity":level,"sweep":m5[sweep].low if side=="LONG" else m5[sweep].high,
-            "fvg_low":min(fvg),"fvg_high":max(fvg),"entry":mid,"close":current,"quality":quality,"confidence":max(70,quality-5),
-            "gap":gap,"trigger_dt":trigger.dt,"atr":av}
+            "mss_level":mss_level,"fvg_low":min(fvg),"fvg_high":max(fvg),"entry":mid,"close":current,"quality":quality,"confidence":max(68,quality-5),
+            "gap":gap,"trigger_dt":trigger.dt,"atr":av,"context_support":support,"context_conflict":conflict}
 
 def _p(symbol,x): return f"{x:.3f}" if "JPY" in symbol else f"{x:.5f}"
 def format_message(e):
     return "\n".join(["━━━━━━━━━━━━━━━━━━",f"🥈 ICT SILVER BULLET — {e['side']}","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {e['symbol']}",f"Окно: {e['window']}",
-        f"Направление: {e['side']}",f"Снятая ликвидность: {_p(e['symbol'],e['liquidity'])}",f"Экстремум sweep: {_p(e['symbol'],e['sweep'])}",
+        f"Направление: {e['side']}",f"Снятая ликвидность: {_p(e['symbol'],e['liquidity'])}",f"Экстремум sweep: {_p(e['symbol'],e['sweep'])}",f"MSS уровень: {_p(e['symbol'],e['mss_level'])}",
         f"FVG: {_p(e['symbol'],e['fvg_low'])}–{_p(e['symbol'],e['fvg_high'])}",f"Рабочая середина FVG: {_p(e['symbol'],e['entry'])}",
         f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",f"Вероятность: {e['confidence']}%","",
-        "✅ Факт: в активном Silver Bullet окне снята ликвидность, затем закрытой M5 подтверждены displacement/MSS и FVG. Поздний вход заблокирован автоматически."])
+        "✅ Факт: в активном Silver Bullet окне снята ликвидность; закрытая M5 пробила подтверждённый локальный swing (MSS), дала displacement и FVG. HTF/LTF-контекст, сила валют, новости и поздний вход проверены автоматически."])
 
 def process_market(market,strength,events=None,now_utc=None):
     st=_load(); sent=st.setdefault('sent',{}); out=[]

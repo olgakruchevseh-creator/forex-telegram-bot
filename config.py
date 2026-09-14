@@ -563,7 +563,9 @@ REGIME_RANGE_EFF = 0.24
 REGIME_RANGE_PENALTY = 3
 REGIME_HIGH_VOL_PENALTY = 2
 
-# ICT Silver Bullet — самостоятельный внутридневной модуль.
+# ICT Silver Bullet — внутрисессионный execution-модуль.
+# Он может быть источником для Master/Navigator, но не голосует отдельно в Echo/Next Pivot/Briefing:
+# иначе один и тот же sweep/displacement/FVG был бы посчитан дважды как направление сессии.
 # Окна задаются по New York и автоматически учитывают DST.
 SILVER_BULLET_ENABLED = True
 SILVER_BULLET_WINDOWS_NY = ((3, 4), (10, 11), (14, 15))

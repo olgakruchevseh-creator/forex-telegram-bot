@@ -52,6 +52,8 @@ def _side(text: str) -> int:
 
 def _evidence_name(text: str) -> str:
     upper = text.upper()
+    if "ICT SILVER BULLET" in upper:
+        return "подтверждён ICT Silver Bullet: liquidity sweep → MSS → displacement → FVG"
     if "POWER OF THREE" in upper or "AMD /" in upper:
         return "подтверждена модель AMD / Power of Three"
     if "СНЯТИЕ ЛИКВИДНОСТИ" in upper:
