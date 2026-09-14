@@ -39,6 +39,7 @@ import amd_power_of_three
 import crt_candle_range
 import movement_progress
 import liquidity_sweep
+import poc_profile
 import order_block
 import breaker_block
 import smart_money_62_26
@@ -761,6 +762,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля снятия ликвидности")
 
+        if getattr(cfg, "POC_ENABLED", True):
+            try:
+                for text in poc_profile.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                log.exception("Ошибка модуля POC")
+
         invalidated_order_blocks = []
         if getattr(cfg, "ORDER_BLOCK_ENABLED", True):
             try:
@@ -1017,6 +1025,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = fib_smc.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Fib+SMC")
+            if "🎯 POC —" in text:
+                try:
+                    source_image = poc_profile.image_for_alert(source_text)
+                except Exception:
+                    log.exception("Подготовка изображения POC")
             if "🧱 РЕТЕСТ ORDER BLOCK" in text:
                 try:
                     source_image = order_block.image_for_alert(source_text)
