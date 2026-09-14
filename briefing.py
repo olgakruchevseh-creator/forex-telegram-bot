@@ -73,6 +73,10 @@ class PairBrief:
     m5: str = "нет данных"
     position: str = "ФАЗА НЕ ПОДТВЕРЖДЕНА"
     amd: str = "ФАЗА НЕ ПОДТВЕРЖДЕНА"
+    context_alignment: int = 0
+    context_support: int = 0
+    context_against: int = 0
+    strength_relation: str = ""
 
 
 def now_local() -> datetime:
@@ -278,6 +282,55 @@ def technical_pair_side(brief: PairBrief) -> Optional[str]:
         return "SHORT"
     return None
 
+
+
+def _side_int(side: Optional[str]) -> int:
+    return 1 if side == "LONG" else (-1 if side == "SHORT" else 0)
+
+
+def _strength_relation(gap: float, side: Optional[str]) -> str:
+    if not side or abs(gap) <= 0.03:
+        return "нейтрально"
+    supports = (side == "LONG" and gap > 0) or (side == "SHORT" and gap < 0)
+    return "поддерживает направление" if supports else "против направления"
+
+
+def _briefing_context(symbol: str, by_tf: dict, side: Optional[str]) -> tuple[int, int, int]:
+    """Grouped internal confluence. Related SMC tools are not counted as separate votes."""
+    si = _side_int(side)
+    if not si:
+        return 0, 0, 0
+    groups: list[int] = []
+    # Group 1: impulse. One fresh displacement is one vote, regardless of timeframe.
+    try:
+        import displacement
+        d = displacement.confirm_direction(by_tf or {}, side)
+        groups.append(1 if d else 0)
+    except Exception:
+        log.exception("Displacement context %s", symbol)
+    # Group 2: dealing range / liquidity. Collapse PD + IRL + ERL into one vote.
+    liquidity=[]
+    for mod_name in ("premium_discount", "htf_irl", "erl"):
+        try:
+            mod=__import__(mod_name)
+            c=mod.analyze_symbol(symbol, by_tf or {}, si)
+            if c is not None:
+                liquidity.append(int(getattr(c,"alignment",0)))
+        except Exception:
+            log.exception("%s context %s", mod_name, symbol)
+    if liquidity:
+        total=sum(liquidity)
+        groups.append(1 if total>0 else (-1 if total<0 else 0))
+    # Group 3: BPR reaction. Kept separate because it requires a confirmed LTF reaction.
+    try:
+        import bpr
+        c=bpr.analyze_symbol(symbol, by_tf or {}, si)
+        if c is not None:
+            groups.append(int(getattr(c,"alignment",0)))
+    except Exception:
+        log.exception("BPR context %s", symbol)
+    support=sum(v>0 for v in groups); against=sum(v<0 for v in groups)
+    return support-against, support, against
 
 def pair_side(brief: PairBrief) -> Optional[str]:
     side = technical_pair_side(brief)
@@ -555,6 +608,9 @@ def build_pair_briefs(
             amd=amd_status,
         )
         technical_side = technical_pair_side(brief)
+        brief.strength_relation = _strength_relation(brief.gap, technical_side)
+        ca, cs, cx = _briefing_context(symbol, market.get(symbol) or {}, technical_side)
+        brief.context_alignment, brief.context_support, brief.context_against = ca, cs, cx
         brief.side = pair_side(brief)
         if technical_side and zigzag_h4_side and (
             (technical_side == "LONG" and zigzag_h4_side < 0)
@@ -581,6 +637,7 @@ def build_pair_briefs(
             score += 1.5
         if "RANGE" in brief.state:
             score -= 1.5
+        score += max(-1.5, min(1.5, brief.context_alignment * 0.75))
         brief.score = score
         out.append(brief)
     return out
@@ -633,7 +690,9 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
         return lines
     lines.append(f"Цена: {dxy.price:.2f}")
     lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
-    lines.append(f"Направление: {_dir_word(effective_dxy_bias(dxy))}")
+    lines.append(f"Направление: {_dir_word(effective_dxy_bias(dxy))} · структурное")
+    impulse = "LONG" if dxy.change_pct > 0 else ("SHORT" if dxy.change_pct < 0 else "НЕЙТРАЛЬНО")
+    lines.append(f"Текущий импульс закрытой H1: {impulse}")
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
     lines.append(f"ADX: {dxy.adx:.0f}")
@@ -739,7 +798,10 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         lines.append(f"Текущее положение: {position_icon} {b.position}")
         lines.append(f"AMD: {amd_icon} {amd_text}")
         lines.append(f"Согласие: {b.agree}")
-        lines.append(f"Сила: {force}")
+        relation = b.strength_relation or _strength_relation(b.gap, technical_pair_side(b))
+        lines.append(f"Сила: {force} · {relation}")
+        if b.context_support or b.context_against:
+            lines.append(f"Внутренний контекст: +{b.context_support} / -{b.context_against} групп подтверждения")
         lines.append(f"Состояние: {b.state}")
         lines.append("")
     return lines
@@ -753,7 +815,18 @@ def briefs_have_market(briefs: list[PairBrief]) -> bool:
     return ok >= 3
 
 
-def format_leaders(leaders: list[PairBrief], data_ok: bool = True) -> list[str]:
+
+def _best_candidate(briefs: list[PairBrief]) -> Optional[PairBrief]:
+    candidates=[]
+    for b in briefs:
+        tech=technical_pair_side(b)
+        if not tech or b.agree_n < 2 or b.state == "НЕТ ДАННЫХ":
+            continue
+        candidates.append((b.score, b))
+    return max(candidates, key=lambda x:x[0])[1] if candidates else None
+
+
+def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optional[list[PairBrief]] = None) -> list[str]:
     lines = ["🏆 ЛИДЕР:"]
     ready = [b for b in leaders if b.side] if data_ok else []
     if not data_ok:
@@ -763,7 +836,16 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True) -> list[str]:
         lines.append("расчёт по рынку неполный")
         return lines
     if not ready:
-        lines.append("НЕТ")
+        lines.append("НЕТ ПОЛНОСТЬЮ ПОДТВЕРЖДЁННОГО")
+        candidate = _best_candidate(briefs or [])
+        if candidate:
+            tech = technical_pair_side(candidate)
+            reasons=[]
+            if candidate.strength_relation == "против направления": reasons.append("сила валют против")
+            if candidate.zigzag_h4_side and _side_int(tech) != candidate.zigzag_h4_side: reasons.append("ZigZag H4 против")
+            if candidate.context_against: reasons.append(f"SMC-контекст против: {candidate.context_against}")
+            why = " · ".join(reasons) if reasons else "не хватает полного подтверждения"
+            lines.append(f"Лучший технический кандидат: {candidate.symbol} {tech} · {why}")
         lines.append("")
         lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")
         lines.append("НЕТ")
@@ -821,7 +903,7 @@ def build_briefing_text(
     except Exception:
         log.exception("доска пар")
     try:
-        lines.extend(format_leaders(leaders, briefs_have_market(briefs)))
+        lines.extend(format_leaders(leaders, briefs_have_market(briefs), briefs))
     except Exception:
         log.exception("лидеры")
         lines.extend(["🏆 ЛИДЕР:", "НЕТ", "", "🎯 ПРИОРИТЕТ СЕССИИ:", "НЕТ"])
