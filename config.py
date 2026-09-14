@@ -114,7 +114,7 @@ LTF_MIN_AGREE = 2
 SIGNAL_COOLDOWN_HOURS = 6
 # Единый бюджет для всех торговых модулей после одной закрытой H1.
 # Часовой брифинг и новостные сообщения в этот лимит не входят.
-MAX_MODULE_ALERTS_PER_H1 = 3
+MAX_MODULE_ALERTS_PER_H1 = 0  # ZIP 27: shared limit disabled
 SIGNAL_JOURNAL_ENABLED = True
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
@@ -126,7 +126,7 @@ MASTER_DIRECTION_ENABLED = True
 MASTER_STRENGTH_MIN_GAP = 0.05
 MASTER_MIN_QUALITY = 78
 MASTER_REQUIRE_MODULE_TRIGGER = True
-MASTER_MAX_SIGNALS_PER_H1 = 2
+MASTER_MAX_SIGNALS_PER_H1 = 7
 # Echo — историческая проекция, только внутренний фильтр Master Direction.
 ECHO_ENABLED = True
 ECHO_SESSION_MODE = True  # прогноз от текущей до следующей сессии
@@ -285,7 +285,7 @@ MOVEMENT_PROGRESS_MIN_CHANGE_PCT = 8
 # Неотправленный модульный сигнал ждёт подтверждения максимум 4 закрытых H1.
 # Торговый кандидат не может становиться «новым входом» спустя несколько часов.
 # 45 минут достаточно для согласования закрытых M15 и ближайшей H1-картины.
-SIGNAL_CANDIDATE_TTL_HOURS = 0.75
+SIGNAL_CANDIDATE_TTL_HOURS = 4.0
 # Одно предупреждение перед структурной целью; промежуточные проценты не спамят.
 SIGNAL_NEAR_TARGET_PCT = 85
 # Экстремумы H4/D1 ближе этого расстояния объединяются в одну цель TR.

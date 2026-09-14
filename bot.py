@@ -950,16 +950,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # AMD уже будет отправлен обязательным потоком ниже, поэтому повторно
         # не участвует в ранжировании и не может быть вытеснен/задублирован.
 
-        buckets = state.setdefault("module_alert_buckets", {})
-        bucket_key = closed_dt or datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
-        bucket = buckets.setdefault(bucket_key, {"count": 0, "pairs": []})
-        hourly_limit = max(0, int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 3)))
-        remaining = max(0, hourly_limit - int(bucket.get("count") or 0))
-        selected_alerts = select_trade_alerts(
-            module_alerts,
-            limit=remaining,
-            blocked_pairs=set(bucket.get("pairs") or []),
-        ) if remaining else []
+        # ZIP 27: event-driven delivery. No shared top-3 H1 budget.
+        # Each module emits only after its own confirmation/anti-spam logic.
+        selected_alerts = list(module_alerts)
         # Повторяем карточки, чья предыдущая отправка временно не удалась.
         # Они не расходуют лимит новых исходных сигналов.
         await _flush_navigator_outbox(context.application, int(chat_id), state)
@@ -968,20 +961,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 signal_journal.update_market(market)
             except Exception:
                 log.exception("Обновление журнала сигналов")
-        # Разрешаем доставку только тем исходным событиям, которые реально
-        # вошли в строгую подтверждённую карточку Navigator/Master Direction.
-        # Это закрывает прежний mandatory-обход для AMD/Levels.
-        strict_source_set = {
-            source
-            for _priority, card in confirmed_alerts
-            for source in navigator_sources.get(card, [])
-        }
-        mandatory_amd_set = set(mandatory_amd_alerts)
-        mandatory_level_set = set(mandatory_level_breakouts)
-        proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + selected_alerts
-        delivery_alerts = list(dict.fromkeys(
-            text for text in proposed_delivery if text in strict_source_set
-        ))
+        # ZIP 27: confirmed source events no longer wait for Master/Navigator.
+        # Master/Navigator may follow as a stricter companion, but cannot suppress source.
+        proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + [
+            text for _priority, text in selected_alerts
+        ]
+        delivery_alerts = list(dict.fromkeys(proposed_delivery))
         # CPI — единый защитный слой поверх всех модулей: сам факт модуля не теряется,
         # но карточка явно запрещает трактовать новостной импульс как готовый вход.
         try:
@@ -1181,16 +1166,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Запись отправленного сигнала в журнал")
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
-            # Шестичасовой cooldown относится к итоговой торговой карточке.
-            # Исходное событие не должно мешать Навигатору прислать последующее
-            # подтверждение и сопровождение этого же сценария.
-            # Обязательный AMD не занимает место в лимите новых сигналов и не
-            # блокирует обычного кандидата той же валютной пары.
-            if text not in mandatory_amd_set and text not in mandatory_level_set:
-                bucket["count"] = int(bucket.get("count") or 0) + 1
-                if pair and pair not in bucket.setdefault("pairs", []):
-                    bucket["pairs"].append(pair)
-
             # После исходного события отправляется только уже готовая строгая
             # карточка Navigator/Master Direction. Fallback build_source_companion
             # здесь запрещён: локальный модуль не может сам создать торговый маршрут.
@@ -1208,9 +1183,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await _flush_navigator_outbox(context.application, int(chat_id), state)
                 if pair and direct_side:
                     state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
-        # One small current-H1 record is enough; old budgets cannot affect new hours.
-        state["module_alert_buckets"] = {bucket_key: bucket}
-
         # Отдельный неподтверждённый Навигатор отключён: его расчёт уже включён
         # в единую карточку выше.
 
