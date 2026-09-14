@@ -162,7 +162,7 @@ def analyze_symbol(symbol: str, by_tf: dict) -> dict | None:
 
 
 
-def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8) -> dict | None:
+def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, strength: dict | None = None) -> dict | None:
     """Сессионная версия Next Pivot: всегда даёт оценочный путь при наличии H1.
 
     Сначала используется полноценная статистическая Pivot-модель. Если истории
@@ -217,8 +217,19 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8) -> 
             "main_score": probability, "flat_score": max(25, 100-probability),
             "reaction_score": max(35, 92-probability),
         }
-    # Независимая структурная сверка с ансамблем ZigZag. Она не переворачивает
-    # статистическую модель, а снижает/повышает доверие и отображается в карточке.
+    result["_strength"] = strength or {}
+
+    # Сессионный горизонт жёсткий: статистический Pivot за его пределами не
+    # выдаём за цель текущей сессии. 0 H1 означает, что зона уже активна.
+    session_hours = max(1, int(session_hours))
+    result["pivot_active"] = int(result.get("bars_high", 0)) == 0 or (
+        float(result["zone_low"]) <= float(result["current"]) <= float(result["zone_high"])
+    )
+    result["inside_session"] = bool(result["pivot_active"] or int(result.get("bars_low", 999)) <= session_hours)
+    result["outside_session"] = not result["inside_session"]
+
+    # Независимая структурная сверка ZigZag. При 0/3 штраф теперь существенный:
+    # статистическая гипотеза остаётся видимой, но не выглядит равной 2/3–3/3.
     try:
         import zigzag_scanner
         zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
@@ -228,14 +239,83 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8) -> 
         agree = sum(v == side_n for v in checks)
         oppose = sum(v == -side_n for v in checks)
         result["zigzag_check"] = f"{agree}/{len(checks)}" if checks else "нет данных"
-        result["zigzag_conflict"] = oppose > agree and oppose >= 2
+        result["zigzag_conflict"] = bool(checks and agree == 0 and oppose >= 2)
         if checks:
-            result["probability"] = max(50, min(92, int(result["probability"]) + agree*2 - oppose*3))
-            result["main_score"] = result["probability"]
+            if len(checks) >= 3:
+                zz_adjust = {0: -16, 1: -8, 2: 4, 3: 8}.get(agree, 0)
+            else:
+                zz_adjust = int(round((agree/max(1, len(checks))-.5)*16))
+            result["probability"] = max(35, min(92, int(result["probability"]) + zz_adjust))
     except Exception:
         log.exception("NEXT_PIVOT_ZIGZAG_CONTEXT_FAILED symbol=%s", symbol)
         result["zigzag_check"] = "ошибка сверки"
         result["zigzag_conflict"] = False
+
+    # Новые SMC-модули используются как независимые группы подтверждения, а не
+    # как множество одинаковых голосов. Это защищает от двойного подсчёта FVG/SMC.
+    confirmations, cautions = [], []
+    side_n = 1 if result["side"] == "LONG" else -1
+    try:
+        import premium_discount, erl, bpr, inducement, displacement, order_block
+        pd = premium_discount.analyze_symbol(symbol, by_tf, side_n)
+        if pd and pd.alignment > 0: confirmations.append("Premium/Discount")
+        elif pd and pd.alignment < 0: cautions.append("Premium/Discount")
+        ec = erl.analyze_symbol(symbol, by_tf, side_n)
+        if ec and ec.alignment > 0: confirmations.append("ERL")
+        elif ec and ec.alignment < 0: cautions.append("ERL")
+        bc = bpr.analyze_symbol(symbol, by_tf, side_n)
+        if bc and bc.alignment > 0: confirmations.append("BPR")
+        elif bc and bc.alignment < 0: cautions.append("BPR")
+        ic = inducement.analyze_symbol(symbol, by_tf, side_n)
+        if ic and ic.alignment > 0: confirmations.append("IDM")
+        elif ic and ic.alignment < 0: cautions.append("IDM")
+        dc = displacement.confirm_direction(by_tf, result["side"], "H1")
+        opposite = displacement.confirm_direction(by_tf, "SHORT" if result["side"] == "LONG" else "LONG", "H1")
+        if dc: confirmations.append("Displacement")
+        elif opposite: cautions.append("Displacement")
+        obs=[]
+        for tf in ("H4", "H1"):
+            bars_tf=closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+            ob=order_block.newest_block(symbol, tf, bars_tf) if bars_tf else None
+            if ob: obs.append(ob)
+        if any(ob.side == result["side"] for ob in obs): confirmations.append("Order Block")
+        elif any(ob.side != result["side"] for ob in obs): cautions.append("Order Block")
+    except Exception:
+        log.exception("NEXT_PIVOT_SMC_CONTEXT_FAILED symbol=%s", symbol)
+
+    # POC и AMD+CRT — отдельные группы. Используем только свежие подтверждённые
+    # состояния; отсутствие сетапа не штрафует прогноз.
+    strength = result.pop("_strength", {}) if isinstance(result.get("_strength", {}), dict) else {}
+    if strength:
+        try:
+            import poc_profile
+            pc = poc_profile.detect(symbol, by_tf, strength)
+            if pc and pc.get("side") == result["side"]: confirmations.append("POC")
+            elif pc: cautions.append("POC")
+        except Exception:
+            log.exception("NEXT_PIVOT_POC_CONTEXT_FAILED symbol=%s", symbol)
+        try:
+            import amd_power_of_three, crt_candle_range
+            h1=closed_candles(by_tf.get("H1") or [],60); h4=closed_candles(by_tf.get("H4") or [],240); m15=closed_candles(by_tf.get("M15") or [],15)
+            amd=amd_power_of_three.detect_amd(symbol,h1,h4,m15,strength)
+            crt=crt_candle_range.detect_crt(symbol,h1,h4,m15,strength)
+            directional=[x for x in (amd,crt) if x and not x.get("late")]
+            if directional:
+                if any(x.get("side") == result["side"] for x in directional): confirmations.append("AMD/CRT")
+                if any(x.get("side") != result["side"] for x in directional): cautions.append("AMD/CRT")
+        except Exception:
+            log.exception("NEXT_PIVOT_AMD_CRT_CONTEXT_FAILED symbol=%s", symbol)
+
+    # Максимум ±12 пунктов от всех новых слоёв вместе: они уточняют статистику,
+    # но не могут самостоятельно перевернуть Pivot-модель.
+    smc_adjust = max(-12, min(12, len(set(confirmations))*2 - len(set(cautions))*3))
+    result["probability"] = max(30, min(94, int(result["probability"]) + smc_adjust))
+    if result["outside_session"]:
+        result["probability"] = max(30, int(result["probability"]) - 8)
+    result["smc_confirmations"] = sorted(set(confirmations))
+    result["smc_cautions"] = sorted(set(cautions))
+    result["smc_adjust"] = smc_adjust
+    result["main_score"] = result["probability"]
     return result
 
 def _price(symbol: str, value: float) -> str:

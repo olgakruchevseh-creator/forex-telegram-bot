@@ -36,7 +36,7 @@ def _pair_events(symbol: str, events: list[newsmod.NewsEvent]) -> list[newsmod.N
 
 
 def _news_context(symbol: str, events: list[newsmod.NewsEvent], confidence: int | None,
-                  hours: int | None = None) -> dict:
+                  hours: int | None = None, confidence_floor: int = 50) -> dict:
     relevant = _pair_events(symbol, events)
     if hours is not None:
         from datetime import timedelta
@@ -69,7 +69,7 @@ def _news_context(symbol: str, events: list[newsmod.NewsEvent], confidence: int 
         elif event.impact == "MEDIUM":
             penalty = max(penalty, 5)
         uncertain = uncertain or event.economic_effect == "context_dependent"
-    adjusted = None if confidence is None else max(50, int(confidence) - penalty)
+    adjusted = None if confidence is None else max(int(confidence_floor), int(confidence) - penalty)
     if has_high:
         status = ("⚠️ Сценарий действует только до важной новости; после публикации нужна новая закрытая M15/H1."
                   if not uncertain else
@@ -212,26 +212,36 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
 
 
 def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
-                  current_name: str, next_name: str) -> dict:
-    result = next_pivot_projection.analyze_session_symbol(symbol, by_tf, hours)
-    news = _news_context(symbol, events, result["probability"] if result else None, hours)
+                  current_name: str, next_name: str, strength: dict | None = None) -> dict:
+    result = next_pivot_projection.analyze_session_symbol(symbol, by_tf, hours, strength=strength or {})
+    news = _news_context(symbol, events, result["probability"] if result else None, hours, confidence_floor=30)
     if result:
         side, icon = result["side"], ("🟢" if result["side"] == "LONG" else "🔴")
         reaction = "SHORT 🔴" if side == "LONG" else "LONG 🟢"
         kind = "ВЕРШИНЫ" if result["kind"] == "high" else "ОСНОВАНИЯ"
         decimals = 3 if "JPY" in symbol else 5
-        inside_window = int(result["bars_low"]) <= hours
         mode = ("ОЦЕНОЧНАЯ СЕССИОННАЯ ПРОЕКЦИЯ" if result.get("estimated")
                 else "СТАТИСТИЧЕСКАЯ PIVOT-ПРОЕКЦИЯ")
         conflict = " · ⚠️ есть структурное противоречие" if result.get("zigzag_conflict") else ""
+        if result.get("pivot_active"):
+            window_line = "Статус Pivot: зона уже активна · оценивается реакция от неё"
+        elif result.get("outside_session"):
+            window_line = (f"Статус Pivot: за пределами текущей сессии · статистическое окно "
+                           f"{result['bars_low']}–{result['bars_high']} H1")
+        else:
+            hi = min(int(hours), int(result["bars_high"]))
+            window_line = f"Окно Pivot в этой сессии: через {result['bars_low']}–{hi} закрытых H1"
+        confirms = ", ".join(result.get("smc_confirmations") or []) or "нет свежего подтверждения"
+        cautions = ", ".join(result.get("smc_cautions") or []) or "нет"
         scenario = [
             f"Режим расчёта: {mode}",
             f"Направление до следующей сессии: {side} {icon}",
             f"Ожидаемая зона {kind}: {result['zone_low']:.{decimals}f}–{result['zone_high']:.{decimals}f}",
-            f"Окно Pivot: через {result['bars_low']}–{result['bars_high']} закрытых H1",
-            f"Попадает в текущий сессионный период: {'ДА' if inside_window else 'НЕТ'}",
+            window_line,
             f"Сверка с ZigZag D1/H4/H1: {result.get('zigzag_check', 'нет данных')}{conflict}",
-            f"Вероятность с учётом новостного риска: {news['confidence']}%",
+            f"SMC-подтверждения: {confirms}",
+            f"SMC-предупреждения: {cautions}",
+            f"Вероятность с учётом структуры, SMC и новостного риска: {news['confidence']}%",
             f"Возможная реакция после зоны: {reaction} · только после подтверждения M15/H1",
         ]
         chart_result = dict(result)
@@ -274,7 +284,7 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
             try:
                 report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name, strength)
                           if module == "echo" else
-                          _pivot_report(symbol, by_tf, events, hours, current_name, next_name))
+                          _pivot_report(symbol, by_tf, events, hours, current_name, next_name, strength))
                 report["key"] = key
                 reports.append(report)
             except Exception:
