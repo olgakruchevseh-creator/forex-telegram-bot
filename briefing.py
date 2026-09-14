@@ -274,8 +274,8 @@ def technical_pair_side(brief: PairBrief) -> Optional[str]:
     core = [d1, h4, h1]
     up = sum(1 for x in core if x > 0)
     down = sum(1 for x in core if x < 0)
-    if up and down:
-        return None
+    # Majority of D1/H4/H1 defines the active technical side.
+    # A 2/3 split is still directional; the dissenting TF is reflected in agreement/state.
     if up >= 2:
         return "LONG"
     if down >= 2:
@@ -295,7 +295,7 @@ def _strength_relation(gap: float, side: Optional[str]) -> str:
     return "поддерживает направление" if supports else "против направления"
 
 
-def _briefing_context(symbol: str, by_tf: dict, side: Optional[str]) -> tuple[int, int, int]:
+def _briefing_context(symbol: str, by_tf: dict, side: Optional[str], strength: Optional[dict[str, float]] = None, events=None, now_utc=None) -> tuple[int, int, int]:
     """Grouped internal confluence. Related SMC tools are not counted as separate votes."""
     si = _side_int(side)
     if not si:
@@ -329,6 +329,50 @@ def _briefing_context(symbol: str, by_tf: dict, side: Optional[str]) -> tuple[in
             groups.append(int(getattr(c,"alignment",0)))
     except Exception:
         log.exception("BPR context %s", symbol)
+    # Group 4: value / execution confluence. POC and Fib+SMC are collapsed
+    # into one vote because both describe where price is likely to react.
+    value_votes=[]
+    try:
+        import poc_profile
+        e=poc_profile.detect(symbol, by_tf or {}, strength or {})
+        if e and e.get("side") in ("LONG", "SHORT"):
+            value_votes.append(1 if e.get("side") == side else -1)
+    except Exception:
+        log.exception("POC context %s", symbol)
+    try:
+        import fib_smc
+        e=fib_smc.detect_setup(symbol, by_tf or {}, strength or {}, events=events, now_utc=now_utc)
+        if e and e.get("side") in ("LONG", "SHORT"):
+            value_votes.append(1 if e.get("side") == side else -1)
+    except Exception:
+        log.exception("Fib+SMC context %s", symbol)
+    if value_votes:
+        total=sum(value_votes)
+        groups.append(1 if total>0 else (-1 if total<0 else 0))
+
+    # Group 5: confirmed impulse / range expansion. CRT and Disbalance are
+    # one family here so the same expansion is never counted twice.
+    impulse2=[]
+    try:
+        import crt_candle_range
+        h1=closed_candles((by_tf or {}).get("H1") or [], 60)
+        h4=closed_candles((by_tf or {}).get("H4") or [], 240)
+        m15=closed_candles((by_tf or {}).get("M15") or [], 15)
+        e=crt_candle_range.detect_crt(symbol, h1, h4, m15, strength or {})
+        if e and e.get("side") in ("LONG", "SHORT"):
+            impulse2.append(1 if e.get("side") == side else -1)
+    except Exception:
+        log.exception("CRT context %s", symbol)
+    try:
+        import disbalance
+        e=disbalance.analyze_symbol(symbol, by_tf or {}, strength or {})
+        if e and getattr(e, "side", None) in ("LONG", "SHORT"):
+            impulse2.append(1 if e.side == side else -1)
+    except Exception:
+        log.exception("Disbalance context %s", symbol)
+    if impulse2:
+        total=sum(impulse2)
+        groups.append(1 if total>0 else (-1 if total<0 else 0))
     support=sum(v>0 for v in groups); against=sum(v<0 for v in groups)
     return support-against, support, against
 
@@ -609,7 +653,7 @@ def build_pair_briefs(
         )
         technical_side = technical_pair_side(brief)
         brief.strength_relation = _strength_relation(brief.gap, technical_side)
-        ca, cs, cx = _briefing_context(symbol, market.get(symbol) or {}, technical_side)
+        ca, cs, cx = _briefing_context(symbol, market.get(symbol) or {}, technical_side, strength, events, now_utc)
         brief.context_alignment, brief.context_support, brief.context_against = ca, cs, cx
         brief.side = pair_side(brief)
         if technical_side and zigzag_h4_side and (
