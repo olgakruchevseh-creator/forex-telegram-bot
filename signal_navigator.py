@@ -8,6 +8,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import config as cfg
@@ -193,6 +194,21 @@ def _source_number(text: str, label: str, default: int) -> int:
     return int(match.group(1)) if match else default
 
 
+def _source_event_dt(text: str) -> str:
+    """Return the source event time as ISO Europe/Amsterdam when present."""
+    match = re.search(
+        r"^🕐\s*Время закрытия:\s*(\d{2}\.\d{2}\.\d{4})\s*[·•]\s*(\d{2}:\d{2})",
+        text or "", re.M,
+    )
+    if not match:
+        return ""
+    try:
+        dt = datetime.strptime(f"{match.group(1)} {match.group(2)}", "%d.%m.%Y %H:%M")
+        return dt.replace(tzinfo=ZoneInfo("Europe/Amsterdam")).isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
 def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dict | None:
     """Строит маршрут от цены свежего модульного события без повторного veto."""
     h1 = movement_progress._bars(by_tf, "H1")
@@ -222,7 +238,13 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
                 candidates.append((abs(swing.price-current), float(swing.price), tf))
     candidates.sort(key=lambda item: item[0])
     targets = []
-    tolerance = av * float(getattr(cfg, "MOVEMENT_TARGET_MERGE_ATR", .15))
+    # Navigator targets must be meaningfully separated. Very close structural
+    # levels are one reaction area, not separate TR1/TR2 milestones.
+    merge_atr = max(
+        float(getattr(cfg, "MOVEMENT_TARGET_MERGE_ATR", .15)),
+        float(getattr(cfg, "NAVIGATOR_TARGET_MIN_GAP_ATR", .35)),
+    )
+    tolerance = av * merge_atr
     for _distance, price, tf in candidates:
         if any(abs(price-item["price"]) <= tolerance for item in targets):
             continue
@@ -257,6 +279,9 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         "mode": movement_progress._movement_mode(
             direction, d1_view.bias if d1_view else 0, h4_view.bias if h4_view else 0),
         "gap": gap, "h1_dt": h1[-1].dt,
+        # For M15/other fresh triggers the latest closed H1 can be older than
+        # the actual signal. Time horizon must never point into the past.
+        "horizon_base_dt": _source_event_dt(source_text),
     }
 
 
@@ -359,8 +384,15 @@ def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict
     end_low = end_high = ""
     if h1:
         try:
-            raw = str(h1[-1].dt).replace("Z", "+00:00")
+            raw = str(route.get("horizon_base_dt") or h1[-1].dt).replace("Z", "+00:00")
             dt = datetime.fromisoformat(raw)
+            amsterdam = ZoneInfo("Europe/Amsterdam")
+            if dt.tzinfo is None:
+                # Twelve Data candle timestamps in this project are treated as
+                # Europe/Amsterdam when no offset is supplied.
+                dt = dt.replace(tzinfo=amsterdam)
+            else:
+                dt = dt.astimezone(amsterdam)
             end_low = (dt + timedelta(hours=low)).strftime("%H:%M")
             end_high = (dt + timedelta(hours=high)).strftime("%H:%M")
         except (TypeError, ValueError):
