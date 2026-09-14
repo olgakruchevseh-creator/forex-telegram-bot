@@ -1088,7 +1088,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Подготовка изображения Daily High/Low")
             if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in text:
                 try:
-                    source_image = consolidation_zone.image_for_alert(text)
+                    source_image = consolidation_zone.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Consolidation Zone")
             if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:

@@ -280,7 +280,12 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
         log.exception("ECHO_STRENGTH_CONTEXT_FAILED; continuing without strength")
         strength = {}
     reports = []
-    for module in ("echo", "pivot"):
+    modules = []
+    if getattr(cfg, "ECHO_ENABLED", True):
+        modules.append("echo")
+    if getattr(cfg, "NEXT_PIVOT_ENABLED", True):
+        modules.append("pivot")
+    for module in modules:
         for symbol in cfg.PAIRS:
             key = f"{session_id}|{module}|{symbol}"
             if delivered.get(key):
