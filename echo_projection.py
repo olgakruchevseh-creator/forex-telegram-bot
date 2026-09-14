@@ -138,6 +138,65 @@ def _context_score(symbol: str, by_tf: dict, side: int, strength: dict[str, floa
             "dxy_bias": int(dxy_bias or 0)}
 
 
+
+
+def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
+    """Grouped SMC confirmation for Echo. Each family contributes once to avoid double counting."""
+    score = 0
+    notes = []
+    # Impulse family
+    try:
+        import displacement
+        hit = displacement.confirm_direction(by_tf, "LONG" if side > 0 else "SHORT")
+        if hit:
+            score += 5; notes.append("Displacement")
+    except Exception:
+        pass
+    # Location / liquidity family
+    loc_votes = []
+    for module_name in ("premium_discount", "htf_irl", "erl", "bpr"):
+        try:
+            mod = __import__(module_name)
+            ctx = mod.analyze_symbol(symbol, by_tf, side)
+            if ctx is not None:
+                loc_votes.append(module_name)
+        except Exception:
+            pass
+    if loc_votes:
+        score += min(7, 3 + 2 * len(loc_votes)); notes.append("SMC-zone")
+    return {"score": score, "notes": notes}
+
+def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], strength=None, dxy_bias=0) -> dict | None:
+    """Always choose the more likely session direction when H1 data exists, even without analogues."""
+    bars = closed_candles(by_tf.get("H1") or [], 60)
+    if len(bars) < 30 or not horizons:
+        return None
+    long_ctx = _context_score(symbol, by_tf, 1, strength, dxy_bias)
+    short_ctx = _context_score(symbol, by_tf, -1, strength, dxy_bias)
+    long_smc = _smc_overlay(symbol, by_tf, 1); short_smc = _smc_overlay(symbol, by_tf, -1)
+    long_score = long_ctx["score"] + long_smc["score"]
+    short_score = short_ctx["score"] + short_smc["score"]
+    side = "LONG" if long_score >= short_score else "SHORT"
+    side_sign = 1 if side == "LONG" else -1
+    ctx = long_ctx if side_sign > 0 else short_ctx
+    smc = long_smc if side_sign > 0 else short_smc
+    margin = abs(long_score-short_score)
+    confidence = max(51, min(68, 52 + int(round(margin * .45))))
+    av = _atr_at(bars, len(bars)-1)
+    # Conservative path: low-confidence context projection, capped below 1 ATR/session.
+    end_move = side_sign * min(.90, .25 + margin/60.0)
+    max_h = max(horizons)
+    expected = {str(h): round(end_move * (h/max_h), 4) for h in horizons}
+    probs = {str(h): max(51, min(confidence, 51 + int(round((confidence-51)*(h/max_h))))) for h in horizons}
+    return {
+        "symbol": symbol, "side": side, "confidence": confidence, "raw_confidence": confidence,
+        "context": ctx, "smc_context": smc, "sample": 0, "estimated": True,
+        "horizons": probs, "expected_atr": round(abs(end_move), 2),
+        "session_hours": int(max_h), "session_end_probability": confidence,
+        "expected_by_horizon": expected, "atr": av, "current": bars[-1].close,
+        "closed_h1": bars[-1].dt,
+    }
+
 def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
             minimum_analogs_override=None, max_distance_override=None,
             minimum_confidence_override=None, strength=None, dxy_bias=0) -> dict | None:
@@ -153,10 +212,10 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     minimum = int(minimum_analogs_override if minimum_analogs_override is not None
                   else getattr(cfg, "ECHO_MIN_ANALOGS", 30))
     if len(bars) < 30 + max_h + minimum:
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
     current = _features(bars, len(bars)-1)
     if current is None:
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
     matches = []
     max_distance = float(max_distance_override if max_distance_override is not None
                          else getattr(cfg, "ECHO_MAX_DISTANCE", 2.6))
@@ -170,7 +229,7 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     matches.sort(key=lambda item: item[0])
     matches = matches[:int(getattr(cfg, "ECHO_MAX_ANALOGS", 50))]
     if len(matches) < minimum:
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
 
     probabilities, expected = {}, {}
     for horizon in horizons:
@@ -197,18 +256,18 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     minimum_confidence = float(minimum_confidence_override if minimum_confidence_override is not None
                                else getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
     if confidence < minimum_confidence:
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
 
     # Конец сессии обязан подтверждать итоговое направление.
     # Один встречный участок внутри пути разрешён как вероятный откат.
     side_sign = 1 if side == "LONG" else -1
     endpoint_ok = (probabilities[end_h] >= .5) if side_sign > 0 else (probabilities[end_h] < .5)
     if not endpoint_ok:
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
     aligned_h = sum(((probabilities[h] >= .5) if side_sign > 0 else (probabilities[h] < .5))
                     for h in horizons)
     if len(horizons) >= 3 and aligned_h < 2:
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
 
     context = _context_score(symbol, by_tf, side_sign, strength, dxy_bias)
     # Blend historical probability with independent market context. Context can veto
@@ -217,9 +276,9 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     adjusted = max(50, min(95, adjusted))
     hard_conflict = sum(v == -side_sign for v in context["tf_sides"].values()) >= 2
     if context["zigzag_h4"] == -side_sign and hard_conflict:
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
     if adjusted < int(round(float(getattr(cfg, "ECHO_CONTEXT_MIN_SCORE", .68)) * 100)):
-        return None
+        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
     return {
         "symbol": symbol,
         "side": side,

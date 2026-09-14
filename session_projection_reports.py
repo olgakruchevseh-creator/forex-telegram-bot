@@ -177,14 +177,17 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
             news_split = "средние новости учтены снижением надёжности траектории"
         else:
             news_split = "значимого новостного разрыва нет"
-        scenario = [f"Направление до следующей сессии: {side} {icon}",
+        weak = bool(result.get("estimated"))
+        scenario = [f"Режим расчёта: {'КОНТЕКСТНАЯ ОЦЕНКА' if weak else 'ИСТОРИКО-КОНТЕКСТНАЯ ПРОЕКЦИЯ'}",
+                    f"Направление до следующей сессии: {side} {icon}",
                     f"Вероятность направления у границы сессии: {endpoint}%",
                     f"Форма ожидаемого пути: {shape}",
                     f"Новостной слой: {news_split}",
                     *((["Статус: 🟡 СЛАБАЯ ОЦЕНОЧНАЯ ТРАЕКТОРИЯ"] if weak else [])),
                     f"Общая надёжность с учётом контекста/новостей: {confidence}%",
                     f"Траектория внутри сессии: {route}",
-                    f"Исторических аналогов: {result['sample']}"]
+                    (f"Исторических аналогов: {result['sample']}" if result['sample'] else
+                     "Исторических аналогов недостаточно — направление рассчитано по текущей структуре/SMC") ]
         chart_result = dict(result)
         chart_result["weak"] = weak
         chart_result["news_risk"] = news.get("risk", "NONE")
