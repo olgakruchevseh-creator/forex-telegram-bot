@@ -168,6 +168,13 @@ def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
             pass
     if loc_votes:
         score += min(7, 3 + 2 * len(loc_votes)); notes.append("SMC-zone")
+    try:
+        import liquidity_map
+        lp=liquidity_map.swept_context(symbol,by_tf,side)
+        if lp is not None:
+            score += 3; notes.append("BSL/SSL-sweep")
+    except Exception:
+        pass
 
     # Structure/timing family. These are read-only analyzers and therefore do
     # not consume anti-spam state or create Telegram alerts. One family vote.

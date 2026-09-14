@@ -133,6 +133,15 @@ def detect(symbol,by_tf,strength,events=None,now_utc=None):
     if side=="SHORT" and current > max(fvg)+.10*av: return None
 
     support,conflict=_context(symbol,by_tf,side)
+    # Shared BSL/SSL map is confluence only: Silver Bullet still requires its own
+    # kill-zone raid + MSS + displacement + FVG, so there is no double trigger.
+    liquidity_pool=None
+    try:
+        import liquidity_map
+        liquidity_pool=liquidity_map.swept_context(symbol,by_tf,side)
+        if liquidity_pool: support.append("liquidity_map")
+    except Exception:
+        pass
     quality=76
     quality += 5 if _bias("H1",h1)==wanted else 0
     quality += 4 if _bias("H4",h4)==wanted else 0
@@ -142,7 +151,8 @@ def detect(symbol,by_tf,strength,events=None,now_utc=None):
     quality=max(70,min(94,quality))
     return {"symbol":symbol,"side":side,"window":window,"liquidity":level,"sweep":m5[sweep].low if side=="LONG" else m5[sweep].high,
             "mss_level":mss_level,"fvg_low":min(fvg),"fvg_high":max(fvg),"entry":mid,"close":current,"quality":quality,"confidence":max(68,quality-5),
-            "gap":gap,"trigger_dt":trigger.dt,"atr":av,"context_support":support,"context_conflict":conflict}
+            "gap":gap,"trigger_dt":trigger.dt,"atr":av,"context_support":support,"context_conflict":conflict,
+            "liquidity_pool": (liquidity_pool.side if liquidity_pool else None)}
 
 def _p(symbol,x): return f"{x:.3f}" if "JPY" in symbol else f"{x:.5f}"
 def format_message(e):
