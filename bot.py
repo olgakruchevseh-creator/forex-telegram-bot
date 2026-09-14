@@ -43,6 +43,7 @@ import poc_profile
 import order_block
 import breaker_block
 import smart_money_62_26
+import silver_bullet_ict
 import daily_high_low
 import chain_entries
 import retest_confirmation
@@ -792,6 +793,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка модуля Smart Money 62-26")
 
+        if getattr(cfg, "SILVER_BULLET_ENABLED", True):
+            try:
+                try:
+                    silver_events = newsmod.load_events()
+                except Exception:
+                    log.exception("Новости для ICT Silver Bullet")
+                    silver_events = []
+                for text in silver_bullet_ict.process_market(
+                    market, strength, silver_events, datetime.now(timezone.utc)
+                ):
+                    module_alerts.append((0, text))
+            except Exception:
+                log.exception("Ошибка модуля ICT Silver Bullet")
+
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
                 for text in daily_high_low.process_market(market, strength):
@@ -1041,6 +1056,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = breaker_block.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Breaker Block")
+            if "🥈 ICT SILVER BULLET —" in text:
+                try:
+                    source_image = silver_bullet_ict.image_for_alert(source_text)
+                except Exception:
+                    log.exception("Подготовка изображения ICT Silver Bullet")
             if "🏦 SMART MONEY 62-26" in text:
                 try:
                     source_image = smart_money_62_26.image_for_alert(source_text)
