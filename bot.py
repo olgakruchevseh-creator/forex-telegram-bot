@@ -876,10 +876,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Ошибка сканера паттернов")
 
-        # Навигатор сопровождает модульные события, но не имеет права полностью
-        # блокировать их доставку. Готовая карточка Навигатора заменит исходную
-        # карточку той же пары/направления; неподтверждённый им сигнал всё равно
-        # останется доступен для отправки.
+        # Все торговые события сначала становятся внутренними кандидатами.
+        # Наружу исходная карточка может выйти только после строгого подтверждения
+        # Master Direction / Navigator для той же пары и направления.
         source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts + mandatory_level_breakouts]
         raw_alerts = [text for _priority, text in source_alerts]
         # События, не подтверждённые в эту H1, не теряются: они остаются
@@ -913,18 +912,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=master_direction")
                 master_results = []
-            strict_pairs = {item["symbol"] for item in master_results}
-            try:
-                local_results = master_direction.analyze_local_amd_market(
-                    market, strength, candidate_alerts,
-                    events=master_events, now_utc=datetime.now(timezone.utc),
-                )
-            except Exception:
-                log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=local_amd")
-                local_results = []
-            # Строгий основной сигнал всегда имеет преимущество; локальная
-            # карточка для той же пары в этот час не дублируется.
-            master_results.extend(item for item in local_results if item["symbol"] not in strict_pairs)
+            # Локальный AMD-маршрут намеренно не добавляется как обход строгого
+            # Master Direction. AMD, как и Levels и остальные модули, обязан
+            # пройти единый финальный контроль перед Telegram-доставкой.
             try:
                 built_navigator = signal_navigator.build_confirmed(
                     master_results, market, strength, candidate_alerts
@@ -963,9 +953,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 signal_journal.update_market(market)
             except Exception:
                 log.exception("Обновление журнала сигналов")
+        # Разрешаем доставку только тем исходным событиям, которые реально
+        # вошли в строгую подтверждённую карточку Navigator/Master Direction.
+        # Это закрывает прежний mandatory-обход для AMD/Levels.
+        strict_source_set = {
+            source
+            for _priority, card in confirmed_alerts
+            for source in navigator_sources.get(card, [])
+        }
         mandatory_amd_set = set(mandatory_amd_alerts)
         mandatory_level_set = set(mandatory_level_breakouts)
-        delivery_alerts = list(dict.fromkeys(mandatory_amd_alerts + mandatory_level_breakouts + selected_alerts))
+        proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + selected_alerts
+        delivery_alerts = list(dict.fromkeys(
+            text for text in proposed_delivery if text in strict_source_set
+        ))
         # CPI — единый защитный слой поверх всех модулей: сам факт модуля не теряется,
         # но карточка явно запрещает трактовать новостной импульс как готовый вход.
         try:
@@ -1170,22 +1171,14 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if pair and pair not in bucket.setdefault("pairs", []):
                     bucket["pairs"].append(pair)
 
-            # Сразу после исходного события отправляется связанная карточка
-            # Навигатора. Строгая версия используется, если уже готова; иначе
-            # строится маршрут от цены самого свежего модульного подтверждения.
+            # После исходного события отправляется только уже готовая строгая
+            # карточка Navigator/Master Direction. Fallback build_source_companion
+            # здесь запрещён: локальный модуль не может сам создать торговый маршрут.
             key = (pair, direct_side)
             companion = next((
                 (card, navigator_sources[card]) for _p, card in confirmed_alerts
                 if (_alert_pair(card), _direct_signal_side(card)) == key
             ), None)
-            if companion is None:
-                try:
-                    companion = signal_navigator.build_source_companion(text, market, strength)
-                except Exception:
-                    log.exception("NAVIGATOR_COMPANION_SKIPPED pair=%s", pair or "unknown")
-                    companion = None
-                if companion:
-                    signal_navigator.register_card(companion[0], companion[1], closed_dt)
             if companion:
                 nav_text, _nav_sources = companion
                 # Сохраняем раньше сетевой отправки: после уже доставленного
