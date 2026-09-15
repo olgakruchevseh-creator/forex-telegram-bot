@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 import movement_progress
 import zigzag_scanner
 import next_pivot_projection
@@ -369,7 +370,14 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
     strong_route = float(getattr(cfg, "SIGNAL_STRONG_ROUTE_ATR_OVERRIDE", 1.25))
     eff_floor = float(getattr(cfg, "SIGNAL_RANGE_EFFICIENCY_FLOOR", .18))
 
-    if remaining_h1 < min_h1:
+    ohlc = ohlc_movement.combine([
+        (tf, movement_progress.closed_candles(by_tf.get(tf) or [], minutes))
+        for tf, minutes in (("H4",240),("H1",60),("M15",15),("M5",5))
+    ], direction) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"available": False}
+
+    if ohlc.get("weak_reversal") and route_atr < strong_route:
+        eligible, reason = False, "weak_reversal_ohlc"
+    elif remaining_h1 < min_h1:
         eligible, reason = False, "short_horizon"
     elif route_atr < min_route:
         eligible, reason = False, "small_route"
@@ -380,7 +388,7 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
     return {
         "eligible": eligible, "reason": reason, "remaining_h1": remaining_h1,
         "route_atr": round(route_atr, 3), "median_body_atr": round(median_body_atr, 3),
-        "efficiency": round(efficiency, 3),
+        "efficiency": round(efficiency, 3), "ohlc": ohlc,
     }
 
 def build_source_companion(source_text: str, market: dict, strength: dict) -> tuple[str, list[str]] | None:
