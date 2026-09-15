@@ -12,6 +12,7 @@ import hashlib, io, json, logging, os
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 import amd_power_of_three
 
@@ -157,6 +158,9 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
             by=market.get(symbol) or {}; h1=closed_candles(by.get("H1") or [],60); h4=closed_candles(by.get("H4") or [],240); m15=closed_candles(by.get("M15") or [],15)
             e=detect_crt(symbol,h1,h4,m15,strength)
             if not e or e["key"] in sent or e["key"] in pkeys: continue
+            og=ohlc_movement.guard_event(by,e.get("side"),e.get("quality"))
+            if not og.get("allow",True): continue
+            e["quality"]=og.get("quality",e["quality"]); e["confidence"]=min(e.get("confidence",93),max(0,e["quality"]-4))
             text=format_message(e); digest=hashlib.sha256(text.encode()).hexdigest()[:20]
             if first: sent[e["key"]]=e["key"]
             else: pending[digest]={"key":e["key"],"event":e}; msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(by)); pkeys.add(e["key"])

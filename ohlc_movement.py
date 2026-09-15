@@ -137,3 +137,20 @@ def setup_adjustment(by_tf: dict, side: int) -> dict:
     elif score <= 44: delta=-2
     if ctx.get("range_like"): delta=min(delta, -2)
     return {**ctx, "allow": not bool(ctx.get("weak_reversal")), "quality_delta": delta}
+
+
+def guard_event(by_tf: dict, side, quality: int | float | None = None) -> dict:
+    """Canonical final OHLC gate for an event produced by another module.
+
+    It never creates direction. A weak 1–2 candle counter-move is vetoed;
+    range/noise and movement quality only make a small bounded quality change.
+    """
+    if isinstance(side, str):
+        side_i = 1 if side.upper() == "LONG" else -1 if side.upper() == "SHORT" else 0
+    else:
+        side_i = 1 if side == 1 else -1 if side == -1 else 0
+    adj = setup_adjustment(by_tf, side_i) if side_i else {"allow": True, "quality_delta": 0, "available": False, "score": 50.0}
+    out = dict(adj)
+    if quality is not None:
+        out["quality"] = int(max(0, min(100, round(float(quality) + int(adj.get("quality_delta", 0))))))
+    return out

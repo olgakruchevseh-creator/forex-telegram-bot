@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 _LAST_CHART_CARDS: dict[str, tuple[dict, dict]] = {}
@@ -219,6 +220,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     continue
                 event = confirm_sweep(setup, h1, h4, m15, strength)
                 if event and not first:
+                    og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
+                    if not og.get('allow',True): continue
+                    if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                     message = format_message(event)
 
                     messages.append(message)

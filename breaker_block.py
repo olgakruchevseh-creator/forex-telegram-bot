@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.breaker_block")
@@ -173,7 +174,11 @@ def process_market(market: dict, strength: dict[str, float], invalidated_blocks:
                 if c.symbol != symbol or c.sent or c.invalid:
                     continue
                 event = confirm_breaker(c, h1, h4, m15, strength)
-                if event: events.append(event)
+                if event:
+                    og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
+                    if og.get('allow',True):
+                        if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
+                        events.append(event)
             if events and not first:
                 best = max(events, key=lambda x: x["quality"])
                 text = format_message(best); messages.append(text)

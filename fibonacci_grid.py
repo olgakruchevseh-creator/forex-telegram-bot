@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 log = logging.getLogger("fxbot.fibonacci")
@@ -102,6 +103,9 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         return None
 
     quality = min(94, 74 + min(8, int(move / av)) + min(8, int(abs(gap) * 40)) + (4 if _bias("H4", h4) == wanted else 0))
+    og = ohlc_movement.guard_event(by_tf, side, quality)
+    if not og.get("allow", True): return None
+    quality = og.get("quality", quality)
     return {
         # Один подтверждённый сигнал на один импульс, независимо от числа
         # последующих касаний той же golden zone.

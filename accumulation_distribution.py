@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.accumulation")
@@ -152,6 +153,9 @@ def detect_exit(phase: Phase, bars: list[Candle], by_tf: dict, strength: dict[st
     need = float(getattr(cfg, "PHASE_EXIT_STRENGTH_GAP", 0.05))
     if (wanted > 0 and gap < need) or (wanted < 0 and gap > -need):
         return False
+    og = ohlc_movement.guard_event(by_tf, phase.side, phase.quality)
+    if not og.get("allow", True): return False
+    phase.quality = og.get("quality", phase.quality)
     phase.exit_sent = True
     phase.status = "ВЫХОД ПОДТВЕРЖДЁН"
     phase.confidence = min(93, phase.confidence + 5)

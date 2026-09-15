@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 import displacement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
@@ -148,6 +149,10 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float]) -> Sign
         strength_pts = min(12, int(abs(gap) * 40))
         sig.quality = min(96, 52 + impulse_pts + body_pts + align_pts + strength_pts)
         sig.confidence = min(92, max(70, sig.quality - 4))
+        og=ohlc_movement.guard_event(by_tf,sig.side,sig.quality)
+        if not og.get('allow',True):
+            continue
+        sig.quality=og.get('quality',sig.quality); sig.confidence=min(sig.confidence,max(0,sig.quality-4))
         if sig.quality >= int(getattr(cfg, "DISBALANCE_MIN_QUALITY", 76)):
             valid.append(sig)
     if not valid:

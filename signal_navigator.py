@@ -375,9 +375,41 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         for tf, minutes in (("H4",240),("H1",60),("M15",15),("M5",5))
     ], direction) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"available": False}
 
+    # Latency guard. When a module prints the candle close time, infer the
+    # execution timeframe and reject a NEW Telegram entry once that fact is
+    # already older than roughly one candle. This does not erase the event:
+    # it remains internal and can update an already active route.
+    source_age_min = None
+    source_tf = None
+    if getattr(cfg, "SIGNAL_SOURCE_FRESHNESS_ENABLED", True):
+        source_iso = _source_event_dt(source_text)
+        if source_iso:
+            upper = (source_text or "").upper()
+            m = re.search(r"(?:ПОДТВЕРЖДЕНИЕ(?:\s+ПРОБОЯ)?|ЗАКРЫТ(?:АЯ|ОЙ)?)[^\n]{0,45}\b(M5|M15|H1|H4|D1)\b", upper)
+            source_tf = m.group(1) if m else None
+            tf_min = {"M5":5,"M15":15,"H1":60,"H4":240,"D1":1440}.get(source_tf or "")
+            if tf_min:
+                try:
+                    event_dt = datetime.fromisoformat(source_iso)
+                    now_local = datetime.now(ZoneInfo("Europe/Amsterdam"))
+                    source_age_min = max(0.0, (now_local-event_dt).total_seconds()/60.0)
+                    max_age = tf_min * float(getattr(cfg, "SIGNAL_SOURCE_MAX_CANDLES_AGE", 1.25))
+                    if source_age_min > max_age:
+                        return {"eligible": False, "reason": "stale_source",
+                                "source_tf": source_tf, "source_age_min": round(source_age_min,1),
+                                "remaining_h1": remaining_h1, "route_atr": round(route_atr,3),
+                                "median_body_atr": round(median_body_atr,3),
+                                "efficiency": round(efficiency,3), "ohlc": ohlc}
+                except (TypeError, ValueError):
+                    pass
+
+    early_ohlc = bool(ohlc.get("available") and float(ohlc.get("score", 50)) >=
+                      float(getattr(cfg, "SIGNAL_EARLY_OHLC_SCORE", 68)) and
+                      not ohlc.get("weak_reversal") and not ohlc.get("range_like"))
+
     if ohlc.get("weak_reversal") and route_atr < strong_route:
         eligible, reason = False, "weak_reversal_ohlc"
-    elif remaining_h1 < min_h1:
+    elif remaining_h1 < min_h1 and not early_ohlc:
         eligible, reason = False, "short_horizon"
     elif route_atr < min_route:
         eligible, reason = False, "small_route"
@@ -389,6 +421,7 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         "eligible": eligible, "reason": reason, "remaining_h1": remaining_h1,
         "route_atr": round(route_atr, 3), "median_body_atr": round(median_body_atr, 3),
         "efficiency": round(efficiency, 3), "ohlc": ohlc,
+        "early_ohlc": early_ohlc, "source_tf": source_tf, "source_age_min": source_age_min,
     }
 
 def build_source_companion(source_text: str, market: dict, strength: dict) -> tuple[str, list[str]] | None:
@@ -649,7 +682,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     # A closed bullish/bearish pattern is evidence for the source event, but it
     # must not silently rewrite the broader H1 direction model.
     if source_accepted and h1_bias == -direction:
-        lines.append(f"• H1 Direction: коррекция против маршрута {side}")
+        lines.append(f"• H1: коррекция против маршрута {side} · H1 Direction")
     elif source_accepted and h1_bias == 0:
         lines.append("• H1 Direction: NEUTRAL · общее направление H1 ещё не подтверждено")
     if source_accepted and "Patterns" in source_names:

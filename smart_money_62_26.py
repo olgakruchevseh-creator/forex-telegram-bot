@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.smart_money_62_26")
@@ -225,6 +226,9 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
                 if s.symbol!=symbol or s.sent or s.invalid: continue
                 e=_confirm(s,h4,h1,m15,m5,strength)
                 if e and not first:
+                    og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
+                    if not og.get('allow',True): continue
+                    if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90),max(0,e['quality']-3))
                     text=format_message(e); messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
             fresh=_find_setup(symbol,d1,h4,h1,m15)
             if fresh and fresh.setup_id not in setups:

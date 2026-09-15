@@ -8,6 +8,7 @@ import io, json, logging, os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 from chart_snapshot import freeze_by_tf
 
@@ -105,6 +106,9 @@ def process_market(market,strength):
           if s.symbol!=symbol or s.sent or s.invalid:continue
           e=_confirm(s,h4,h1,m15,m5,strength)
           if e and not first:
+            og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
+            if not og.get('allow',True): continue
+            if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90), max(0,e['quality']-3))
             msg=_format(e); out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
         fresh=_candidate(symbol,h4,h1)
         if fresh and fresh.id not in setups:

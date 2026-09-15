@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 import displacement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
@@ -142,6 +143,12 @@ def validate_zone(zone: FvgZone, closed_map: dict, strength: dict[str, float]) -
     zone.aligned = aligned_main + confirms
     zone.strength_gap = gap
     zone.quality = min(96, zone.quality + min(16, len(zone.aligned) * 3) + min(8, int(abs(gap) * 30)))
+    og = ohlc_movement.combine([(tf, closed_map.get(tf) or []) for tf in ("D1","H4","H1","M15","M5")], wanted)
+    if og.get("weak_reversal"): return False
+    if og.get("available"):
+        delta = 4 if og.get("score",50)>=72 else 2 if og.get("score",50)>=62 else -4 if og.get("score",50)<=35 else -2 if og.get("score",50)<=44 else 0
+        if og.get("range_like"): delta=min(delta,-2)
+        zone.quality=max(0,min(100,zone.quality+delta))
     zone.confidence = max(70, min(92, zone.quality - 4))
     return zone.quality >= int(getattr(cfg, "IMBALANCE_MIN_QUALITY", 74))
 

@@ -36,7 +36,9 @@ PAIR_STRENGTH_MIN = 0.20
 # Лидер брифинга не выбирается при практически равной силе валют.
 BRIEFING_LEADER_MIN_STRENGTH_GAP = 0.05
 
-SCAN_EVERY_MINUTES = 5
+SCAN_EVERY_MINUTES = 1
+# Latency policy: scan every minute so a freshly CLOSED M5/M15 candle is processed
+# promptly; this is still well below the configured paid-plan request budget.
 # Автоматические сканы и уведомления: только понедельник–пятница.
 # Номера дней Python: понедельник=0, воскресенье=6.
 AUTOMATIC_WEEKDAYS_ONLY = True
@@ -591,7 +593,13 @@ LIQUIDITY_MAP_STATUS_LOOKBACK_M15 = 16
 # Detectors still see/store every event internally. Telegram gets a NEW trade
 # signal only when there is enough estimated H1 life AND enough price travel.
 SIGNAL_SIGNIFICANCE_GATE_ENABLED = True
-SIGNAL_MIN_REMAINING_H1 = 3
+SIGNAL_MIN_REMAINING_H1 = 2
+# A strong fresh OHLC/displacement event must not wait for another H1 candle.
+SIGNAL_EARLY_OHLC_SCORE = 68
+# If a source explicitly carries its close time, never present it as a NEW entry
+# after more than ~1.25 trigger candles have elapsed. Existing routes are only managed.
+SIGNAL_SOURCE_FRESHNESS_ENABLED = True
+SIGNAL_SOURCE_MAX_CANDLES_AGE = 1.25
 SIGNAL_MIN_ROUTE_ATR = 0.75
 SIGNAL_MIN_MEDIAN_H1_BODY_ATR = 0.18
 SIGNAL_STRONG_ROUTE_ATR_OVERRIDE = 1.25

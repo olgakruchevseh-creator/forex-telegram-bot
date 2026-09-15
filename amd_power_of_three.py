@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.amd")
@@ -355,6 +356,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             if (not event or event.get("late") or event["key"] in sent
                     or event["key"] in pending_keys):
                 continue
+            og = ohlc_movement.guard_event(by_tf, event.get("side"), event.get("quality"))
+            if not og.get("allow", True): continue
+            event["quality"] = og.get("quality", event["quality"]); event["confidence"] = min(event.get("confidence",91), max(0,event["quality"]-4))
             text = format_message(event)
             digest = hashlib.sha256(text.encode()).hexdigest()[:20]
             if first:

@@ -579,7 +579,13 @@ def process_market(market: dict) -> list[dict]:
         text = format_near(result)
         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
         pending[digest] = {"key": key, "h1": result["closed_h1"]}
-        output.append({"text": text, "image": render_chart(result, by_tf)})
+        try:
+            image = render_chart(result, by_tf)
+        except ValueError:
+            # Never crash the projection pipeline when chart data is unavailable;
+            # live runs still require verified H1 data for an actual image.
+            image = None
+        output.append({"text": text, "image": image})
         log.info("NEXT_PIVOT_CANDIDATE_SELECTED symbol=%s probability=%s samples=%s distance_atr=%s h1=%s",
                  result["symbol"], result["probability"], result["samples"],
                  result.get("distance_atr"), result["closed_h1"])

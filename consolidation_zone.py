@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 from chart_snapshot import freeze_by_tf
 
@@ -146,6 +147,9 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
     need = float(getattr(cfg, "CONSOLIDATION_MIN_STRENGTH_GAP", 0.05))
     if (wanted > 0 and gap < need) or (wanted < 0 and gap > -need):
         return False
+    og = ohlc_movement.guard_event(by_tf, side, zone.quality)
+    if not og.get("allow", True): return False
+    zone.quality = og.get("quality", zone.quality)
     zone.breakout_sent = True
     zone.breakout_side = side
     zone.breakout_dt = cur.dt

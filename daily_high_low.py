@@ -10,6 +10,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.daily_high_low")
@@ -150,6 +151,9 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
 
     body_atr = abs(current.close - current.open) / av
     quality = min(94, 72 + confirmations * 5 + min(7, int(body_atr * 7)))
+    og = ohlc_movement.guard_event(by_tf, side, quality)
+    if not og.get("allow", True): return None
+    quality = og.get("quality", quality)
     confidence = min(91, quality - 4)
     return {
         "event_id": f"{symbol}|{reference.dt}|{level_kind}|{name}",

@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.retest_confirmation")
@@ -208,6 +209,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if existing:
                     event = confirm_retest(existing, h1, by_tf, strength)
                     if event and not first:
+                        og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
+                        if not og.get('allow',True): continue
+                        if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                         message = format_message(event)
 
                         _RETEST_CHART_CACHE[message] = (event, freeze_by_tf(by_tf))

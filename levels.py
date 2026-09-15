@@ -15,6 +15,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, atr, closed_candles, split_pair
 
 try:
@@ -1390,6 +1391,10 @@ def process_market(market: dict, strength: dict[str, float] | None = None, news_
                             if q < int(getattr(cfg, "LEVEL_MIN_EVENT_QUALITY", 74)):
                                 continue
                             if probability < int(getattr(cfg, "LEVEL_MIN_EVENT_CONFIDENCE", 70)):
+                                continue
+                        if ev != "new_level":
+                            og = ohlc_movement.guard_event(market.get(symbol) or {}, side, q)
+                            if not og.get("allow", True):
                                 continue
                         if chosen is None:
                             chosen = (ev, fact, side)

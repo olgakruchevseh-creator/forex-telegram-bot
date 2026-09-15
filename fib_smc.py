@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 log = logging.getLogger("fxbot.fib_smc")
@@ -183,9 +184,12 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
     blocked, news_name = _news_blocked(symbol, events, now_utc)
     if blocked:
         return None
+    og=ohlc_movement.guard_event(by_tf,side)
+    if not og.get('allow',True):
+        return None
 
     confirmations = 3 + int(ob_ok) + int(sweep_ok) + int(h4_bias == wanted) + int(d1_bias == wanted)
-    quality = min(97, 70 + confirmations*3 + min(7, int(move/av)) + min(6, int(abs(gap)*35)))
+    quality = min(97, 70 + confirmations*3 + min(7, int(move/av)) + min(6, int(abs(gap)*35)) + int(og.get('quality_delta',0)))
     return {
         "key": f"{symbol}|{side}|{h1[end.index].dt}|{end.price:.6f}|{m15[-1].dt}",
         "symbol": symbol, "side": side, "zone_low": zone_low, "zone_high": zone_high,

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.order_block")
@@ -219,7 +220,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if not was_invalid and block.invalid and block.invalidation_reason == "price_break":
                     _LAST_INVALIDATED.append(asdict(block))
                 if event:
-                    confirmed.append(event)
+                    og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
+                    if og.get('allow',True):
+                        if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
+                        confirmed.append(event)
             if confirmed and not first:
                 best = max(confirmed, key=lambda e: (e["quality"], e["tf"] == "H4"))
                 message = format_message(best)

@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.chain_entries")
@@ -278,6 +279,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     # закрытой M15, чтобы не отдавать уже прошедший маршрут.
                     event = confirm_entry(existing, _bars(by_tf, "M15"), by_tf, strength)
                     if event and not first:
+                        og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
+                        if not og.get('allow',True): continue
+                        if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                         count_key = f"{symbol}|{existing.side}"
                         opposite = f"{symbol}|{'SHORT' if existing.side == 'LONG' else 'LONG'}"
                         chain[opposite] = 0

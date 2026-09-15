@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import config as cfg
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 NY = ZoneInfo("America/New_York")
@@ -167,6 +168,9 @@ def process_market(market,strength,events=None,now_utc=None):
     for symbol in cfg.PAIRS:
         e=detect(symbol,market.get(symbol) or {},strength,events,now_utc)
         if not e: continue
+        og=ohlc_movement.guard_event(market.get(symbol) or {},e.get('side'),e.get('quality'))
+        if not og.get('allow',True): continue
+        if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90),max(0,e['quality']-3))
         key=f"{symbol}|{e['side']}|{e['window']}|{e['trigger_dt']}"
         if key in sent: continue
         text=format_message(e); out.append(text); sent[key]=datetime.now(timezone.utc).isoformat(); _PENDING_CARDS[text]=(dict(e),freeze_by_tf(market.get(symbol) or {}))
