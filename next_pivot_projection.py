@@ -361,74 +361,45 @@ def format_near(result: dict) -> str:
     ])
 
 
-def _chart_h1_bars(by_tf: dict, limit: int = 40):
-    """Return verified hourly candles for the picture only.
-
-    Prefer the native H1 feed. If it is accidentally populated with a lower
-    timeframe, rebuild H1 from a valid M15 feed. Never label an unverified
-    lower-timeframe canvas as H1.
-    """
-    from datetime import datetime
-    from statistics import median
-
-    def parse_dt(value):
-        raw = str(value or "").strip().replace("T", " ")[:19]
-        try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return None
-
-    def median_gap_minutes(bars):
-        stamps = [parse_dt(b.dt) for b in bars[-12:]]
-        stamps = [x for x in stamps if x is not None]
-        if len(stamps) < 3:
-            return None
-        gaps = [(b-a).total_seconds()/60 for a, b in zip(stamps, stamps[1:]) if b > a]
-        return median(gaps) if gaps else None
-
-    native = closed_candles(by_tf.get("H1") or [], 60)
-    gap = median_gap_minutes(native)
-    if len(native) >= 3 and gap is not None and 55 <= gap <= 65:
-        return native[-limit:], "H1 · прямые свечи · шаг 60 мин"
-
-    m15 = closed_candles(by_tf.get("M15") or [], 15)
-    m15_gap = median_gap_minutes(m15)
-    if len(m15) >= 8 and m15_gap is not None and 12 <= m15_gap <= 18:
-        buckets = {}
-        order = []
-        for bar in m15:
-            dt = parse_dt(bar.dt)
-            if dt is None:
-                continue
-            key = dt.replace(minute=0, second=0, microsecond=0)
-            if key not in buckets:
-                buckets[key] = []
-                order.append(key)
-            buckets[key].append(bar)
-        rebuilt = []
-        for key in order:
-            group = sorted(buckets[key], key=lambda b: parse_dt(b.dt) or key)
-            if len(group) != 4:
-                continue
-            rebuilt.append(Candle(
-                dt=key.strftime("%Y-%m-%d %H:%M:%S"),
-                open=group[0].open,
-                high=max(b.high for b in group),
-                low=min(b.low for b in group),
-                close=group[-1].close,
-            ))
-        rebuilt_gap = median_gap_minutes(rebuilt)
-        if len(rebuilt) >= 3 and rebuilt_gap is not None and 55 <= rebuilt_gap <= 65:
-            return rebuilt[-limit:], "H1 · собрано из M15 · шаг 60 мин"
-
-    raise ValueError(f"H1 chart validation failed: native_gap={gap}, m15_gap={m15_gap}")
+def _verified_h1_chart_bars(by_tf: dict, limit: int = 40):
+    """Return only genuine H1 candles for charting; never relabel M15/other data as H1."""
+    raw = by_tf.get("H1") or []
+    bars = closed_candles(raw, 60)
+    if len(bars) < 3:
+        raise ValueError("H1 chart blocked: insufficient closed H1 candles")
+    # closed_candles may validate closure but the visual layer additionally verifies
+    # the timestamp cadence. Accept small feed jitter, reject M15/M30/H4 masquerading as H1.
+    def _ts(bar):
+        for name in ("time", "datetime", "timestamp", "date"):
+            value = getattr(bar, name, None)
+            if value is not None:
+                return value
+        return None
+    stamps = [_ts(b) for b in bars[-8:]]
+    stamps = [s for s in stamps if s is not None]
+    if len(stamps) >= 3:
+        from datetime import datetime
+        def _seconds(v):
+            if isinstance(v, datetime):
+                return v.timestamp()
+            if isinstance(v, (int, float)):
+                x = float(v)
+                return x / 1000.0 if x > 10_000_000_000 else x
+            text = str(v).replace("Z", "+00:00")
+            return datetime.fromisoformat(text).timestamp()
+        vals = [_seconds(v) for v in stamps]
+        gaps = [abs(b-a)/60.0 for a,b in zip(vals, vals[1:]) if b != a]
+        regular = [g for g in gaps if g < 180]  # ignore weekend/session gaps
+        if regular and not all(55 <= g <= 65 for g in regular):
+            raise ValueError(f"H1 chart blocked: candle cadence is not H1 ({regular})")
+    return bars[-limit:]
 
 
 def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     """PNG: свечи, зона Pivot и три независимых сценария движения."""
     from PIL import Image, ImageDraw, ImageFont
 
-    bars, chart_tf_note = _chart_h1_bars(by_tf, 40)
+    bars = _verified_h1_chart_bars(by_tf, 40)
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#10131d")
     draw = ImageDraw.Draw(image, "RGBA")
@@ -482,8 +453,11 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
                    fill="#4aa3ff35", outline="#62b0ff", width=3)
     target_x = (zone_x1+zone_x2)/2
     main_color = "#42e889" if direction > 0 else "#ff6575"
-    # Основной путь к зоне.
+    # Основной путь к зоне. Вместо безымянных технических маркеров
+    # пользователь видит смысл каждой линии/точки.
     draw.line((start_x, y_at(current), target_x, y_at(zone_mid)), fill=main_color, width=5)
+    draw.text((min(right-300, start_x+18), max(top+110, y_at(current)-30)),
+              f"ПУТЬ К PIVOT · {result['side']}", fill=main_color, font=small)
     draw.polygon([(target_x, y_at(zone_mid)), (target_x-15, y_at(zone_mid)+10*direction),
                   (target_x-10, y_at(zone_mid)-14*direction)], fill=main_color)
     # Альтернатива: локальный откат/флэт, затем повторный подход к Pivot.
@@ -493,6 +467,9 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     # Реакция после достижения зоны.
     end_x = x_at(historical-1+future)
     draw.line((target_x, y_at(zone_mid), end_x, y_at(reaction_price)), fill="#d889ff", width=4)
+    draw.text((min(right-290, target_x+18), max(top+145, y_at(reaction_price)-28)),
+              f"ВОЗМОЖНАЯ РЕАКЦИЯ · {'SHORT' if direction > 0 else 'LONG'}",
+              fill="#d889ff", font=small)
     decimals = 3 if "JPY" in result["symbol"] else 5
     reaction = "SHORT" if direction > 0 else "LONG"
     # Фиксированная легенда не перекрывается, даже когда три цены находятся
@@ -513,7 +490,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']} · {mode}", fill="#f1f5fb", font=font)
     # Визуальный слой MTF: свечной холст H1, зона уточняется старшими/рабочими TF.
     # Расчёт Pivot и его вероятность здесь не меняются.
-    draw.text((left, 49), f"График: {chart_tf_note} · MTF: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
+    draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
     draw.text((left, 73), "Pivot-зона: H4/H1 · реакция подтверждается M15/H1", fill="#9aa4b5", font=small)
     # Отделяем историю от будущей сессионной проекции.
     draw.line((start_x, top, start_x, bottom), fill="#8b95a8", width=2)

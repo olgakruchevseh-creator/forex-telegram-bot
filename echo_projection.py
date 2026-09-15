@@ -371,75 +371,46 @@ def format_alert(result: dict) -> str:
     ])
 
 
-def _chart_h1_bars(by_tf: dict, limit: int = 40):
-    """Return verified hourly candles for the picture only.
-
-    Prefer the native H1 feed. If it is accidentally populated with a lower
-    timeframe, rebuild H1 from a valid M15 feed. Never label an unverified
-    lower-timeframe canvas as H1.
-    """
-    from datetime import datetime
-    from statistics import median
-
-    def parse_dt(value):
-        raw = str(value or "").strip().replace("T", " ")[:19]
-        try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return None
-
-    def median_gap_minutes(bars):
-        stamps = [parse_dt(b.dt) for b in bars[-12:]]
-        stamps = [x for x in stamps if x is not None]
-        if len(stamps) < 3:
-            return None
-        gaps = [(b-a).total_seconds()/60 for a, b in zip(stamps, stamps[1:]) if b > a]
-        return median(gaps) if gaps else None
-
-    native = closed_candles(by_tf.get("H1") or [], 60)
-    gap = median_gap_minutes(native)
-    if len(native) >= 3 and gap is not None and 55 <= gap <= 65:
-        return native[-limit:], "H1 · прямые свечи · шаг 60 мин"
-
-    m15 = closed_candles(by_tf.get("M15") or [], 15)
-    m15_gap = median_gap_minutes(m15)
-    if len(m15) >= 8 and m15_gap is not None and 12 <= m15_gap <= 18:
-        buckets = {}
-        order = []
-        for bar in m15:
-            dt = parse_dt(bar.dt)
-            if dt is None:
-                continue
-            key = dt.replace(minute=0, second=0, microsecond=0)
-            if key not in buckets:
-                buckets[key] = []
-                order.append(key)
-            buckets[key].append(bar)
-        rebuilt = []
-        for key in order:
-            group = sorted(buckets[key], key=lambda b: parse_dt(b.dt) or key)
-            if len(group) != 4:
-                continue
-            rebuilt.append(Candle(
-                dt=key.strftime("%Y-%m-%d %H:%M:%S"),
-                open=group[0].open,
-                high=max(b.high for b in group),
-                low=min(b.low for b in group),
-                close=group[-1].close,
-            ))
-        rebuilt_gap = median_gap_minutes(rebuilt)
-        if len(rebuilt) >= 3 and rebuilt_gap is not None and 55 <= rebuilt_gap <= 65:
-            return rebuilt[-limit:], "H1 · собрано из M15 · шаг 60 мин"
-
-    raise ValueError(f"H1 chart validation failed: native_gap={gap}, m15_gap={m15_gap}")
+def _verified_h1_chart_bars(by_tf: dict, limit: int = 40):
+    """Return only genuine H1 candles for charting; never relabel M15/other data as H1."""
+    raw = by_tf.get("H1") or []
+    bars = closed_candles(raw, 60)
+    if len(bars) < 3:
+        raise ValueError("H1 chart blocked: insufficient closed H1 candles")
+    # closed_candles may validate closure but the visual layer additionally verifies
+    # the timestamp cadence. Accept small feed jitter, reject M15/M30/H4 masquerading as H1.
+    def _ts(bar):
+        for name in ("time", "datetime", "timestamp", "date"):
+            value = getattr(bar, name, None)
+            if value is not None:
+                return value
+        return None
+    stamps = [_ts(b) for b in bars[-8:]]
+    stamps = [s for s in stamps if s is not None]
+    if len(stamps) >= 3:
+        from datetime import datetime
+        def _seconds(v):
+            if isinstance(v, datetime):
+                return v.timestamp()
+            if isinstance(v, (int, float)):
+                x = float(v)
+                return x / 1000.0 if x > 10_000_000_000 else x
+            text = str(v).replace("Z", "+00:00")
+            return datetime.fromisoformat(text).timestamp()
+        vals = [_seconds(v) for v in stamps]
+        gaps = [abs(b-a)/60.0 for a,b in zip(vals, vals[1:]) if b != a]
+        regular = [g for g in gaps if g < 180]  # ignore weekend/session gaps
+        if regular and not all(55 <= g <= 65 for g in regular):
+            raise ValueError(f"H1 chart blocked: candle cadence is not H1 ({regular})")
+    return bars[-limit:]
 
 
 def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     """PNG со свечами H1, медианной Echo-волной и диапазоном неопределённости."""
     from PIL import Image, ImageDraw, ImageFont
 
-    chart_limit = max(20, int(getattr(cfg, "ECHO_CHART_CANDLES", 40)))
-    bars, chart_tf_note = _chart_h1_bars(by_tf, chart_limit)
+    bars = _verified_h1_chart_bars(by_tf, 40)
+    bars = bars[-max(20, int(getattr(cfg, "ECHO_CHART_CANDLES", 40))):]
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#10131d")
     draw = ImageDraw.Draw(image, "RGBA")
@@ -497,14 +468,19 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
             t1, t2 = n/steps, min(1, (n+1)/steps)
             draw.line((a[0]+(b[0]-a[0])*t1, a[1]+(b[1]-a[1])*t1,
                        a[0]+(b[0]-a[0])*t2, a[1]+(b[1]-a[1])*t2), fill=wave_color, width=5)
-    for (h, _), point in zip(projected[1:], points[1:]):
-        draw.ellipse((point[0]-6, point[1]-6, point[0]+6, point[1]+6), fill=wave_color)
-        draw.text((point[0]-12, bottom+12), f"+{h}h", fill="#c9d1df", font=small)
+    # Не показываем безымянные крестики/квадраты: каждая значимая
+    # прогнозная точка подписана горизонтом, служебные точки скрыты.
+    for (h, price), point in zip(projected[1:], points[1:]):
+        draw.ellipse((point[0]-5, point[1]-5, point[0]+5, point[1]+5),
+                     fill=wave_color, outline="#f1f5fb", width=1)
+        decimals = 3 if "JPY" in result["symbol"] else 5
+        draw.text((max(left, point[0]-34), max(top+96, point[1]-28)),
+                  f"+{h}ч · {price:.{decimals}f}", fill="#dce4ef", font=small)
     weak_label = " · СЛАБАЯ ОЦЕНКА" if result.get("weak") else ""
     draw.text((left, 22), f"{result['symbol']} · ЭХО ДО СЛЕДУЮЩЕЙ СЕССИИ · {result['side']} {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
     # Визуальный слой: график H1, но расчёт остаётся MTF. Это только подпись
     # и разметка картинки — формула направления/вероятности не меняется.
-    draw.text((left, 49), f"График: {chart_tf_note} · MTF: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
+    draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
     # Граница текущих закрытых свечей / начало прогнозной части.
     boundary_x = x_at(start_index)
     draw.line((boundary_x, top, boundary_x, bottom), fill="#8b95a8", width=2)
