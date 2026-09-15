@@ -142,10 +142,20 @@ def _context_score(symbol: str, by_tf: dict, side: int, strength: dict[str, floa
             score -= 5
     except Exception:
         oc = {"available": False}
+    try:
+        import market_state
+        ms = market_state.build(symbol, by_tf, side)
+        if ms.exhaustion and ms.exhaustion.exhausted:
+            score -= 3
+        elif ms.liquidity and float(ms.liquidity.confidence or 0) >= 65:
+            score += 2
+        ms_dict = ms.as_dict()
+    except Exception:
+        ms_dict = None
 
     return {"score": score, "tf_sides": tf_sides, "zigzag_h4": zz_side,
             "strength_gap": round(strength_gap, 4), "adx_h1": round(adx_h1, 1),
-            "dxy_bias": int(dxy_bias or 0), "ohlc": oc}
+            "dxy_bias": int(dxy_bias or 0), "ohlc": oc, "market_state": ms_dict}
 
 
 

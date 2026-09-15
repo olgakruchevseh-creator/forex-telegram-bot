@@ -14,6 +14,7 @@ from pathlib import Path
 import config as cfg
 import ohlc_movement
 import movement_progress
+import market_state
 import zigzag_scanner
 import next_pivot_projection
 from analysis import analyze_tf
@@ -293,6 +294,11 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     targets = targets[:3]
 
     gap = movement_progress._strength_ok(symbol, side, {})[1]
+    try:
+        shared_state = market_state.build(symbol, by_tf, direction).as_dict()
+    except Exception:
+        log.exception("MARKET_STATE_NAVIGATOR_SKIPPED symbol=%s", symbol)
+        shared_state = None
     return {
         "key": f"{symbol}|{side}|{h1[-1].dt}|trigger", "symbol": symbol, "side": side,
         "anchor": anchor, "current": current, "target": targets[0]["price"],
@@ -303,6 +309,7 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         # For M15/other fresh triggers the latest closed H1 can be older than
         # the actual signal. Time horizon must never point into the past.
         "horizon_base_dt": _source_event_dt(source_text),
+        "market_state": shared_state,
     }
 
 

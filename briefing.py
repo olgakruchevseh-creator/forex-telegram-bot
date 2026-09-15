@@ -373,6 +373,19 @@ def _briefing_context(symbol: str, by_tf: dict, side: Optional[str], strength: O
     if impulse2:
         total=sum(impulse2)
         groups.append(1 if total>0 else (-1 if total<0 else 0))
+    # Shared Market State is one bounded context family. It is deliberately not
+    # decomposed into regime/liquidity/exhaustion votes, preventing double weight.
+    try:
+        import market_state
+        ms = market_state.build(symbol, by_tf or {}, si)
+        ms_vote = 0
+        if ms.exhaustion and ms.exhaustion.exhausted:
+            ms_vote -= 1
+        elif ms.liquidity and float(ms.liquidity.confidence or 0) >= 65:
+            ms_vote += 1
+        groups.append(ms_vote)
+    except Exception:
+        log.exception("Market State context %s", symbol)
     support=sum(v>0 for v in groups); against=sum(v<0 for v in groups)
     return support-against, support, against
 

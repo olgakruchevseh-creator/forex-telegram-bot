@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import config as cfg
+import market_state
 from analysis import Candle, atr, closed_candles
 
 log = logging.getLogger("fxbot.signal_journal")
@@ -127,7 +128,20 @@ def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
         "quality": _number(text, "Качество"), "confidence": _number(text, "Вероятность"),
         "status": "OPEN", "resolved_dt": "", "horizons": {},
         "mfe_atr": 0.0, "mae_atr": 0.0,
+        "mfe_bar": 0, "mae_bar": 0, "mfe_before_mae": None,
+        "excursion_efficiency": 0.0, "realized_8h_atr": None,
+        "market_regime": "", "liquidity_target": "", "exhaustion_score": 0.0,
     }
+    # Snapshot only: this journal runs after successful Telegram delivery and can
+    # never delay, veto or create a signal.  Context is stored for later quality
+    # statistics, not counted as another confirmation.
+    try:
+        ctx = market_state.build(symbol, market.get(symbol) or {}, wanted)
+        records[digest]["market_regime"] = str(getattr(getattr(ctx, "regime", None), "regime", "") or "")
+        records[digest]["liquidity_target"] = str(getattr(getattr(ctx, "liquidity", None), "target", "") or "")
+        records[digest]["exhaustion_score"] = float(getattr(getattr(ctx, "exhaustion", None), "score", 0.0) or 0.0)
+    except Exception:
+        log.exception("MARKET_STATE_JOURNAL_SNAPSHOT_SKIPPED symbol=%s", symbol)
     _save(state)
     return True
 
@@ -142,15 +156,23 @@ def _update_record(record: dict, bars: list[Candle]) -> None:
         return
     wanted = 1 if record["side"] == "LONG" else -1
     entry, av = float(record["entry"]), float(record["atr"])
-    favorable = max(((bar.high - entry) * wanted if wanted > 0 else (entry - bar.low)) for bar in future)
-    adverse = max(((entry - bar.low) if wanted > 0 else (bar.high - entry)) for bar in future)
+    favorable_values = [((bar.high-entry) if wanted > 0 else (entry-bar.low)) for bar in future]
+    adverse_values = [((entry-bar.low) if wanted > 0 else (bar.high-entry)) for bar in future]
+    favorable = max(favorable_values); adverse = max(adverse_values)
+    mfe_i = favorable_values.index(favorable) + 1; mae_i = adverse_values.index(adverse) + 1
     record["mfe_atr"] = round(max(float(record.get("mfe_atr") or 0), favorable / av), 3)
     record["mae_atr"] = round(max(float(record.get("mae_atr") or 0), adverse / av), 3)
+    record["mfe_bar"] = mfe_i; record["mae_bar"] = mae_i
+    record["mfe_before_mae"] = bool(mfe_i <= mae_i)
+    denom = max(float(record["mfe_atr"]) + float(record["mae_atr"]), 1e-9)
+    record["excursion_efficiency"] = round(float(record["mfe_atr"]) / denom, 3)
     for hours in (1, 4, 8):
         key = str(hours)
         if key not in record.setdefault("horizons", {}) and len(future) >= hours:
             move = (future[hours - 1].close - entry) * wanted / av
             record["horizons"][key] = round(move, 3)
+            if hours == 8:
+                record["realized_8h_atr"] = round(move, 3)
 
     if record.get("status") == "OPEN":
         for bar in future:
@@ -193,6 +215,9 @@ def _summary(records: list[dict], title: str) -> str:
     success = round(targets / resolved * 100) if resolved else 0
     avg_mfe = sum(float(r.get("mfe_atr") or 0) for r in records) / len(records) if records else 0
     avg_mae = sum(float(r.get("mae_atr") or 0) for r in records) / len(records) if records else 0
+    avg_eff = sum(float(r.get("excursion_efficiency") or 0) for r in records) / len(records) if records else 0
+    favorable_first = sum(r.get("mfe_before_mae") is True for r in records)
+    timed_exc = sum(r.get("mfe_before_mae") is not None for r in records)
     sources: dict[str, list[int]] = {}
     pairs: dict[str, list[int]] = {}
     for r in records:
@@ -210,6 +235,9 @@ def _summary(records: list[dict], title: str) -> str:
         f"Результативность завершённых: {success}%" if resolved else "Результативность завершённых: пока нет данных",
         f"Среднее движение в плюс: {avg_mfe:.2f} ATR",
         f"Среднее движение против: {avg_mae:.2f} ATR",
+        f"Эффективность экскурсии MFE/(MFE+MAE): {avg_eff*100:.0f}%",
+        (f"Сначала движение в пользу сигнала: {round(favorable_first/timed_exc*100)}%"
+         if timed_exc else "Сначала движение в пользу сигнала: пока нет данных"),
         f"Лучшая пара по завершённым: {best_pair}",
         f"Лучший модуль по завершённым: {best_source}", "",
         "Примечание: проценты рассчитаны только по уже завершённым сценариям; открытые и неоднозначные в результативность не включены.",

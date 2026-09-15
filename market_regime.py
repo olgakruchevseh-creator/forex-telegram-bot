@@ -15,6 +15,8 @@ def analyze_symbol(symbol,by_tf):
     path=sum(abs(b[i].close-b[i-1].close) for i in range(len(b)-19,len(b)))
     eff=net/path if path>0 else 0
     if vr>=float(getattr(cfg,"REGIME_HIGH_VOL_RATIO",1.45)): name="HIGH_VOLATILITY"
+    elif vr<=float(getattr(cfg,"REGIME_COMPRESSION_VOL_RATIO",.78)) and eff<=.34: name="COMPRESSION"
+    elif vr>=float(getattr(cfg,"REGIME_EXPANSION_VOL_RATIO",1.22)) and eff>=.34: name="EXPANSION"
     elif eff>=float(getattr(cfg,"REGIME_TREND_EFF",0.48)): name="TREND"
     elif eff<=float(getattr(cfg,"REGIME_RANGE_EFF",0.24)): name="RANGE"
     else:name="TRANSITION"

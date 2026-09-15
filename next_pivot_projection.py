@@ -218,6 +218,12 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
             "reaction_score": max(35, 92-probability),
         }
     result["_strength"] = strength or {}
+    try:
+        import market_state
+        si = 1 if result.get("side") == "LONG" else -1
+        result["market_state"] = market_state.build(symbol, by_tf, si).as_dict()
+    except Exception:
+        result["market_state"] = None
 
     # Сессионный горизонт жёсткий: статистический Pivot за его пределами не
     # выдаём за цель текущей сессии. 0 H1 означает, что зона уже активна.

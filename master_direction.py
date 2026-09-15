@@ -17,6 +17,7 @@ import erl
 import premium_discount
 import inducement
 import market_regime
+import market_state
 import imd
 import idm
 import daily_high_low
@@ -166,6 +167,7 @@ def analyze_symbol(
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
     inducement_ctx = inducement.analyze_symbol(symbol, by_tf, side)
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
+    state_ctx = market_state.build(symbol, by_tf, side) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
     idm_sweep_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
@@ -226,6 +228,10 @@ def analyze_symbol(
     if pdh_pdl_ctx and pdh_pdl_ctx.alignment > 0:
         quality += int(getattr(cfg, "PDH_PDL_SWEEP_BONUS", 4))
     quality += int(ohlc_ctx.get("quality_delta", 0))
+    if state_ctx and state_ctx.liquidity and state_ctx.liquidity.confidence >= 60:
+        quality += 2
+    if state_ctx and state_ctx.exhaustion and state_ctx.exhaustion.exhausted:
+        quality -= 6
     quality = min(94, quality)
     # Штрафы применяются после верхнего лимита, чтобы сильная базовая оценка
     # не скрывала одиночное противоречие за значением 94/100.
@@ -298,6 +304,7 @@ def analyze_symbol(
         "pdh_pdl": daily_high_low.describe_pdh_pdl(pdh_pdl_ctx),
         "pdh_pdl_alignment": pdh_pdl_ctx.alignment if pdh_pdl_ctx else 0,
         "ohlc": ohlc_ctx,
+        "market_state": state_ctx.as_dict() if state_ctx else None,
     }
 
 
