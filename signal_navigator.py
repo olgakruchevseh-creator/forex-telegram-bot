@@ -435,7 +435,7 @@ def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict
             end_high = (dt + timedelta(hours=high)).strftime("%H:%M")
         except (TypeError, ValueError):
             pass
-    label = {"PULLBACK": "отката", "IMPULSE": "импульса", "LOCAL": "локального движения"}.get(mode, "сценария")
+    label = {"PULLBACK": "отката", "IMPULSE": "импульса", "LOCAL": "локальной реакции"}.get(mode, "сценария")
     return {"low": low, "high": high, "samples": samples, "end_low": end_low, "end_high": end_high, "label": label}
 
 
@@ -509,6 +509,18 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
             assessment = (f"🔴 зафиксирована локальная реакция {side}, но закрытые "
                           "таймфреймы ещё не подтвердили продолжение маршрута.")
             display_mode = "ЛОКАЛЬНАЯ РЕАКЦИЯ"
+            # A confirmed Levels/retest reaction with zero TF continuation is
+            # not a full route. Keep only the nearest valid target; TR2/TR3
+            # become eligible only after the Navigator promotes the event to
+            # a TF-confirmed continuation on a later closed-candle cycle.
+            local_targets = list(route.get("targets") or [])[:1]
+            if local_targets:
+                route = dict(route)
+                route["mode"] = "LOCAL"
+                route["targets"] = local_targets
+                route["target"] = local_targets[0]["price"]
+                route["target_tf"] = local_targets[0]["tf"]
+                route = _scale_route(route)
         elif conflicts:
             navigator_status = "⚠️ ПРИНЯТ НА СОПРОВОЖДЕНИЕ · ЕСТЬ ВСТРЕЧНЫЕ ФАКТОРЫ"
             assessment = f"⚠️ сигнал {side} принят на сопровождение, но подтверждение пока частичное."
