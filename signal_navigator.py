@@ -246,7 +246,13 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         float(getattr(cfg, "NAVIGATOR_TARGET_MIN_GAP_ATR", .35)),
     )
     tolerance = av * merge_atr
+    min_target_distance = av * float(getattr(cfg, "NAVIGATOR_MIN_TR1_ATR", .35))
     for _distance, price, tf in candidates:
+        # A structural extremum almost at the entry is part of the reaction
+        # zone, not a useful TR1 milestone.  Skip it so Navigator cannot emit
+        # an immediate "TR1 reached" card a few ticks after entry.
+        if abs(price - anchor) < min_target_distance:
+            continue
         if any(abs(price-item["price"]) <= tolerance for item in targets):
             continue
         targets.append({"price": price, "tf": tf})
@@ -325,8 +331,17 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         gap = 0.0
     try:
         zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
-        zz_side = int((zz.get("zigzag_directions") or {}).get("H4", 0))
+        zz_dirs = zz.get("zigzag_directions") or {}
+        zz_side = int(zz_dirs.get("H4", 0))
         zz_text = "LONG" if zz_side > 0 else ("SHORT" if zz_side < 0 else "RANGE")
+        # For a ZigZag source card, the confirmation counters must describe
+        # the same ZigZag timeframe states shown in that card.  Mixing the
+        # generic trend analyser with ZigZag directions produced impossible
+        # displays such as D1/H4/H1=3/3 SHORT while H4 ZigZag was LONG.
+        if _source_name(source_text) == "ZigZag":
+            for tf in ("D1", "H4", "H1", "M15", "M5"):
+                if tf in zz_dirs:
+                    views[tf] = int(zz_dirs.get(tf) or 0)
     except Exception:
         zz_text = "RANGE"
     master = {
@@ -385,7 +400,8 @@ def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict
     end_low = end_high = ""
     if h1:
         try:
-            raw = str(route.get("horizon_base_dt") or h1[-1].dt).replace("Z", "+00:00")
+            raw_base = route.get("horizon_base_dt")
+            raw = str(raw_base or h1[-1].dt).replace("Z", "+00:00")
             dt = datetime.fromisoformat(raw)
             amsterdam = ZoneInfo("Europe/Amsterdam")
             if dt.tzinfo is None:
@@ -394,6 +410,14 @@ def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict
                 dt = dt.replace(tzinfo=amsterdam)
             else:
                 dt = dt.astimezone(amsterdam)
+            # Source cards such as ZigZag do not carry an explicit close time.
+            # In that case an old provider H1 timestamp must not make the
+            # displayed horizon end in the past. Anchor the estimate to the
+            # current Amsterdam hour when it is newer than the last H1 stamp.
+            if not raw_base:
+                now = datetime.now(amsterdam).replace(minute=0, second=0, microsecond=0)
+                if now > dt:
+                    dt = now
             end_low = (dt + timedelta(hours=low)).strftime("%H:%M")
             end_high = (dt + timedelta(hours=high)).strftime("%H:%M")
         except (TypeError, ValueError):
@@ -441,6 +465,11 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     navigator_status = ""
     assessment = f"{icon} направление {side} подтверждено по закрытой H1-свече."
     display_mode = mode_names.get(route["mode"], route["mode"])
+    # H4 ZigZag is the structural parent of a source event.  If it points in
+    # the opposite direction, the current move is a pullback regardless of a
+    # generic route classifier. Never label such a move "main impulse".
+    if source_accepted and zz_opposite:
+        display_mode = "ОТКАТ ПРОТИВ ОСНОВНОГО " + str(zz_value)
     if source_accepted:
         no_tf_confirmation = (int(master.get("senior_n") or 0) == 0
                               and int(master.get("junior_n") or 0) == 0)
@@ -724,7 +753,9 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int,
     elif action == "TARGET_RISK":
         passed_word = "ПРОЙДЕН" if len(reached_names) == 1 else "ПРОЙДЕНЫ"
         title = f"⚠️ {' И '.join(reached_names)} {passed_word} — ПРОДОЛЖЕНИЕ ОСЛАБЛЕНО"
-        fact = (f"До {next_target['name']} путь пока не подтверждён полностью. "
+        fact = (f"{' и '.join(reached_names)} был достигнут по внутрисвечному экстремуму; "
+                f"текущая цена могла уже вернуться за пройденный уровень. "
+                f"До {next_target['name']} путь пока не подтверждён полностью. "
                 f"Причина: {'; '.join(problems)}.")
     elif action == "COMPLETE":
         title = "🏆 МАРШРУТ ПОЛНОСТЬЮ ОТРАБОТАН"
