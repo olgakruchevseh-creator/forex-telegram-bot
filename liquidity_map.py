@@ -38,26 +38,35 @@ def _pivots(bars,left=2,right=2):
 
 def _raw_pools(by_tf,av):
     out=[]
-    d1,h4,h1=(_bars(by_tf,t) for t in ("D1","H4","H1"))
+    d1,h4,h1,m15=(_bars(by_tf,t) for t in ("D1","H4","H1","M15"))
     # Previous CLOSED day, not the current forming day.
     if d1:
         c=d1[-1]
-        out += [("BSL",c.high,"previous-day high","D1",5),("SSL",c.low,"previous-day low","D1",5)]
+        out += [("BSL",c.high,"previous-day high","D1",6),("SSL",c.low,"previous-day low","D1",6)]
     if len(h4)>=10:
         try:
             swings=zigzag(h4,float(cfg.ZIGZAG_PCT.get("H4",.35)),int(cfg.ZIGZAG_MIN_BARS))[-8:]
             for s in swings:
                 out.append(("BSL" if s.kind=="high" else "SSL",s.price,"confirmed H4 swing", "H4",4))
         except Exception: pass
-    piv=_pivots(h1[:-1] if len(h1)>1 else h1)
-    tol=av*float(getattr(cfg,"LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR",.20))
-    for kind,side,label in (("high","BSL","equal highs H1"),("low","SSL","equal lows H1")):
-        vals=[(i,p) for i,p,k in piv if k==kind]
-        for a,b in zip(vals,vals[1:]):
-            if b[0]-a[0]>=3 and abs(b[1]-a[1])<=tol:
-                out.append((side,(a[1]+b[1])/2,label,"H1",3))
-    # Confirmed recent H1 pivots provide local liquidity, lower rank.
-    for _,p,k in piv[-10:]: out.append(("BSL" if k=="high" else "SSL",p,"confirmed H1 swing","H1",2))
+    # Multi-timeframe EQH/EQL. All inputs are already restricted to CLOSED candles
+    # by _bars(); pivot confirmation itself requires candles to the right.
+    # HTF pools deliberately carry more weight than local LTF pools.
+    equal_specs=(("H4",h4,5,3),("H1",h1,4,3),("M15",m15,3,4))
+    for tf,bars,rank,min_gap in equal_specs:
+        piv=_pivots(bars)
+        tol_mult=float(getattr(cfg,f"LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR_{tf}",
+                               getattr(cfg,"LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR",.20)))
+        eq_tol=av*tol_mult
+        for kind,side,name in (("high","BSL","equal highs"),("low","SSL","equal lows")):
+            vals=[(i,p) for i,p,k in piv if k==kind]
+            for a,b in zip(vals,vals[1:]):
+                if b[0]-a[0]>=min_gap and abs(b[1]-a[1])<=eq_tol:
+                    out.append((side,(a[1]+b[1])/2,f"{name} {tf}",tf,rank))
+
+    # Confirmed recent H1 pivots provide local liquidity, below EQH/EQL rank.
+    h1_piv=_pivots(h1)
+    for _,p,k in h1_piv[-10:]: out.append(("BSL" if k=="high" else "SSL",p,"confirmed H1 swing","H1",2))
     return out
 
 
