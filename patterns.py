@@ -12,6 +12,7 @@ from pathlib import Path
 
 import config as cfg
 import news as newsmod
+import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles
 
 log = logging.getLogger("fxbot.patterns")
@@ -639,6 +640,18 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 or harmonic_confirmation(symbol, p.side, by_tf, strength)
             ]
             candidates = [p for p in candidates if _pattern_allowed(p, context_side)]
+            # Единый OHLC слой не создаёт паттерн сам. Он лишь не даёт одной-двум
+            # слабым контр-свечам превратить локальную реакцию в готовый разворот.
+            adjusted = []
+            for p in candidates:
+                side_i = 1 if p.side == "LONG" else -1
+                gate = ohlc_movement.setup_adjustment(by_tf, side_i) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
+                if not gate.get("allow", True):
+                    continue
+                d = int(gate.get("quality_delta", 0))
+                adjusted.append(Pattern(p.name, p.side, p.tf, max(1,min(96,p.quality+d)),
+                                        max(1,min(94,p.confidence+d)), p.fact, p.level, p.dt))
+            candidates = sorted(adjusted, key=lambda p: (p.quality, p.confidence), reverse=True)
 
             # Внутренний журнал наблюдения: бот знает, какую свежую геометрию видел,
             # но пользователь получает только полностью подтверждённую фигуру.

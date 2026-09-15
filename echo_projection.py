@@ -133,9 +133,19 @@ def _context_score(symbol: str, by_tf: dict, side: int, strength: dict[str, floa
     elif adx_h1 and adx_h1 < 16:
         score -= 4
 
+    # Shared OHLC movement is one bounded evidence group, not another signal.
+    try:
+        import ohlc_movement
+        oc = ohlc_movement.setup_adjustment(by_tf, side)
+        score += int(oc.get("quality_delta", 0))
+        if oc.get("weak_reversal"):
+            score -= 5
+    except Exception:
+        oc = {"available": False}
+
     return {"score": score, "tf_sides": tf_sides, "zigzag_h4": zz_side,
             "strength_gap": round(strength_gap, 4), "adx_h1": round(adx_h1, 1),
-            "dxy_bias": int(dxy_bias or 0)}
+            "dxy_bias": int(dxy_bias or 0), "ohlc": oc}
 
 
 

@@ -103,3 +103,37 @@ def combine(timeframes: list[tuple[str, list]], side: int) -> dict:
     ranges = sum(1 for _,x,_ in items if x.range_like)
     return {"available": True, "score": round(score,1), "weak_reversal": weak,
             "range_like": ranges >= 2, "details": {tf:x.as_dict() for tf,x,_ in items}}
+
+
+def market_context(by_tf: dict, side: int, tfs=("D1","H4","H1","M15","M5")) -> dict:
+    """Canonical adapter used by modules. Only closed candles are evaluated.
+
+    The layer is evidence, not a signal generator: it can veto a weak counter-move,
+    flag range/noise and add bounded support to an already existing setup.
+    """
+    if side not in (-1, 1):
+        return {"available": False, "score": 50.0, "weak_reversal": False, "range_like": False, "details": {}}
+    from analysis import closed_candles
+    minutes = {"W1":10080,"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
+    frames=[]
+    for tf in tfs:
+        raw=(by_tf or {}).get(tf) or []
+        bars=closed_candles(raw, minutes[tf])
+        if bars:
+            frames.append((tf,bars))
+    return combine(frames, side)
+
+
+def setup_adjustment(by_tf: dict, side: int) -> dict:
+    """Small bounded adjustment for an existing setup; never invents direction."""
+    ctx=market_context(by_tf, side)
+    if not ctx.get("available"):
+        return {**ctx, "allow": True, "quality_delta": 0}
+    score=float(ctx.get("score",50.0))
+    delta=0
+    if score >= 72: delta=4
+    elif score >= 62: delta=2
+    elif score <= 35: delta=-4
+    elif score <= 44: delta=-2
+    if ctx.get("range_like"): delta=min(delta, -2)
+    return {**ctx, "allow": not bool(ctx.get("weak_reversal")), "quality_delta": delta}

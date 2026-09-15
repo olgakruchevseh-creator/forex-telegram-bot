@@ -12,6 +12,7 @@ from pathlib import Path
 from statistics import median
 
 import config as cfg
+import ohlc_movement
 
 log = logging.getLogger("fxbot.zigzag")
 TF_MINUTES = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
@@ -239,6 +240,12 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
             side, early_key = early_side, run_dt
             event = ("РАННИЙ ПОДТВЕРЖДЁННЫЙ ИМПУЛЬС" if early_side == main
                      else "РАННИЙ ПОДТВЕРЖДЁННЫЙ ОТКАТ")
+
+    # Shared OHLC guard: ZigZag geometry remains primary; OHLC only rejects a
+    # weak 1–2 candle counter-move and therefore cannot invent a new direction.
+    ohlc_ctx = ohlc_movement.setup_adjustment(by_tf, side) if (side and getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True)) else {"allow": True, "score": 50.0}
+    if event in ("ОТКАТ", "РАННИЙ ПОДТВЕРЖДЁННЫЙ ОТКАТ") and not ohlc_ctx.get("allow", True):
+        event, side, early_key = "", 0, ""
 
     # Показываем старший ТФ, на котором уже есть читаемая последовательность.
     key_tf = next((tf for tf in ("H4", "D1", "H1", "M15") if _sequence(swings_by_tf.get(tf) or [])), "")

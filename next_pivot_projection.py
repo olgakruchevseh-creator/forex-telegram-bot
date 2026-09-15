@@ -309,12 +309,24 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
     # Максимум ±12 пунктов от всех новых слоёв вместе: они уточняют статистику,
     # но не могут самостоятельно перевернуть Pivot-модель.
     smc_adjust = max(-12, min(12, len(set(confirmations))*2 - len(set(cautions))*3))
-    result["probability"] = max(30, min(94, int(result["probability"]) + smc_adjust))
+    # OHLC is a separate bounded movement-quality group. It may soften a weak
+    # 1–2 candle counter projection, but never chooses the pivot direction.
+    try:
+        import ohlc_movement
+        oc = ohlc_movement.setup_adjustment(by_tf, side_n)
+        ohlc_adjust = int(oc.get("quality_delta", 0))
+        if oc.get("weak_reversal"):
+            ohlc_adjust = min(ohlc_adjust, -5)
+    except Exception:
+        oc, ohlc_adjust = {"available": False}, 0
+    result["probability"] = max(30, min(94, int(result["probability"]) + smc_adjust + ohlc_adjust))
     if result["outside_session"]:
         result["probability"] = max(30, int(result["probability"]) - 8)
     result["smc_confirmations"] = sorted(set(confirmations))
     result["smc_cautions"] = sorted(set(cautions))
     result["smc_adjust"] = smc_adjust
+    result["ohlc"] = oc
+    result["ohlc_adjust"] = ohlc_adjust
     result["main_score"] = result["probability"]
     return result
 

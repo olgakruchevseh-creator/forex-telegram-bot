@@ -20,6 +20,7 @@ import market_regime
 import imd
 import idm
 import daily_high_low
+import ohlc_movement
 from analysis import PairStack, build_stack, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
@@ -162,12 +163,15 @@ def analyze_symbol(
     propulsion_ctx = propulsion_block.analyze_symbol(symbol, by_tf, side)
     choch_ctx = choch.analyze_symbol(symbol, by_tf, side)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
-    pd_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
-    idm_ctx = inducement.analyze_symbol(symbol, by_tf, side)
+    premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
+    inducement_ctx = inducement.analyze_symbol(symbol, by_tf, side)
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
-    idm_ctx = idm.analyze_symbol(symbol, by_tf, side)
-    pd_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
+    idm_sweep_ctx = idm.analyze_symbol(symbol, by_tf, side)
+    pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
+    ohlc_ctx = ohlc_movement.setup_adjustment(by_tf, side) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
+    if not ohlc_ctx.get("allow", True):
+        return None
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     aligned, opposite = _module_evidence(symbol, side, alerts)
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
@@ -213,14 +217,15 @@ def analyze_symbol(
     if choch_ctx and choch_ctx.alignment > 0:
         quality += int(getattr(cfg, "CHOCH_ALIGN_BONUS", 5))
     if erl_ctx and erl_ctx.alignment > 0: quality += int(getattr(cfg, "ERL_ALIGN_BONUS", 3))
-    if pd_ctx and pd_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
-    if idm_ctx and idm_ctx.alignment > 0: quality += int(getattr(cfg, "IDM_ALIGN_BONUS", 3))
+    if premium_discount_ctx and premium_discount_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
+    if inducement_ctx and inducement_ctx.alignment > 0: quality += int(getattr(cfg, "IDM_ALIGN_BONUS", 3))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
-    if idm_ctx and idm_ctx.alignment > 0:
+    if idm_sweep_ctx and idm_sweep_ctx.alignment > 0:
         quality += int(getattr(cfg, "IDM_SWEEP_BONUS", 4))
-    if pd_ctx and pd_ctx.alignment > 0:
+    if pdh_pdl_ctx and pdh_pdl_ctx.alignment > 0:
         quality += int(getattr(cfg, "PDH_PDL_SWEEP_BONUS", 4))
+    quality += int(ohlc_ctx.get("quality_delta", 0))
     quality = min(94, quality)
     # Штрафы применяются после верхнего лимита, чтобы сильная базовая оценка
     # не скрывала одиночное противоречие за значением 94/100.
@@ -241,13 +246,13 @@ def analyze_symbol(
     if choch_ctx and choch_ctx.alignment < 0:
         quality -= int(getattr(cfg, "CHOCH_CONFLICT_PENALTY", 6))
     if erl_ctx and erl_ctx.alignment < 0: quality -= int(getattr(cfg, "ERL_CONFLICT_PENALTY", 3))
-    if pd_ctx and pd_ctx.alignment < 0: quality -= int(getattr(cfg, "PD_CONFLICT_PENALTY", 2))
-    if idm_ctx and idm_ctx.alignment < 0: quality -= int(getattr(cfg, "IDM_CONFLICT_PENALTY", 2))
+    if premium_discount_ctx and premium_discount_ctx.alignment < 0: quality -= int(getattr(cfg, "PD_CONFLICT_PENALTY", 2))
+    if inducement_ctx and inducement_ctx.alignment < 0: quality -= int(getattr(cfg, "IDM_CONFLICT_PENALTY", 2))
     if imd_ctx and imd_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
-    if idm_ctx and idm_ctx.alignment < 0:
+    if idm_sweep_ctx and idm_sweep_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IDM_UNSWEPT_PENALTY", 3))
-    if pd_ctx and pd_ctx.alignment < 0:
+    if pdh_pdl_ctx and pdh_pdl_ctx.alignment < 0:
         quality -= int(getattr(cfg, "PDH_PDL_UNSWEPT_PENALTY", 2))
     if profile_confirmation < 0:
         quality -= 3
@@ -283,15 +288,16 @@ def analyze_symbol(
         "choch": choch.describe(choch_ctx),
         "choch_alignment": choch_ctx.alignment if choch_ctx else 0,
         "erl": erl.describe(erl_ctx), "erl_alignment": erl_ctx.alignment if erl_ctx else 0,
-        "premium_discount": premium_discount.describe(pd_ctx), "pd_alignment": pd_ctx.alignment if pd_ctx else 0,
-        "inducement": inducement.describe(idm_ctx), "idm_alignment": idm_ctx.alignment if idm_ctx else 0,
+        "premium_discount": premium_discount.describe(premium_discount_ctx), "pd_alignment": premium_discount_ctx.alignment if premium_discount_ctx else 0,
+        "inducement": inducement.describe(inducement_ctx), "inducement_alignment": inducement_ctx.alignment if inducement_ctx else 0,
         "market_regime": market_regime.describe(regime_ctx),
         "imd": imd.describe(imd_ctx),
         "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
-        "idm": idm.describe(idm_ctx),
-        "idm_alignment": idm_ctx.alignment if idm_ctx else 0,
-        "pdh_pdl": daily_high_low.describe_pdh_pdl(pd_ctx),
-        "pdh_pdl_alignment": pd_ctx.alignment if pd_ctx else 0,
+        "idm": idm.describe(idm_sweep_ctx),
+        "idm_alignment": idm_sweep_ctx.alignment if idm_sweep_ctx else 0,
+        "pdh_pdl": daily_high_low.describe_pdh_pdl(pdh_pdl_ctx),
+        "pdh_pdl_alignment": pdh_pdl_ctx.alignment if pdh_pdl_ctx else 0,
+        "ohlc": ohlc_ctx,
     }
 
 
