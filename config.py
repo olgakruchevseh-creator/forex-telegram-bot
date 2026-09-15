@@ -586,3 +586,13 @@ LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR = 0.20
 LIQUIDITY_MAP_MERGE_ATR = 0.16
 LIQUIDITY_MAP_APPROACH_ATR = 0.35
 LIQUIDITY_MAP_STATUS_LOOKBACK_M15 = 16
+
+# Global new-signal significance gate (ZIP 29 refinement).
+# Detectors still see/store every event internally. Telegram gets a NEW trade
+# signal only when there is enough estimated H1 life AND enough price travel.
+SIGNAL_SIGNIFICANCE_GATE_ENABLED = True
+SIGNAL_MIN_REMAINING_H1 = 3
+SIGNAL_MIN_ROUTE_ATR = 0.75
+SIGNAL_MIN_MEDIAN_H1_BODY_ATR = 0.18
+SIGNAL_STRONG_ROUTE_ATR_OVERRIDE = 1.25
+SIGNAL_RANGE_EFFICIENCY_FLOOR = 0.18

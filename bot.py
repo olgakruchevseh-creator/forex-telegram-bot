@@ -976,6 +976,34 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             text for _priority, text in selected_alerts
         ]
         delivery_alerts = list(dict.fromkeys(proposed_delivery))
+        # Global significance gate: detectors/candidates keep every event internally,
+        # but a fresh Telegram trade card needs both enough H1 life and enough
+        # expected price amplitude. This prevents 1–2 H1 noise and five tiny
+        # sideways candles from being presented as an actionable new signal.
+        if getattr(cfg, "SIGNAL_SIGNIFICANCE_GATE_ENABLED", True):
+            significant_alerts = []
+            for source_text in delivery_alerts:
+                if not (_alert_pair(source_text) and _direct_signal_side(source_text)):
+                    significant_alerts.append(source_text)
+                    continue
+                try:
+                    significance = signal_navigator.assess_new_signal_significance(
+                        source_text, market, strength
+                    )
+                except Exception:
+                    log.exception("SIGNAL_SIGNIFICANCE_GATE_FAILED")
+                    significance = {"eligible": True, "reason": "gate_error"}
+                if significance.get("eligible", True):
+                    significant_alerts.append(source_text)
+                else:
+                    log.info(
+                        "SIGNAL_INTERNAL_ONLY pair=%s side=%s reason=%s h1=%s route_atr=%s body_atr=%s eff=%s",
+                        _alert_pair(source_text), _direct_signal_side(source_text),
+                        significance.get("reason"), significance.get("remaining_h1"),
+                        significance.get("route_atr"), significance.get("median_body_atr"),
+                        significance.get("efficiency"),
+                    )
+            delivery_alerts = significant_alerts
         # CPI — единый защитный слой поверх всех модулей: сам факт модуля не теряется,
         # но карточка явно запрещает трактовать новостной импульс как готовый вход.
         try:

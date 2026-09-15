@@ -305,6 +305,84 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     }
 
 
+
+def assess_new_signal_significance(source_text: str, market: dict, strength: dict) -> dict:
+    """Estimate whether a fresh module event has enough *remaining* trade value.
+
+    This is a delivery gate, not a detector.  A rejected event remains available
+    to internal candidate/confluence logic.  Candle count is deliberately not
+    sufficient: we also require useful H1 price amplitude so five tiny range
+    candles cannot outrank three meaningful directional candles.
+    """
+    result = {"eligible": True, "reason": "not_directional"}
+    if not getattr(cfg, "SIGNAL_SIGNIFICANCE_GATE_ENABLED", True):
+        return result
+    symbol, side = _pair(source_text), _side(source_text)
+    if not symbol or not side:
+        return result
+    by_tf = market.get(symbol) or {}
+    route = _trigger_route(symbol, side, by_tf, source_text)
+    if not route:
+        # Do not make missing/insufficient market data a silent global veto.
+        return {"eligible": True, "reason": "insufficient_data"}
+
+    direction = 1 if side == "LONG" else -1
+    views = {}
+    for tf in ("D1", "H4", "H1", "M15", "M5"):
+        minutes = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}[tf]
+        bars = movement_progress.closed_candles(by_tf.get(tf) or [], minutes)
+        views[tf] = analyze_tf(tf, tf, bars).bias if len(bars) >= 20 else 0
+    try:
+        base, quote = symbol.split("/")
+        gap = float(strength.get(base, 0)) - float(strength.get(quote, 0))
+    except (TypeError, ValueError):
+        gap = 0.0
+    master = {
+        "gap": gap,
+        "senior_n": sum(views[tf] == direction for tf in ("D1", "H4", "H1")),
+        "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
+    }
+    horizon = _time_horizon(symbol, side, by_tf, route, master)
+    remaining_h1 = int(horizon.get("high") or 0)
+
+    h1 = movement_progress.closed_candles(by_tf.get("H1") or [], 60)
+    av = movement_progress.atr(h1, 14) if h1 else 0.0
+    if av <= 0:
+        return {"eligible": True, "reason": "insufficient_atr"}
+    anchor = float(route.get("anchor") or 0)
+    tr1 = float(route.get("target") or anchor)
+    route_atr = abs(tr1 - anchor) / av
+
+    recent = h1[-8:]
+    body_ratios = sorted(abs(float(b.close) - float(b.open)) / av for b in recent) if recent else []
+    median_body_atr = body_ratios[len(body_ratios)//2] if body_ratios else 0.0
+    if len(recent) >= 2:
+        path = sum(abs(float(recent[i].close) - float(recent[i-1].close)) for i in range(1, len(recent)))
+        net = abs(float(recent[-1].close) - float(recent[0].close))
+        efficiency = net / path if path > 0 else 0.0
+    else:
+        efficiency = 0.0
+
+    min_h1 = int(getattr(cfg, "SIGNAL_MIN_REMAINING_H1", 3))
+    min_route = float(getattr(cfg, "SIGNAL_MIN_ROUTE_ATR", .75))
+    min_body = float(getattr(cfg, "SIGNAL_MIN_MEDIAN_H1_BODY_ATR", .18))
+    strong_route = float(getattr(cfg, "SIGNAL_STRONG_ROUTE_ATR_OVERRIDE", 1.25))
+    eff_floor = float(getattr(cfg, "SIGNAL_RANGE_EFFICIENCY_FLOOR", .18))
+
+    if remaining_h1 < min_h1:
+        eligible, reason = False, "short_horizon"
+    elif route_atr < min_route:
+        eligible, reason = False, "small_route"
+    elif route_atr < strong_route and median_body_atr < min_body and efficiency < eff_floor:
+        eligible, reason = False, "small_range_candles"
+    else:
+        eligible, reason = True, "significant"
+    return {
+        "eligible": eligible, "reason": reason, "remaining_h1": remaining_h1,
+        "route_atr": round(route_atr, 3), "median_body_atr": round(median_body_atr, 3),
+        "efficiency": round(efficiency, 3),
+    }
+
 def build_source_companion(source_text: str, market: dict, strength: dict) -> tuple[str, list[str]] | None:
     """Немедленно принимает доставляемый модульный сигнал на сопровождение."""
     symbol, side = _pair(source_text), _side(source_text)
