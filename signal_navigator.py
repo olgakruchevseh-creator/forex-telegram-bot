@@ -66,7 +66,7 @@ def _pair(text: str) -> str:
 
 def _side(text: str) -> str:
     match = re.search(
-        r"(?:Основное\s+)?направление(?:\s+(?:реакции|пробоя))?:\s*(LONG|SHORT)\b",
+        r"(?:Основное\s+)?направление(?:\s+(?:реакции|пробоя|разворота))?:\s*(LONG|SHORT)\b",
         text or "", re.I,
     )
     return match.group(1) if match else ""

@@ -841,7 +841,11 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         lines.append(f"ZigZag: {zz_icon} {b.zigzag}")
         lines.append(f"Текущее положение: {position_icon} {b.position}")
         lines.append(f"AMD: {amd_icon} {amd_text}")
-        lines.append(f"Согласие: {b.agree}")
+        technical_side = technical_pair_side(b)
+        agree_label = f"{b.agree} {technical_side}" if technical_side else b.agree
+        if technical_side and b.zigzag_h4_side and b.zigzag_h4_side != _side_int(technical_side):
+            agree_label += " · ⚠️ ZigZag H4 против"
+        lines.append(f"Согласие D1/H4/H1: {agree_label}")
         relation = b.strength_relation or _strength_relation(b.gap, technical_pair_side(b))
         lines.append(f"Сила: {force} · {relation}")
         if b.context_support or b.context_against:

@@ -494,10 +494,19 @@ def _alert_pair(text: str) -> str:
 
 
 def _direct_signal_side(text: str) -> str:
-    match = re.search(r"(?:^|\n)[🟢🔴]?\s*(LONG|SHORT)\s+[A-Z]{3}/[A-Z]{3}", text or "")
+    """Extract direction from every trading-module card format.
+
+    Levels use "Направление реакции/пробоя", ATS uses "Направление разворота",
+    while most modules use plain "Направление". Navigator routing must treat
+    all of them identically.
+    """
+    match = re.search(r"(?:^|\n)[🟢🔴]?\s*(LONG|SHORT)\s+[A-Z]{3}/[A-Z]{3}", text or "", re.I)
     if not match:
-        match = re.search(r"Направление:\s*(LONG|SHORT)\b", text or "")
-    return match.group(1) if match else ""
+        match = re.search(
+            r"(?:🧭\s*)?Направление(?:\s+(?:реакции|пробоя|разворота))?:\s*(LONG|SHORT)\b",
+            text or "", re.I,
+        )
+    return match.group(1).upper() if match else ""
 
 
 def signal_allowed_by_h4_zigzag(symbol: str, by_tf: dict, side: str) -> bool:
@@ -1166,25 +1175,32 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Запись отправленного сигнала в журнал")
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
-            # После исходного события отправляется только уже готовая строгая
-            # карточка Navigator/Master Direction. Fallback build_source_companion
-            # здесь запрещён: локальный модуль не может сам создать торговый маршрут.
+            # ZIP 28: Navigator встречает КАЖДОЕ пригодное направленное событие.
+            # Строгая карточка Master Direction предпочтительна, но отсутствие Master
+            # больше не заставляет Navigator исчезать: исходный модуль уже подтвердил
+            # сам факт события, а Navigator отдельно показывает HTF/LTF-конфликты,
+            # силу и ZigZag и сопровождает TR1/TR2/TR3.
             key = (pair, direct_side)
             companion = next((
                 (card, navigator_sources[card]) for _p, card in confirmed_alerts
                 if (_alert_pair(card), _direct_signal_side(card)) == key
             ), None)
+            if not companion and pair and direct_side:
+                try:
+                    companion = signal_navigator.build_source_companion(source_text, market, strength)
+                except Exception:
+                    log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=source_companion pair=%s", pair)
+                    companion = None
             if companion:
-                nav_text, _nav_sources = companion
-                # Сохраняем раньше сетевой отправки: после уже доставленного
-                # паттерна Навигатор больше не может потеряться.
+                nav_text, nav_sources = companion
+                # Регистрируем маршрут ДО Telegram: lifecycle не зависит от сетевой
+                # отправки карточки и сможет сообщить TR1/TR2/TR3/отмену позже.
+                signal_navigator.register_card(nav_text, nav_sources, closed_dt)
                 _enqueue_navigator(state, nav_text)
                 save_state(state)
                 await _flush_navigator_outbox(context.application, int(chat_id), state)
                 if pair and direct_side:
                     state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
-        # Отдельный неподтверждённый Навигатор отключён: его расчёт уже включён
-        # в единую карточку выше.
 
         # Активные сценарии сопровождаются отдельно от лимита новых сигналов:
         # только близость к цели, завершение либо подтверждённая отмена.
