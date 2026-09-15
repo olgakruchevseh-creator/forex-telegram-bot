@@ -439,6 +439,27 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
         draw.text((point[0]-12, bottom+12), f"+{h}h", fill="#c9d1df", font=small)
     weak_label = " · СЛАБАЯ ОЦЕНКА" if result.get("weak") else ""
     draw.text((left, 22), f"{result['symbol']} · ЭХО ДО СЛЕДУЮЩЕЙ СЕССИИ · {result['side']} {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
+    # Визуальный слой: график H1, но расчёт остаётся MTF. Это только подпись
+    # и разметка картинки — формула направления/вероятности не меняется.
+    draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
+    # Граница текущих закрытых свечей / начало прогнозной части.
+    boundary_x = x_at(start_index)
+    draw.line((boundary_x, top, boundary_x, bottom), fill="#8b95a8", width=2)
+    draw.text((max(left, boundary_x-92), bottom-28), "СТАРТ ПРОЕКЦИИ", fill="#c9d1df", font=small)
+    # Явная стрелка направления к границе следующей сессии.
+    if len(points) >= 2:
+        ax, ay = points[-1]
+        px, py = points[-2]
+        import math as _m
+        ang = _m.atan2(ay-py, ax-px)
+        size = 16
+        wing = .65
+        arrow = [(ax, ay),
+                 (ax-size*_m.cos(ang-wing), ay-size*_m.sin(ang-wing)),
+                 (ax-size*_m.cos(ang+wing), ay-size*_m.sin(ang+wing))]
+        draw.polygon(arrow, fill=wave_color)
+        draw.text((min(right-210, ax-95), max(top+35, ay-34)),
+                  f"{result['side']} → следующая сессия", fill=wave_color, font=small)
     # News Risk Layer: заранее не угадываем факт новости, а явно помечаем
     # участок, после которого траектория имеет повышенную неопределённость.
     markers = result.get("news_markers") or []

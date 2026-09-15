@@ -448,6 +448,16 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
               fill="#d889ff", font=small)
     mode = "ОЦЕНОЧНЫЙ" if result.get("estimated") else "СТАТИСТИЧЕСКИЙ"
     draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']} · {mode}", fill="#f1f5fb", font=font)
+    # Визуальный слой MTF: свечной холст H1, зона уточняется старшими/рабочими TF.
+    # Расчёт Pivot и его вероятность здесь не меняются.
+    draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
+    draw.text((left, 73), "Pivot-зона: H4/H1 · реакция подтверждается M15/H1", fill="#9aa4b5", font=small)
+    # Отделяем историю от будущей сессионной проекции.
+    draw.line((start_x, top, start_x, bottom), fill="#8b95a8", width=2)
+    draw.text((max(left, start_x-88), bottom-28), "СТАРТ ПРОЕКЦИИ", fill="#c9d1df", font=small)
+    zone_label = "ОЖИДАЕМАЯ ВЕРШИНА" if direction > 0 else "ОЖИДАЕМОЕ ОСНОВАНИЕ"
+    draw.text((max(left, zone_x1), max(top+58, y_at(result["zone_high"])-27)),
+              f"{zone_label} · {result['probability']}%", fill="#8cc8ff", font=small)
     # Новостной слой входит прямо в картинку: маркер предупреждает, что
     # траектория после публикации может измениться и должна пересчитываться.
     markers = result.get("news_markers") or []
