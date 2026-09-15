@@ -590,17 +590,20 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     local_early = bool(master.get("local_early"))
     source_accepted = bool(master.get("source_accepted"))
     direction = 1 if side == "LONG" else -1
-    directed_gap = float(master.get("gap") or 0) * direction
+    raw_gap = float(master.get("gap") or 0)
+    directed_gap = raw_gap * direction
+    symbol = str(master.get("symbol") or _pair(sources[0] if sources else "") or "")
+    pair_label = symbol.replace("/", "−") if symbol else "BASE−QUOTE"
     tf_biases = master.get("tf_biases") or {}
     h1_bias = int(tf_biases.get("H1") or 0)
     zz_value = master.get("zigzag_h4")
     zz_opposite = zz_value not in (None, "", "RANGE", side)
     if directed_gap >= .03:
-        strength_line = f"• Сила относительно {side}: {directed_gap:+.2f} · 🟢 поддерживает"
+        strength_line = f"• Разница силы {pair_label}: {raw_gap:+.2f} · 🟢 поддерживает {side}"
     elif directed_gap <= -.03:
-        strength_line = f"• Сила относительно {side}: {directed_gap:+.2f} · 🔴 против направления"
+        strength_line = f"• Разница силы {pair_label}: {raw_gap:+.2f} · 🔴 против направления {side}"
     else:
-        strength_line = f"• Сила относительно {side}: {directed_gap:+.2f} · 🟡 почти равная"
+        strength_line = f"• Разница силы {pair_label}: {raw_gap:+.2f} · 🟡 почти равная"
     navigator_status = ""
     assessment = f"{icon} направление {side} подтверждено по закрытой H1-свече."
     display_mode = mode_names.get(route["mode"], route["mode"])
