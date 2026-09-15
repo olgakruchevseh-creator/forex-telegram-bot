@@ -371,12 +371,75 @@ def format_alert(result: dict) -> str:
     ])
 
 
+def _chart_h1_bars(by_tf: dict, limit: int = 40):
+    """Return verified hourly candles for the picture only.
+
+    Prefer the native H1 feed. If it is accidentally populated with a lower
+    timeframe, rebuild H1 from a valid M15 feed. Never label an unverified
+    lower-timeframe canvas as H1.
+    """
+    from datetime import datetime
+    from statistics import median
+
+    def parse_dt(value):
+        raw = str(value or "").strip().replace("T", " ")[:19]
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    def median_gap_minutes(bars):
+        stamps = [parse_dt(b.dt) for b in bars[-12:]]
+        stamps = [x for x in stamps if x is not None]
+        if len(stamps) < 3:
+            return None
+        gaps = [(b-a).total_seconds()/60 for a, b in zip(stamps, stamps[1:]) if b > a]
+        return median(gaps) if gaps else None
+
+    native = closed_candles(by_tf.get("H1") or [], 60)
+    gap = median_gap_minutes(native)
+    if len(native) >= 3 and gap is not None and 55 <= gap <= 65:
+        return native[-limit:], "H1 · прямые свечи · шаг 60 мин"
+
+    m15 = closed_candles(by_tf.get("M15") or [], 15)
+    m15_gap = median_gap_minutes(m15)
+    if len(m15) >= 8 and m15_gap is not None and 12 <= m15_gap <= 18:
+        buckets = {}
+        order = []
+        for bar in m15:
+            dt = parse_dt(bar.dt)
+            if dt is None:
+                continue
+            key = dt.replace(minute=0, second=0, microsecond=0)
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(bar)
+        rebuilt = []
+        for key in order:
+            group = sorted(buckets[key], key=lambda b: parse_dt(b.dt) or key)
+            if len(group) != 4:
+                continue
+            rebuilt.append(Candle(
+                dt=key.strftime("%Y-%m-%d %H:%M:%S"),
+                open=group[0].open,
+                high=max(b.high for b in group),
+                low=min(b.low for b in group),
+                close=group[-1].close,
+            ))
+        rebuilt_gap = median_gap_minutes(rebuilt)
+        if len(rebuilt) >= 3 and rebuilt_gap is not None and 55 <= rebuilt_gap <= 65:
+            return rebuilt[-limit:], "H1 · собрано из M15 · шаг 60 мин"
+
+    raise ValueError(f"H1 chart validation failed: native_gap={gap}, m15_gap={m15_gap}")
+
+
 def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     """PNG со свечами H1, медианной Echo-волной и диапазоном неопределённости."""
     from PIL import Image, ImageDraw, ImageFont
 
-    bars = closed_candles(by_tf.get("H1") or [], 60)
-    bars = bars[-max(20, int(getattr(cfg, "ECHO_CHART_CANDLES", 40))):]
+    chart_limit = max(20, int(getattr(cfg, "ECHO_CHART_CANDLES", 40)))
+    bars, chart_tf_note = _chart_h1_bars(by_tf, chart_limit)
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#10131d")
     draw = ImageDraw.Draw(image, "RGBA")
@@ -441,7 +504,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.text((left, 22), f"{result['symbol']} · ЭХО ДО СЛЕДУЮЩЕЙ СЕССИИ · {result['side']} {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
     # Визуальный слой: график H1, но расчёт остаётся MTF. Это только подпись
     # и разметка картинки — формула направления/вероятности не меняется.
-    draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
+    draw.text((left, 49), f"График: {chart_tf_note} · MTF: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
     # Граница текущих закрытых свечей / начало прогнозной части.
     boundary_x = x_at(start_index)
     draw.line((boundary_x, top, boundary_x, bottom), fill="#8b95a8", width=2)
