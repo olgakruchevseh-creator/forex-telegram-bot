@@ -456,8 +456,6 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     # Основной путь к зоне. Вместо безымянных технических маркеров
     # пользователь видит смысл каждой линии/точки.
     draw.line((start_x, y_at(current), target_x, y_at(zone_mid)), fill=main_color, width=5)
-    draw.text((min(right-300, start_x+18), max(top+110, y_at(current)-30)),
-              f"ПУТЬ К PIVOT · {result['side']}", fill=main_color, font=small)
     draw.polygon([(target_x, y_at(zone_mid)), (target_x-15, y_at(zone_mid)+10*direction),
                   (target_x-10, y_at(zone_mid)-14*direction)], fill=main_color)
     # Альтернатива: локальный откат/флэт, затем повторный подход к Pivot.
@@ -467,9 +465,6 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     # Реакция после достижения зоны.
     end_x = x_at(historical-1+future)
     draw.line((target_x, y_at(zone_mid), end_x, y_at(reaction_price)), fill="#d889ff", width=4)
-    draw.text((min(right-290, target_x+18), max(top+145, y_at(reaction_price)-28)),
-              f"ВОЗМОЖНАЯ РЕАКЦИЯ · {'SHORT' if direction > 0 else 'LONG'}",
-              fill="#d889ff", font=small)
     decimals = 3 if "JPY" in result["symbol"] else 5
     reaction = "SHORT" if direction > 0 else "LONG"
     # Фиксированная легенда не перекрывается, даже когда три цены находятся
@@ -478,13 +473,13 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.rounded_rectangle((legend_x-14, legend_y-12, right-8, legend_y+92), radius=10,
                            fill="#171c29dd", outline="#353d50", width=2)
     draw.text((legend_x, legend_y),
-              f"Основной → {zone_mid:.{decimals}f} · {result.get('main_score', result['probability'])}%",
+              f"Основной путь → {zone_mid:.{decimals}f} · {result.get('main_score', result['probability'])}%",
               fill=main_color, font=small)
     draw.text((legend_x, legend_y+31),
-              f"Откат/флэт → {pullback_price:.{decimals}f} · {result.get('flat_score', 0)}%",
+              f"Через откат → {pullback_price:.{decimals}f} · {result.get('flat_score', 0)}%",
               fill="#ffd44d", font=small)
     draw.text((legend_x, legend_y+62),
-              f"После Pivot {reaction} → {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
+              f"После Pivot: {reaction} → {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
               fill="#d889ff", font=small)
     mode = "ОЦЕНОЧНЫЙ" if result.get("estimated") else "СТАТИСТИЧЕСКИЙ"
     draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']} · {mode}", fill="#f1f5fb", font=font)

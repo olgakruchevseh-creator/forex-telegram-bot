@@ -468,19 +468,14 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
             t1, t2 = n/steps, min(1, (n+1)/steps)
             draw.line((a[0]+(b[0]-a[0])*t1, a[1]+(b[1]-a[1])*t1,
                        a[0]+(b[0]-a[0])*t2, a[1]+(b[1]-a[1])*t2), fill=wave_color, width=5)
-    # Не показываем безымянные крестики/квадраты: каждая значимая
-    # прогнозная точка подписана горизонтом, служебные точки скрыты.
-    for (h, price), point in zip(projected[1:], points[1:]):
-        draw.ellipse((point[0]-5, point[1]-5, point[0]+5, point[1]+5),
-                     fill=wave_color, outline="#f1f5fb", width=1)
-        decimals = 3 if "JPY" in result["symbol"] else 5
-        draw.text((max(left, point[0]-34), max(top+96, point[1]-28)),
-                  f"+{h}ч · {price:.{decimals}f}", fill="#dce4ef", font=small)
+    # Чистый пользовательский график: промежуточные расчётные точки
+    # +2ч/+4ч/+6ч/+8ч остаются в Telegram-тексте, но не дублируются на PNG.
+    # На изображении остаются только траектория, коридор и конечное направление.
     weak_label = " · СЛАБАЯ ОЦЕНКА" if result.get("weak") else ""
-    draw.text((left, 22), f"{result['symbol']} · ЭХО ДО СЛЕДУЮЩЕЙ СЕССИИ · {result['side']} {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
+    draw.text((left, 22), f"{result['symbol']} · H1 · {result['side']} · {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
     # Визуальный слой: график H1, но расчёт остаётся MTF. Это только подпись
     # и разметка картинки — формула направления/вероятности не меняется.
-    draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
+    draw.text((left, 49), "MTF: D1 · H4 · H1 · M15 · прогноз до следующей сессии", fill="#b9c3d3", font=small)
     # Граница текущих закрытых свечей / начало прогнозной части.
     boundary_x = x_at(start_index)
     draw.line((boundary_x, top, boundary_x, bottom), fill="#8b95a8", width=2)
