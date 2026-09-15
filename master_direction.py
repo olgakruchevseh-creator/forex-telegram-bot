@@ -167,7 +167,7 @@ def analyze_symbol(
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
     inducement_ctx = inducement.analyze_symbol(symbol, by_tf, side)
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
-    state_ctx = market_state.build(symbol, by_tf, side) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
+    state_ctx = market_state.build(symbol, by_tf, side, events or [], now_utc) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
     idm_sweep_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
@@ -228,6 +228,8 @@ def analyze_symbol(
     if pdh_pdl_ctx and pdh_pdl_ctx.alignment > 0:
         quality += int(getattr(cfg, "PDH_PDL_SWEEP_BONUS", 4))
     quality += int(ohlc_ctx.get("quality_delta", 0))
+    regime_weight = market_regime.quality_adjustment(regime_ctx, side, ohlc_ctx)
+    quality += int(regime_weight.get("delta", 0))
     if state_ctx and state_ctx.liquidity and state_ctx.liquidity.confidence >= 60:
         quality += 2
     if state_ctx and state_ctx.exhaustion and state_ctx.exhaustion.exhausted:
@@ -297,6 +299,7 @@ def analyze_symbol(
         "premium_discount": premium_discount.describe(premium_discount_ctx), "pd_alignment": premium_discount_ctx.alignment if premium_discount_ctx else 0,
         "inducement": inducement.describe(inducement_ctx), "inducement_alignment": inducement_ctx.alignment if inducement_ctx else 0,
         "market_regime": market_regime.describe(regime_ctx),
+        "market_regime_weight": regime_weight,
         "imd": imd.describe(imd_ctx),
         "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
         "idm": idm.describe(idm_sweep_ctx),

@@ -593,7 +593,7 @@ LIQUIDITY_MAP_STATUS_LOOKBACK_M15 = 16
 # Detectors still see/store every event internally. Telegram gets a NEW trade
 # signal only when there is enough estimated H1 life AND enough price travel.
 SIGNAL_SIGNIFICANCE_GATE_ENABLED = True
-SIGNAL_MIN_REMAINING_H1 = 2
+SIGNAL_MIN_REMAINING_H1 = 3
 # A strong fresh OHLC/displacement event must not wait for another H1 candle.
 SIGNAL_EARLY_OHLC_SCORE = 68
 # If a source explicitly carries its close time, never present it as a NEW entry

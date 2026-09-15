@@ -456,6 +456,37 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
         await send(app, chat_id, part)
 
 
+def _enqueue_source(state: dict, text: str) -> None:
+    """Durable source-card outbox: persist before Telegram I/O, remove only after success."""
+    if not text:
+        return
+    outbox = state.setdefault("source_outbox", [])
+    if not any(item.get("text") == text for item in outbox if isinstance(item, dict)):
+        outbox.append({"text": text, "saved_at": time.time()})
+    state["source_outbox"] = outbox[-60:]
+
+
+def _ack_source(state: dict, text: str) -> None:
+    state["source_outbox"] = [item for item in state.get("source_outbox", [])
+                              if not isinstance(item, dict) or item.get("text") != text]
+
+
+async def _flush_source_outbox(app: Application, chat_id: int, state: dict) -> None:
+    """Retry source cards lost to a transient Telegram/Railway send failure."""
+    outbox = state.setdefault("source_outbox", [])
+    while outbox:
+        item = outbox[0]
+        text = item.get("text", "") if isinstance(item, dict) else ""
+        if not text:
+            outbox.pop(0); continue
+        try:
+            await _send_parts(app, chat_id, text)
+            outbox.pop(0); save_state(state)
+        except Exception:
+            log.exception("Повторная доставка исходной торговой карточки")
+            save_state(state); break
+
+
 def _enqueue_navigator(state: dict, text: str) -> None:
     """Сохраняет обязательное сопровождение до подтверждённой доставки."""
     if not text:
@@ -964,6 +995,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         selected_alerts = list(module_alerts)
         # Повторяем карточки, чья предыдущая отправка временно не удалась.
         # Они не расходуют лимит новых исходных сигналов.
+        await _flush_source_outbox(context.application, int(chat_id), state)
         await _flush_navigator_outbox(context.application, int(chat_id), state)
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
@@ -1012,6 +1044,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.exception("CPI guard calendar")
             cpi_events = []
         for source_text in delivery_alerts:
+            _enqueue_source(state, source_text)
+            save_state(state)
             text = source_text
             pair_for_cpi = _alert_pair(text)
             cpi_note = newsmod.cpi_pair_guard(pair_for_cpi, cpi_events) if pair_for_cpi else ""
@@ -1144,6 +1178,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     patterns.mark_card_delivered(text)
             else:
                 await _send_parts(context.application, int(chat_id), text)
+            _ack_source(state, source_text)
+            save_state(state)
             delivered_sources = [source_text]
             for source_text in delivered_sources:
                 if "↕️ ZIGZAG —" in source_text:
