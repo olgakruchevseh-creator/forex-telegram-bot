@@ -559,10 +559,15 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         lines.append(f"• {master['idm']}")
     if master.get("pdh_pdl"):
         lines.append(f"• {master['pdh_pdl']}")
+    # Keep the aggregate H1 Direction state separate from an H1 pattern event.
+    # A closed bullish/bearish pattern is evidence for the source event, but it
+    # must not silently rewrite the broader H1 direction model.
     if source_accepted and h1_bias == -direction:
-        lines.append(f"• H1: коррекция против маршрута {side}")
+        lines.append(f"• H1 Direction: коррекция против маршрута {side}")
     elif source_accepted and h1_bias == 0:
-        lines.append("• H1: нейтральное состояние")
+        lines.append("• H1 Direction: NEUTRAL · общее направление H1 ещё не подтверждено")
+    if source_accepted and "Patterns" in source_names:
+        lines.append(f"• H1 Pattern: {side} · закрытый паттерн подтверждает раннее событие, но не заменяет H1 Direction")
     lines.extend(f"• {item}" for item in evidence)
     if echo:
         horizons = echo.get("horizons") or {}
@@ -585,10 +590,17 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"Текущая цена: {movement_progress._price(master['symbol'], route['current'])}",
         "", "🎯 Цели маршрута:",
     ])
-    lines.extend(
-        f"• TR{index} ({item['tf']}): {movement_progress._price(master['symbol'], item['price'])} · на {item.get('route_pct', 100)}% общего маршрута"
-        for index, item in enumerate(targets, 1)
-    )
+    # During an early impulse the nearest target is actionable, while deeper
+    # HTF targets remain conditional until LTF continuation is confirmed.
+    early_impulse = (display_mode == "РАННЯЯ СТАДИЯ ИМПУЛЬСА"
+                     and int(master.get("junior_n") or 0) < 2)
+    for index, item in enumerate(targets, 1):
+        state = " · АКТИВНАЯ ЦЕЛЬ" if early_impulse and index == 1 else (
+            " · УСЛОВНАЯ · после подтверждения импульса" if early_impulse and index > 1 else "")
+        lines.append(
+            f"• TR{index} ({item['tf']}): {movement_progress._price(master['symbol'], item['price'])} "
+            f"· на {item.get('route_pct', 100)}% общего маршрута{state}"
+        )
     lines.extend([
         f"Общий маршрут до {route.get('final_target_name', 'TR1')} пройден: {route['progress']}%",
         f"Путь от старта до TR1 пройден: {route.get('tr1_progress', route['progress'])}%",
