@@ -227,6 +227,15 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     if av <= 0:
         return None
 
+    # Determine the route class before selecting targets.  A pullback against
+    # D1/H4 is not allowed to inherit the same deep H4/D1 ladder as an impulse.
+    d1 = movement_progress._bars(by_tf, "D1")
+    h4 = movement_progress._bars(by_tf, "H4")
+    d1_view = movement_progress._view("D1", d1)
+    h4_view = movement_progress._view("H4", h4)
+    mode = movement_progress._movement_mode(
+        direction, d1_view.bias if d1_view else 0, h4_view.bias if h4_view else 0)
+
     candidates = []
     target_kind = "high" if direction > 0 else "low"
     for tf in ("H4", "D1"):
@@ -256,7 +265,11 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         if any(abs(price-item["price"]) <= tolerance for item in targets):
             continue
         targets.append({"price": price, "tf": tf})
-        if len(targets) == 3:
+        # For a counter-trend pullback the first senior structural level is a
+        # reaction/invalidation boundary.  Deeper old H4/D1 extrema belong to
+        # a possible structure-break scenario and must not be advertised as
+        # continuation targets of the same pullback.
+        if mode == "PULLBACK" or len(targets) == 3:
             break
 
     # Если впереди недостаточно готовых H4/D1-экстремумов, недостающие этапы
@@ -264,7 +277,12 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     # принятого события, не выдавая арифметическую цель за структурный уровень.
     step = .75
     distance = step
-    while len(targets) < 3:
+    # ATR extension is valid for an impulse/local route.  For a pullback it
+    # could place TR2/TR3 beyond the protected senior swing and silently turn
+    # a correction into a reversal forecast, so no synthetic deep targets are
+    # added once a senior boundary exists.
+    fill_limit = 1 if mode == "PULLBACK" and targets else 3
+    while len(targets) < fill_limit:
         price = anchor + direction * av * distance
         if ((direction > 0 and price > current) or (direction < 0 and price < current)) and not any(
                 abs(price-item["price"]) <= tolerance for item in targets):
@@ -273,18 +291,13 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     targets.sort(key=lambda item: abs(float(item["price"]) - anchor))
     targets = targets[:3]
 
-    d1 = movement_progress._bars(by_tf, "D1")
-    h4 = movement_progress._bars(by_tf, "H4")
-    d1_view = movement_progress._view("D1", d1)
-    h4_view = movement_progress._view("H4", h4)
     gap = movement_progress._strength_ok(symbol, side, {})[1]
     return {
         "key": f"{symbol}|{side}|{h1[-1].dt}|trigger", "symbol": symbol, "side": side,
         "anchor": anchor, "current": current, "target": targets[0]["price"],
         "target_tf": targets[0]["tf"], "targets": targets,
         "progress": 0, "remaining": 100,
-        "mode": movement_progress._movement_mode(
-            direction, d1_view.bias if d1_view else 0, h4_view.bias if h4_view else 0),
+        "mode": mode,
         "gap": gap, "h1_dt": h1[-1].dt,
         # For M15/other fresh triggers the latest closed H1 can be older than
         # the actual signal. Time horizon must never point into the past.
@@ -471,16 +484,26 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     if source_accepted and zz_opposite:
         display_mode = "ОТКАТ ПРОТИВ ОСНОВНОГО " + str(zz_value)
     if source_accepted:
+        # HTF hierarchy: D1/H4 are structural parents. An opposite LTF event is
+        # tracked as a local reaction/pullback and must never be presented as a
+        # confirmed reversal of the higher-timeframe route.
+        d1_bias = int(tf_biases.get("D1") or 0)
+        h4_bias = int(tf_biases.get("H4") or 0)
+        htf_opposite = (h4_bias == -direction or d1_bias == -direction)
         no_tf_confirmation = (int(master.get("senior_n") or 0) == 0
                               and int(master.get("junior_n") or 0) == 0)
-        conflicts = h1_bias == -direction or directed_gap <= -.03 or zz_opposite
-        fully_confirmed = (int(master.get("senior_n") or 0) >= 2
+        conflicts = htf_opposite or h1_bias == -direction or directed_gap <= -.03 or zz_opposite
+        fully_confirmed = (not htf_opposite and int(master.get("senior_n") or 0) >= 2
                            and int(master.get("junior_n") or 0) >= 2
                            and h1_bias == direction and directed_gap >= .03
                            and not zz_opposite)
         if fully_confirmed:
             navigator_status = "✅ ПОЛНОСТЬЮ ПОДТВЕРЖДЁН"
             assessment = f"✅ направление {side} подтверждено закрытыми таймфреймами и принято на сопровождение."
+        elif htf_opposite:
+            navigator_status = "⚠️ ЛОКАЛЬНОЕ ДВИЖЕНИЕ ПРОТИВ HTF · РАЗВОРОТ НЕ ПОДТВЕРЖДЁН"
+            assessment = f"⚠️ локальное {side} принято на сопровождение, но D1/H4 имеют приоритет; смена старшего маршрута не подтверждена."
+            display_mode = "ОТКАТ / ЛОКАЛЬНАЯ РЕАКЦИЯ ПРОТИВ HTF"
         elif no_tf_confirmation:
             navigator_status = "🔴 ЛОКАЛЬНАЯ РЕАКЦИЯ · ОСНОВНОЙ МАРШРУТ НЕ ПОДТВЕРЖДЁН"
             assessment = (f"🔴 зафиксирована локальная реакция {side}, но закрытые "
