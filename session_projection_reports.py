@@ -129,7 +129,8 @@ def _minimal_echo_ray(symbol: str, by_tf: dict, side: str) -> io.BytesIO:
     except OSError:
         font = ImageFont.load_default(size=25)
     bars = closed_candles(by_tf.get("H1") or [], 60)[-30:]
-    left, right, top, bottom = 80, 1120, 100, 590
+    # Резервируем справа место под будущую полную ценовую шкалу/подписи.
+    left, right, top, bottom = 80, 1045, 100, 590
     if bars:
         lo, hi = min(b.low for b in bars), max(b.high for b in bars); span=max(hi-lo,1e-9)
         step=(right-left)*.72/max(1,len(bars)-1)

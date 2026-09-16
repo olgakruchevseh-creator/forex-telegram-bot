@@ -432,7 +432,10 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
         except OSError:
             font = ImageFont.load_default(size=22)
             small = ImageFont.load_default(size=17)
-    left, right, top, bottom = 75, 1135, 70, 615
+    # Правая колонка зарезервирована только для шкалы цены: это не даёт
+    # 5-значным котировкам обрезаться краем PNG.
+    left, right, top, bottom = 75, 1045, 70, 615
+    price_label_x = right + 14
     current = float(result["current"])
     av = atr(bars, 14) if len(bars) >= 15 else max(abs(result["zone_high"]-result["zone_low"]), current*.0005)
     direction = 1 if result["side"] == "LONG" else -1
@@ -456,7 +459,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
         draw.line((left, y, right, y), fill="#2a3040", width=1)
         value = pmax-i*(pmax-pmin)/5
         decimals = 3 if "JPY" in result["symbol"] else 5
-        draw.text((right+6, y-9), f"{value:.{decimals}f}", fill="#9aa4b5", font=small)
+        draw.text((price_label_x, y-9), f"{value:.{decimals}f}", fill="#9aa4b5", font=small)
     candle_w = max(4, int((right-left)/total*.55))
     for i, bar in enumerate(bars):
         x = x_at(i)
@@ -489,17 +492,20 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     reaction = "SHORT" if direction > 0 else "LONG"
     # Фиксированная легенда не перекрывается, даже когда три цены находятся
     # очень близко друг к другу или окно Pivot начинается уже на следующей H1.
-    legend_x, legend_y = 750, 82
-    draw.rounded_rectangle((legend_x-14, legend_y-12, right-8, legend_y+92), radius=10,
+    # Легенда вынесена в верхнюю левую часть будущей области. Без стрелочных
+    # glyph-символов: так исключаем □□□□ на образах без расширенного шрифта.
+    legend_x, legend_y = 610, 96
+    legend_right = right - 10
+    draw.rounded_rectangle((legend_x-14, legend_y-12, legend_right, legend_y+92), radius=10,
                            fill="#171c29dd", outline="#353d50", width=2)
     draw.text((legend_x, legend_y),
-              f"Первичное движение к Pivot → {zone_mid:.{decimals}f} · {display_probability}%",
+              f"К Pivot: {zone_mid:.{decimals}f} · {display_probability}%",
               fill=main_color, font=small)
     draw.text((legend_x, legend_y+31),
-              f"Через откат → {pullback_price:.{decimals}f} · {result.get('flat_score', 0)}%",
+              f"Через откат: {pullback_price:.{decimals}f} · {result.get('flat_score', 0)}%",
               fill="#ffd44d", font=small)
     draw.text((legend_x, legend_y+62),
-              f"После Pivot: {reaction} → {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
+              f"После Pivot {reaction}: {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
               fill="#d889ff", font=small)
     mode = "ОЦЕНОЧНЫЙ" if result.get("estimated") else "СТАТИСТИЧЕСКИЙ"
     weak_label = " · СЛАБАЯ ГИПОТЕЗА" if weak_projection else ""
@@ -512,8 +518,15 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.line((start_x, top, start_x, bottom), fill="#8b95a8", width=2)
     draw.text((max(left, start_x-88), bottom-28), "СТАРТ ПРОЕКЦИИ", fill="#c9d1df", font=small)
     zone_label = "ОЖИДАЕМАЯ ВЕРШИНА" if direction > 0 else "ОЖИДАЕМОЕ ОСНОВАНИЕ"
-    draw.text((max(left, zone_x1), max(top+58, y_at(result["zone_high"])-27)),
-              f"{zone_label} · {display_probability}%", fill=("#ffd44d" if weak_projection else "#8cc8ff"), font=small)
+    zone_text = f"{zone_label} · {display_probability}%"
+    zone_bbox = draw.textbbox((0, 0), zone_text, font=small)
+    zone_w = zone_bbox[2] - zone_bbox[0]
+    zone_text_x = max(left, min(right-zone_w-8, zone_x1))
+    zone_text_y = max(top+135, min(bottom-55, y_at(result["zone_high"])-32))
+    draw.rounded_rectangle((zone_text_x-6, zone_text_y-3, zone_text_x+zone_w+6, zone_text_y+24),
+                           radius=6, fill="#10131ddd")
+    draw.text((zone_text_x, zone_text_y), zone_text,
+              fill=("#ffd44d" if weak_projection else "#8cc8ff"), font=small)
     # Новостной слой входит прямо в картинку: маркер предупреждает, что
     # траектория после публикации может измениться и должна пересчитываться.
     markers = result.get("news_markers") or []

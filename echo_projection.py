@@ -450,7 +450,11 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
         except OSError:
             font = ImageFont.load_default(size=22)
             small = ImageFont.load_default(size=17)
-    left, right, top, bottom = 75, 1140, 70, 625
+    # Оставляем отдельную правую колонку под полные ценовые метки.
+    # Раньше график доходил до x=1140 при ширине 1200, поэтому 5-значные
+    # котировки визуально обрезались справа.
+    left, right, top, bottom = 75, 1050, 70, 625
+    price_label_x = right + 14
     expected = result.get("expected_by_horizon") or {}
     horizons = sorted(int(value) for value in expected) or [1, 2, 4, 8]
     av = float(result.get("atr") or 0)
@@ -474,7 +478,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
         draw.line((left, y, right, y), fill="#2a3040", width=1)
         value = pmax-i*(pmax-pmin)/5
         decimals = 3 if "JPY" in result["symbol"] else 5
-        draw.text((right+8, y-10), f"{value:.{decimals}f}", fill="#9aa4b5", font=small)
+        draw.text((price_label_x, y-10), f"{value:.{decimals}f}", fill="#9aa4b5", font=small)
     candle_w = max(4, int((right-left)/total_slots*.55))
     for i, bar in enumerate(bars):
         x = x_at(i)
@@ -518,8 +522,17 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
                  (ax-size*_m.cos(ang-wing), ay-size*_m.sin(ang-wing)),
                  (ax-size*_m.cos(ang+wing), ay-size*_m.sin(ang+wing))]
         draw.polygon(arrow, fill=wave_color)
-        draw.text((min(right-210, ax-95), max(top+35, ay-34)),
-                  f"{result['side']} → следующая сессия", fill=wave_color, font=small)
+        # Подпись держим внутри свободной прогнозной области и не кладём её
+        # поверх наконечника/линии. Символ стрелки намеренно не используем:
+        # на минимальных Railway-образах emoji/arrow glyph мог отображаться □.
+        label = f"{result['side']} · к следующей сессии"
+        bbox = draw.textbbox((0, 0), label, font=small)
+        label_w = bbox[2] - bbox[0]
+        label_x = max(left, min(right-label_w-8, ax-label_w-24))
+        label_y = max(top+38, min(bottom-55, ay-48 if result['side'] == 'LONG' else ay+22))
+        draw.rounded_rectangle((label_x-7, label_y-4, label_x+label_w+7, label_y+25),
+                               radius=7, fill="#10131ddd")
+        draw.text((label_x, label_y), label, fill=wave_color, font=small)
     # News Risk Layer: заранее не угадываем факт новости, а явно помечаем
     # участок, после которого траектория имеет повышенную неопределённость.
     markers = result.get("news_markers") or []
