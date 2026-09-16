@@ -146,8 +146,6 @@ def _minimal_echo_ray(symbol: str, by_tf: dict, side: str) -> io.BytesIO:
 
 def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
                  current_name: str, next_name: str, strength: dict | None = None) -> dict:
-    # Вся оставшаяся сессия разбита на контрольные участки.
-    # Последняя точка всегда совпадает с границей следующей сессии.
     checkpoints = sorted(set((
         max(1, int(round(hours * 0.25))),
         max(1, int(round(hours * 0.50))),
@@ -155,74 +153,83 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
         hours,
     )))
     result = echo_projection.analyze(symbol, by_tf, checkpoints, strength=strength or {})
-    weak = False
-    news = _news_context(symbol, events, result["confidence"] if result else None, hours)
+    news = _news_context(symbol, events, result["direction_probability"] if result else None, hours)
     if result:
         side, icon = result["side"], ("🟢" if result["side"] == "LONG" else "🔴")
-        values = result.get("horizons") or {}
-        route = " · ".join(f"+{h}ч: {values.get(str(h), 0)}%" for h in checkpoints)
-        confidence = news["confidence"]
-        endpoint = result.get("session_end_probability", values.get(str(hours), 0))
-        path = result.get("expected_by_horizon") or {}
-        signed = [float(path.get(str(h), 0.0)) for h in checkpoints]
-        turns = sum(1 for a, b in zip(signed, signed[1:])
-                    if (b-a) * (1 if side == "LONG" else -1) < 0)
-        shape = "волна с вероятным откатом" if turns else "направленное движение"
+        direction_probability = news["confidence"]
+        data_quality = int(result.get("data_quality", 0))
+        trajectory_available = bool(result.get("trajectory_available"))
         high_news = [e for e in news.get("events", []) if e.impact == "HIGH"]
         if high_news:
-            first_news = high_news[0]
-            news_split = (f"до {first_news.local_hm} — техническая траектория; "
+            news_split = (f"до {high_news[0].local_hm} — технический сценарий; "
                           "после новости — участок повышенного риска")
         elif news.get("risk") == "MEDIUM":
-            news_split = "средние новости учтены снижением надёжности траектории"
+            news_split = "средние новости учтены снижением вероятности направления"
         else:
             news_split = "значимого новостного разрыва нет"
-        weak = bool(result.get("estimated"))
-        scenario = [f"Режим расчёта: {'КОНТЕКСТНАЯ ОЦЕНКА' if weak else 'ИСТОРИКО-КОНТЕКСТНАЯ ПРОЕКЦИЯ'}",
-                    f"Направление до следующей сессии: {side} {icon}",
-                    f"Вероятность направления у границы сессии: {endpoint}%",
-                    f"Форма ожидаемого пути: {shape}",
-                    f"Новостной слой: {news_split}",
-                    *((["Статус: 🟡 СЛАБАЯ ОЦЕНОЧНАЯ ТРАЕКТОРИЯ"] if weak else [])),
-                    f"Общая надёжность с учётом контекста/новостей: {confidence}%",
-                    f"Траектория внутри сессии: {route}",
-                    (f"Исторических аналогов: {result['sample']}" if result['sample'] else
-                     "Исторических аналогов недостаточно — направление рассчитано по текущей структуре/SMC") ]
+
+        scenario = [
+            f"Режим расчёта: {'КОНТЕКСТНАЯ ОЦЕНКА' if result.get('estimated') else 'ИСТОРИКО-КОНТЕКСТНАЯ ПРОЕКЦИЯ'}",
+            f"Направление к границе следующей сессии: {side} {icon}",
+            f"Вероятность направления: {direction_probability}%",
+            f"Достаточность данных для траектории: {data_quality}%",
+            f"Новостной слой: {news_split}",
+        ]
+        if trajectory_available:
+            values = result.get("horizons") or {}
+            route = " · ".join(f"+{h}ч: {values.get(str(h), 0)}%" for h in checkpoints)
+            path = result.get("expected_by_horizon") or {}
+            signed = [float(path.get(str(h), 0.0)) for h in checkpoints]
+            turns = sum(1 for a, b in zip(signed, signed[1:])
+                        if (b-a) * (1 if side == "LONG" else -1) < 0)
+            scenario.extend([
+                f"Форма ожидаемого пути: {'волна с вероятным откатом' if turns else 'направленное движение'}",
+                f"Траектория по историческим аналогам: {route}",
+                f"Исторических аналогов: {result['sample']}",
+            ])
+        else:
+            scenario.extend([
+                "Статус траектории: 🟡 НЕДОСТАТОЧНО ДАННЫХ ДЛЯ ТОЧЕК +N Ч",
+                "Внутрисессионный путь не интерполируется: показано только контекстное направление.",
+                "Исторических аналогов недостаточно для формы пути.",
+            ])
         chart_result = dict(result)
-        # The chart must show the same post-news confidence as the Telegram text.
-        chart_result["confidence"] = confidence
-        chart_result["weak"] = weak
+        chart_result["confidence"] = direction_probability
+        chart_result["weak"] = not trajectory_available
         chart_result["news_risk"] = news.get("risk", "NONE")
         chart_result["news_markers"] = [
             {"time": e.local_hm, "impact": e.impact, "currency": e.currency,
-             "title": newsmod.translate_title(e.title)}
-            for e in news.get("events", [])
+             "title": newsmod.translate_title(e.title)} for e in news.get("events", [])
         ]
         try:
-            image = echo_projection.render_chart(chart_result, by_tf)
+            image = (echo_projection.render_chart(chart_result, by_tf) if trajectory_available
+                     else _minimal_echo_ray(symbol, by_tf, side))
         except Exception:
             log.exception("ECHO_CHART_FAILED symbol=%s; using minimal ray", symbol)
             image = _minimal_echo_ray(symbol, by_tf, side)
     else:
         scenario = ["Направление: НЕЙТРАЛЬНО 🟡",
                     "Вероятность: недостаточно надёжных исторических совпадений"]
-        image = _neutral_image(symbol, "ЭХО", by_tf, "Недостаточно надёжных исторических аналогов")
+        image = _neutral_image(symbol, "ЭХО", by_tf, "Недостаточно данных для надёжного сценария")
     text = "\n".join([
         "━━━━━━━━━━━━━━━━━━", "🔭 ЭХО — ПРОГНОЗ ДО СЛЕДУЮЩЕЙ СЕССИИ", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {symbol}", f"Период: {current_name} → {next_name} · около {hours} ч",
         *scenario, "", news["headline"], *news["lines"], news["status"], "",
-        "⚠️ Это вероятностный технический сценарий, а не гарантия движения.", "━━━━━━━━━━━━━━━━━━",
+        "⚠️ Это вероятностный технический сценарий, а не торговый сигнал.", "━━━━━━━━━━━━━━━━━━",
     ])
-    return {"text": text, "image": image}
-
+    return {"text": text, "image": image, "result": result}
 
 def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
                   current_name: str, next_name: str, strength: dict | None = None) -> dict:
     result = next_pivot_projection.analyze_session_symbol(symbol, by_tf, hours, strength=strength or {})
     news = _news_context(symbol, events, result["probability"] if result else None, hours, confidence_floor=30)
     if result:
-        side, icon = result["side"], ("🟢" if result["side"] == "LONG" else "🔴")
-        reaction = "SHORT 🔴" if side == "LONG" else "LONG 🟢"
+        side = result["side"]
+        probability = int(news["confidence"] or result["probability"])
+        weak = probability < 50
+        icon = "🟡" if weak else ("🟢" if side == "LONG" else "🔴")
+        reaction = "SHORT" if side == "LONG" else "LONG"
+        reaction_icon = "🔴" if reaction == "SHORT" else "🟢"
         kind = "ВЕРШИНЫ" if result["kind"] == "high" else "ОСНОВАНИЯ"
         decimals = 3 if "JPY" in symbol else 5
         mode = ("ОЦЕНОЧНАЯ СЕССИОННАЯ ПРОЕКЦИЯ" if result.get("estimated")
@@ -238,18 +245,35 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
             window_line = f"Окно Pivot в этой сессии: через {result['bars_low']}–{hi} закрытых H1"
         confirms = ", ".join(result.get("smc_confirmations") or []) or "нет свежего подтверждения"
         cautions = ", ".join(result.get("smc_cautions") or []) or "нет"
+
+        # Echo + Pivot — последовательный сценарий, а не два конкурирующих сигнала.
+        echo = echo_projection.analyze(symbol, by_tf, sorted(set((max(1, hours//2), hours))), strength=strength or {})
+        if echo:
+            echo_side = echo.get("side")
+            if echo_side == side:
+                link = f"Echo {echo_side} → первичное движение к Pivot {side} → после зоны возможна реакция {reaction}"
+            else:
+                link = (f"Echo {echo_side} задаёт общий сессионный фон; Pivot ожидает первичное движение {side} "
+                        f"к зоне, затем возможна реакция {reaction}. Это разные этапы сценария.")
+        else:
+            link = f"Первичное движение {side} к Pivot → после зоны возможна реакция {reaction}"
+
         scenario = [
             f"Режим расчёта: {mode}",
-            f"Направление до следующей сессии: {side} {icon}",
+            f"Первичное движение к Pivot: {side} {icon}",
+            *((["Статус: 🟡 СЛАБАЯ PIVOT-ГИПОТЕЗА · не отображается как полноценный LONG/SHORT-сигнал"] if weak else [])),
             f"Ожидаемая зона {kind}: {result['zone_low']:.{decimals}f}–{result['zone_high']:.{decimals}f}",
             window_line,
             f"Сверка с ZigZag D1/H4/H1: {result.get('zigzag_check', 'нет данных')}{conflict}",
             f"SMC-подтверждения: {confirms}",
             f"SMC-предупреждения: {cautions}",
-            f"Вероятность с учётом структуры, SMC и новостного риска: {news['confidence']}%",
-            f"Возможная реакция после зоны: {reaction} · только после подтверждения M15/H1",
+            f"Вероятность первичного движения к Pivot: {probability}%",
+            f"Ожидаемая реакция после зоны: {reaction} {reaction_icon} · вероятность {result.get('reaction_score', 0)}% · только после M15/H1",
+            f"Связка Echo → Pivot: {link}",
         ]
         chart_result = dict(result)
+        chart_result["display_probability"] = probability
+        chart_result["weak_projection"] = weak
         chart_result["news_risk"] = news.get("risk", "NONE")
         chart_result["news_markers"] = [
             {"time": e.local_hm, "impact": e.impact, "currency": e.currency,
@@ -263,10 +287,9 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
         "━━━━━━━━━━━━━━━━━━", "🔭 СЛЕДУЮЩИЙ PIVOT — СЕССИОННАЯ ПРОЕКЦИЯ", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {symbol}", f"Период: {current_name} → {next_name} · около {hours} ч",
         *scenario, "", news["headline"], *news["lines"], news["status"], "",
-        "⚠️ Даже слабая сессионная оценка показывает наиболее вероятный путь, но не является торговой гарантией. Pivot — зона реакции, а не точная точка разворота.", "━━━━━━━━━━━━━━━━━━",
+        "⚠️ Pivot — зона вероятной реакции. Первичное движение к зоне и реакция после неё — разные этапы сценария.", "━━━━━━━━━━━━━━━━━━",
     ])
-    return {"text": text, "image": image}
-
+    return {"text": text, "image": image, "result": result}
 
 def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) -> list[dict]:
     """Вернуть ещё не доставленные карточки текущей сессии в стабильном порядке."""

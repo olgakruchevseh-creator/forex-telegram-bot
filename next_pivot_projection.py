@@ -470,7 +470,9 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.rectangle((zone_x1, y_at(result["zone_high"]), zone_x2, y_at(result["zone_low"])),
                    fill="#4aa3ff35", outline="#62b0ff", width=3)
     target_x = (zone_x1+zone_x2)/2
-    main_color = "#42e889" if direction > 0 else "#ff6575"
+    display_probability = int(result.get("display_probability", result.get("probability", 0)))
+    weak_projection = bool(result.get("weak_projection", display_probability < 50))
+    main_color = "#ffd44d" if weak_projection else ("#42e889" if direction > 0 else "#ff6575")
     # Основной путь к зоне. Вместо безымянных технических маркеров
     # пользователь видит смысл каждой линии/точки.
     draw.line((start_x, y_at(current), target_x, y_at(zone_mid)), fill=main_color, width=5)
@@ -491,7 +493,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.rounded_rectangle((legend_x-14, legend_y-12, right-8, legend_y+92), radius=10,
                            fill="#171c29dd", outline="#353d50", width=2)
     draw.text((legend_x, legend_y),
-              f"Основной путь → {zone_mid:.{decimals}f} · {result.get('main_score', result['probability'])}%",
+              f"Первичное движение к Pivot → {zone_mid:.{decimals}f} · {display_probability}%",
               fill=main_color, font=small)
     draw.text((legend_x, legend_y+31),
               f"Через откат → {pullback_price:.{decimals}f} · {result.get('flat_score', 0)}%",
@@ -500,7 +502,8 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
               f"После Pivot: {reaction} → {reaction_price:.{decimals}f} · {result.get('reaction_score', 0)}%",
               fill="#d889ff", font=small)
     mode = "ОЦЕНОЧНЫЙ" if result.get("estimated") else "СТАТИСТИЧЕСКИЙ"
-    draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']} · {mode}", fill="#f1f5fb", font=font)
+    weak_label = " · СЛАБАЯ ГИПОТЕЗА" if weak_projection else ""
+    draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · {result['structure']} · {mode}{weak_label}", fill="#f1f5fb", font=font)
     # Визуальный слой MTF: свечной холст H1, зона уточняется старшими/рабочими TF.
     # Расчёт Pivot и его вероятность здесь не меняются.
     draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
@@ -510,7 +513,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.text((max(left, start_x-88), bottom-28), "СТАРТ ПРОЕКЦИИ", fill="#c9d1df", font=small)
     zone_label = "ОЖИДАЕМАЯ ВЕРШИНА" if direction > 0 else "ОЖИДАЕМОЕ ОСНОВАНИЕ"
     draw.text((max(left, zone_x1), max(top+58, y_at(result["zone_high"])-27)),
-              f"{zone_label} · {result['probability']}%", fill="#8cc8ff", font=small)
+              f"{zone_label} · {display_probability}%", fill=("#ffd44d" if weak_projection else "#8cc8ff"), font=small)
     # Новостной слой входит прямо в картинку: маркер предупреждает, что
     # траектория после публикации может измениться и должна пересчитываться.
     markers = result.get("news_markers") or []

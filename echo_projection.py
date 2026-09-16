@@ -250,17 +250,20 @@ def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], stren
     margin = abs(long_score-short_score)
     confidence = max(51, min(72, 52 + int(round(margin * .45))))
     av = _atr_at(bars, len(bars)-1)
-    # Conservative path: low-confidence context projection, capped below 1 ATR/session.
-    end_move = side_sign * min(.90, .25 + margin/60.0)
+    # Контекстный fallback НЕ рисует искусственную линейную траекторию по +N часам.
+    # Без достаточного числа исторических аналогов мы знаем только наиболее вероятное
+    # направление на границе сессии. Внутрисессионные точки остаются неизвестными.
     max_h = max(horizons)
-    expected = {str(h): round(end_move * (h/max_h), 4) for h in horizons}
-    probs = {str(h): max(51, min(confidence, 51 + int(round((confidence-51)*(h/max_h))))) for h in horizons}
+    data_quality = max(25, min(55, 28 + int(round(min(27, margin * .35)))))
     return {
-        "symbol": symbol, "side": side, "confidence": confidence, "raw_confidence": confidence,
+        "symbol": symbol, "side": side,
+        "confidence": confidence, "direction_probability": confidence,
+        "raw_confidence": confidence, "data_quality": data_quality,
         "context": ctx, "smc_context": smc, "sample": 0, "estimated": True,
-        "horizons": probs, "expected_atr": round(abs(end_move), 2),
+        "trajectory_available": False, "trajectory_source": "context_only",
+        "horizons": {}, "expected_atr": None,
         "session_hours": int(max_h), "session_end_probability": confidence,
-        "expected_by_horizon": expected, "atr": av, "current": bars[-1].close,
+        "expected_by_horizon": {}, "atr": av, "current": bars[-1].close,
         "closed_h1": bars[-1].dt,
     }
 
@@ -350,7 +353,10 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
         "symbol": symbol,
         "side": side,
         "confidence": adjusted,
+        "direction_probability": adjusted,
         "raw_confidence": int(round(confidence*100)),
+        "data_quality": max(55, min(95, int(round(55 + min(40, len(matches) / max(1, minimum) * 25))))),
+        "trajectory_available": True, "trajectory_source": "historical_analogs",
         "context": context,
         "sample": len(matches),
         "horizons": {
