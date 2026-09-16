@@ -17,6 +17,7 @@ import movement_progress
 import market_state
 import zigzag_scanner
 import next_pivot_projection
+from chart_snapshot import freeze_by_tf
 from analysis import analyze_tf
 
 log = logging.getLogger(__name__)
@@ -436,7 +437,9 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
     symbol, side = _pair(source_text), _side(source_text)
     if not symbol or not side:
         return None
-    by_tf = market.get(symbol) or {}
+    # One immutable event-time snapshot feeds route, TF counters, ZigZag and
+    # Market State.  Do not mix candles fetched/closed at different moments.
+    by_tf = freeze_by_tf(market.get(symbol) or {})
     active = (_load().get("active") or {}).get(symbol) or {}
     same_active = bool(active.get("status") == "ACTIVE" and active.get("side") == side)
     route = None
@@ -478,9 +481,13 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         # generic trend analyser with ZigZag directions produced impossible
         # displays such as D1/H4/H1=3/3 SHORT while H4 ZigZag was LONG.
         if _source_name(source_text) == "ZigZag":
+            # The ZigZag card prints `directions` (ensemble decision).  Counters
+            # must use those exact same states; raw base-swing directions can
+            # disagree and previously produced e.g. visible H1/M15/M5 LONG but 2/3.
+            displayed_dirs = zz.get("directions") or {}
             for tf in ("D1", "H4", "H1", "M15", "M5"):
-                if tf in zz_dirs:
-                    views[tf] = int(zz_dirs.get(tf) or 0)
+                if tf in displayed_dirs:
+                    views[tf] = int(displayed_dirs.get(tf) or 0)
     except Exception:
         zz_text = "RANGE"
     master = {

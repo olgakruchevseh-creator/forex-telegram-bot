@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1737,24 +1738,31 @@ def db_path() -> Path:
     return state_dir() / "briefing.db"
 
 
+_DB_INIT_LOCK = threading.Lock()
+
+
 def _connect_db() -> sqlite3.Connection:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=20, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
+    # busy_timeout must be active before WAL/schema initialization.  The
+    # process-local lock prevents parallel scan threads racing on PRAGMA
+    # journal_mode; SQLite still provides the cross-process claim below.
     conn.execute("PRAGMA busy_timeout=15000")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS briefing_issues (
-            briefing_key TEXT PRIMARY KEY,
-            status TEXT NOT NULL,
-            pid TEXT,
-            created_ts REAL,
-            sent_ts REAL,
-            parts INTEGER DEFAULT 0
+    with _DB_INIT_LOCK:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS briefing_issues (
+                briefing_key TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                pid TEXT,
+                created_ts REAL,
+                sent_ts REAL,
+                parts INTEGER DEFAULT 0
+            )
+            """
         )
-        """
-    )
     return conn
 
 

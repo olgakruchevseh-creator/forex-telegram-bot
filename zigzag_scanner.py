@@ -480,15 +480,38 @@ def image_for_alert(text: str) -> io.BytesIO | None:
 
 
 def _fingerprint(snap: dict) -> str:
-    """Меняется только после подтверждённого события или нового H1-экстремума."""
+    """Stable identity of a confirmed ZigZag market event.
+
+    Mutable context (control price, candle pressure, current price, ADX and LTF
+    commentary) is intentionally excluded.  A continuation becomes a new event
+    only when the confirmed extrema/sequence on the displayed structural TF
+    actually changes, or when the event/side changes.
+    """
     sequences = snap.get("sequences") or {}
-    extrema = (snap.get("extrema") or {}).get("H1") or {}
+    key_tf = str(snap.get("tf") or "H4")
+    extrema = (snap.get("extrema") or {}).get(key_tf) or {}
     return "|".join([
         str(snap.get("event") or ""), str(snap.get("side") or 0),
-        str(snap.get("early_key") or ""),
-        str(sequences.get("H4") or ""), str(sequences.get("H1") or ""),
+        str(snap.get("main_side") or 0), str(snap.get("early_key") or ""),
+        key_tf, str(sequences.get(key_tf) or ""),
         f"{float(extrema.get('high') or 0):.8f}", f"{float(extrema.get('low') or 0):.8f}",
     ])
+
+
+def event_id_for_alert(text: str) -> str:
+    """Return the pending stable ZigZag event id for global routing/dedup."""
+    card = _PENDING_CARDS.get(text or "")
+    if card:
+        return "ZIGZAG:" + _fingerprint(card[0])
+    match = re.search(r"(?:^|\n)Пара:\s*([A-Z]{3}/[A-Z]{3})", text or "")
+    hi = re.search(r"Последний максимум:\s*([0-9.]+)", text or "")
+    lo = re.search(r"Последний минимум:\s*([0-9.]+)", text or "")
+    side = re.search(r"(?:^|\n)Направление:\s*(LONG|SHORT)", text or "")
+    event = re.search(r"ZIGZAG — ([^\n]+)", text or "")
+    if match and side and event and (hi or lo):
+        return "ZIGZAG:" + "|".join([match.group(1), event.group(1).strip(), side.group(1),
+                                      hi.group(1) if hi else "", lo.group(1) if lo else ""])
+    return ""
 
 
 def mark_delivered(text: str) -> None:

@@ -466,6 +466,13 @@ def _source_event_id(text: str) -> str:
                 return event_id
         except Exception:
             log.exception("CONSOLIDATION_EVENT_ID_FAILED")
+    if "↕️ ZIGZAG —" in (text or ""):
+        try:
+            event_id = zigzag_scanner.event_id_for_alert(text)
+            if event_id:
+                return event_id
+        except Exception:
+            log.exception("ZIGZAG_EVENT_ID_FAILED")
     return hashlib.sha256((text or "").encode()).hexdigest()[:24]
 
 
