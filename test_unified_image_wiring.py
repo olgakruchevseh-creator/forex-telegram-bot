@@ -19,5 +19,5 @@ def test_echo_pivot_catchup_preserved():
 
 def test_daily_headers_are_wired():
     bot = Path("bot.py").read_text(encoding="utf-8")
-    assert "📅 ПРОБОЙ МАКСИМУМА ДНЯ" in bot
-    assert "📅 ПРОБОЙ МИНИМУМА ДНЯ" in bot
+    assert "📅 ПРОБОЙ PDH" in bot
+    assert "📅 ПРОБОЙ PDL" in bot

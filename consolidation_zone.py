@@ -39,6 +39,7 @@ class Zone:
     breakout_side: str = ""
     breakout_dt: str = ""
     breakout_price: float = 0.0
+    reset_epoch: int = 0
 
 
 def _path() -> Path:
@@ -116,9 +117,35 @@ def _bias(tf: str, bars: list[Candle]) -> int:
     return view.bias if view else 0
 
 
+def _event_id(zone: Zone) -> str:
+    """Stable identity of one confirmed market event; exit price is deliberately excluded."""
+    raw = f"CONSOLIDATION|{zone.zone_id}|{zone.breakout_side}|{zone.breakout_dt}|{zone.reset_epoch}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _refresh_broken_state(zone: Zone, by_tf: dict) -> None:
+    """Re-arm a broken zone only after a real re-entry, never because the rolling box moved."""
+    if not zone.breakout_sent:
+        return
+    bars = _bars(by_tf, "M15")
+    if len(bars) < 2:
+        return
+    # Two closed M15 candles back inside the original box are a deliberate reset.
+    if all(zone.low <= c.close <= zone.high for c in bars[-2:]):
+        zone.breakout_sent = False
+        zone.breakout_side = ""
+        zone.breakout_dt = ""
+        zone.breakout_price = 0.0
+        zone.reset_epoch += 1
+        zone.last_dt = bars[-1].dt
+
+
 def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool:
     bars = _bars(by_tf, "M15")
-    if zone.breakout_sent or len(bars) < 20:
+    if len(bars) < 20:
+        return False
+    _refresh_broken_state(zone, by_tf)
+    if zone.breakout_sent:
         return False
     prev, cur = bars[-2], bars[-1]
     if cur.dt <= zone.created_dt or cur.dt == zone.last_dt:
@@ -170,7 +197,8 @@ def format_message(zone: Zone) -> str:
         f"Касания границ: {zone.touches_low}/{zone.touches_high}",
         f"Ширина: {zone.width_atr:.2f} ATR", f"Качество зоны: {zone.quality}/100",
         "Подтверждение: закрытая M15 + согласование минимум 2/3 H1/M15/M5 + сила валют",
-        f"Цена выхода: {_price(zone.symbol, zone.breakout_price)}", "",
+        f"Цена выхода: {_price(zone.symbol, zone.breakout_price)}",
+        f"Свеча подтверждения: {zone.breakout_dt}", "",
         f"Факт: подтверждённый выход {zone.breakout_side} из ранее зафиксированной зоны консолидации."
     ])
 
@@ -220,44 +248,78 @@ def image_for_alert(text: str) -> io.BytesIO | None:
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear(); state=_load()
-    if int(state.get("logic_version") or 0) != 1:
-        state={"logic_version":1, "zones":{}, "pending":{}, "bootstrapped":False}
+    if int(state.get("logic_version") or 0) != 2:
+        # Keep compatible stored zones, but discard legacy text-hash pending entries:
+        # a legacy retry must not resurrect the same breakout after this migration.
+        old_zones = state.get("zones") if isinstance(state, dict) else {}
+        state={"logic_version":2,"zones":old_zones or {},"pending":{},"bootstrapped":bool((state or {}).get("bootstrapped"))}
     first=not bool(state.get("bootstrapped")); pending=state.setdefault("pending",{})
-    stored={k:Zone(**v) for k,v in (state.get("zones") or {}).items()}; messages=[]
-    for digest,item in list(pending.items()):
+    stored={}
+    for k,v in (state.get("zones") or {}).items():
+        if isinstance(v,dict):
+            try: stored[k]=Zone(**v)
+            except TypeError:
+                allowed={f.name for f in __import__('dataclasses').fields(Zone)}
+                stored[k]=Zone(**{x:y for x,y in v.items() if x in allowed})
+    messages=[]
+    for event_id,item in list(pending.items()):
         raw=item.get("zone") if isinstance(item,dict) else None
-        if not isinstance(raw,dict): pending.pop(digest,None); continue
+        if not isinstance(raw,dict): pending.pop(event_id,None); continue
         z=Zone(**raw); text=format_message(z); messages.append(text)
         _PENDING_CARDS[text]=(z, freeze_by_tf(market.get(z.symbol) or {}))
     for symbol in cfg.PAIRS:
         try:
             by_tf=market.get(symbol) or {}
+            # Broken zones remain authoritative and are allowed to reset only after
+            # two closed M15 candles re-enter the original box.
+            for z in [z for z in stored.values() if z.symbol==symbol]:
+                _refresh_broken_state(z, by_tf)
             for z in [z for z in stored.values() if z.symbol==symbol and not z.breakout_sent]:
                 if detect_breakout(z, by_tf, strength) and not first:
-                    text=format_message(z); digest=hashlib.sha256(text.encode()).hexdigest()[:20]
-                    pending[digest]={"zone":asdict(z)}; messages.append(text); _PENDING_CARDS[text]=(z,freeze_by_tf(by_tf))
+                    text=format_message(z); event_id=_event_id(z)
+                    if event_id not in pending:
+                        pending[event_id]={"event_id":event_id,"zone":asdict(z)}
+                        messages.append(text); _PENDING_CARDS[text]=(z,freeze_by_tf(by_tf))
             candidates=[]
             for tf in SCAN_TFS:
                 z=detect_zone(symbol,tf,_bars(by_tf,tf))
                 if z: candidates.append(z)
             if candidates:
                 z=max(candidates,key=lambda q:(TF_RANK[q.tf],q.quality))
-                # Сдвигающиеся границы одной и той же активной зоны не создают новые события.
-                same=next((q for q in stored.values() if q.symbol==symbol and q.tf==z.tf and not q.breakout_sent and
-                           abs(q.low-z.low)<=max(z.high-z.low,1e-12)*.25 and abs(q.high-z.high)<=max(z.high-z.low,1e-12)*.25),None)
+                # Match against BOTH active and already-broken zones. A rolling-window
+                # boundary drift is still the same market box and cannot create a new event.
+                same=next((q for q in stored.values() if q.symbol==symbol and q.tf==z.tf and
+                           abs(q.low-z.low)<=max(q.high-q.low,z.high-z.low,1e-12)*.30 and
+                           abs(q.high-z.high)<=max(q.high-q.low,z.high-z.low,1e-12)*.30),None)
                 if same:
-                    same.low=z.low; same.high=z.high; same.quality=max(same.quality,z.quality)
-                    same.touches_low=z.touches_low; same.touches_high=z.touches_high; same.width_atr=z.width_atr; same.efficiency=z.efficiency
+                    if not same.breakout_sent:
+                        same.low=z.low; same.high=z.high; same.quality=max(same.quality,z.quality)
+                        same.touches_low=z.touches_low; same.touches_high=z.touches_high
+                        same.width_atr=z.width_atr; same.efficiency=z.efficiency
+                    same.last_dt=max(same.last_dt, z.last_dt)
                 else:
                     stored[z.zone_id]=z
         except Exception:
             log.exception("Consolidation Zone %s",symbol)
     state["bootstrapped"]=True
     zones=sorted(stored.values(),key=lambda z:z.created_dt)[-250:]
-    state["zones"]={z.zone_id:asdict(z) for z in zones}; _save(state); return messages
+    state["zones"]={z.zone_id:asdict(z) for z in zones}; _save(state); return list(dict.fromkeys(messages))
+
+
+def event_id_for_alert(text: str) -> str:
+    state=_load()
+    for event_id,item in (state.get("pending") or {}).items():
+        raw=item.get("zone") if isinstance(item,dict) else None
+        if isinstance(raw,dict):
+            try:
+                if format_message(Zone(**raw)) == text:
+                    return str(item.get("event_id") or event_id)
+            except Exception:
+                continue
+    return ""
 
 
 def mark_delivered(text: str) -> bool:
-    state=_load(); digest=hashlib.sha256((text or "").encode()).hexdigest()[:20]
-    if digest not in (state.get("pending") or {}): return False
-    state["pending"].pop(digest,None); _save(state); _PENDING_CARDS.pop(text,None); return True
+    state=_load(); event_id=event_id_for_alert(text)
+    if not event_id or event_id not in (state.get("pending") or {}): return False
+    state["pending"].pop(event_id,None); _save(state); _PENDING_CARDS.pop(text,None); return True

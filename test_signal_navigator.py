@@ -56,7 +56,7 @@ class SignalNavigatorTests(unittest.TestCase):
         text = signal_navigator.format_confirmed(
             accepted, signal_navigator._scale_route(route()), [source()])
         self.assertIn("ЕСТЬ ВСТРЕЧНЫЕ ФАКТОРЫ", text)
-        self.assertIn("Сила относительно LONG: -0.15", text)
+        self.assertIn("Разница силы EUR−USD: -0.15 · 🔴 против направления LONG", text)
         self.assertIn("против направления", text)
         self.assertIn("H1: коррекция против маршрута LONG", text)
         self.assertNotIn("направление LONG подтверждено по закрытой H1", text)

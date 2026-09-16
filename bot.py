@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -456,6 +457,33 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
         await send(app, chat_id, part)
 
 
+def _source_event_id(text: str) -> str:
+    """Stable routing identity. Module-specific IDs win over mutable message text."""
+    if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in (text or ""):
+        try:
+            event_id = consolidation_zone.event_id_for_alert(text)
+            if event_id:
+                return event_id
+        except Exception:
+            log.exception("CONSOLIDATION_EVENT_ID_FAILED")
+    return hashlib.sha256((text or "").encode()).hexdigest()[:24]
+
+
+def _event_already_delivered(state: dict, event_id: str) -> bool:
+    return bool(event_id and event_id in (state.get("delivered_event_ids") or {}))
+
+
+def _mark_event_delivered(state: dict, event_id: str) -> None:
+    if not event_id:
+        return
+    registry = state.setdefault("delivered_event_ids", {})
+    registry[event_id] = time.time()
+    # Bounded durable registry: enough history to survive restarts without state growth.
+    if len(registry) > 1200:
+        keep = sorted(registry.items(), key=lambda kv: kv[1])[-900:]
+        state["delivered_event_ids"] = dict(keep)
+
+
 def _enqueue_source(state: dict, text: str) -> None:
     """Durable source-card outbox: persist before Telegram I/O, remove only after success."""
     if not text:
@@ -487,13 +515,17 @@ async def _flush_source_outbox(app: Application, chat_id: int, state: dict) -> N
             save_state(state); break
 
 
-def _enqueue_navigator(state: dict, text: str) -> None:
-    """Сохраняет обязательное сопровождение до подтверждённой доставки."""
+def _enqueue_navigator(state: dict, text: str, event_id: str = "") -> None:
+    """One Navigator launch per source market event, with durable retry semantics."""
     if not text:
         return
+    nav_key = f"NAV:{event_id}" if event_id else hashlib.sha256(text.encode()).hexdigest()[:24]
+    if nav_key in (state.get("navigator_event_ids") or {}):
+        return
     outbox = state.setdefault("navigator_outbox", [])
-    if not any(item.get("text") == text for item in outbox if isinstance(item, dict)):
-        outbox.append({"text": text, "saved_at": time.time()})
+    if not any((item.get("event_id") == nav_key or item.get("text") == text)
+               for item in outbox if isinstance(item, dict)):
+        outbox.append({"text": text, "event_id": nav_key, "saved_at": time.time()})
     state["navigator_outbox"] = outbox[-30:]
 
 
@@ -509,6 +541,12 @@ async def _flush_navigator_outbox(app: Application, chat_id: int, state: dict) -
         try:
             await _send_parts(app, chat_id, text)
             signal_navigator.mark_delivered(text)
+            nav_event_id = item.get("event_id", "") if isinstance(item, dict) else ""
+            if nav_event_id:
+                registry = state.setdefault("navigator_event_ids", {})
+                registry[nav_event_id] = time.time()
+                if len(registry) > 1200:
+                    state["navigator_event_ids"] = dict(sorted(registry.items(), key=lambda kv: kv[1])[-900:])
             outbox.pop(0)
             save_state(state)
         except Exception:
@@ -1044,6 +1082,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.exception("CPI guard calendar")
             cpi_events = []
         for source_text in delivery_alerts:
+            source_event_id = _source_event_id(source_text)
+            if _event_already_delivered(state, source_event_id):
+                log.warning("DUPLICATE_EVENT_BLOCKED event_id=%s pair=%s side=%s",
+                            source_event_id, _alert_pair(source_text), _direct_signal_side(source_text))
+                # Clear a module pending retry that survived after the global event was delivered.
+                if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in source_text:
+                    try: consolidation_zone.mark_delivered(source_text)
+                    except Exception: log.exception("Consolidation duplicate ack")
+                continue
             _enqueue_source(state, source_text)
             save_state(state)
             text = source_text
@@ -1179,6 +1226,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     patterns.mark_card_delivered(text)
             else:
                 await _send_parts(context.application, int(chat_id), text)
+            _mark_event_delivered(state, source_event_id)
             _ack_source(state, source_text)
             save_state(state)
             delivered_sources = [source_text]
@@ -1261,7 +1309,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # Регистрируем маршрут ДО Telegram: lifecycle не зависит от сетевой
                 # отправки карточки и сможет сообщить TR1/TR2/TR3/отмену позже.
                 signal_navigator.register_card(nav_text, nav_sources, closed_dt)
-                _enqueue_navigator(state, nav_text)
+                _enqueue_navigator(state, nav_text, source_event_id)
                 save_state(state)
                 await _flush_navigator_outbox(context.application, int(chat_id), state)
                 if pair and direct_side:
