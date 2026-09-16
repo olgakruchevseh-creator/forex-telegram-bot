@@ -14,7 +14,7 @@ import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.daily_high_low")
-TF_MINUTES = {"D1": 1440, "H1": 60, "M15": 15, "M5": 5}
+TF_MINUTES = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 
 @dataclass(frozen=True)
 class PDContext:
@@ -155,6 +155,24 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
     if not og.get("allow", True): return None
     quality = og.get("quality", quality)
     confidence = min(91, quality - 4)
+    # TR1 for the PDH/PDL card: nearest meaningful senior extremum in the
+    # breakout direction; if none is available, use a conservative 0.75 H1 ATR
+    # extension. This is display context only and does not create another alert.
+    # Latest closed M5 is the freshest safe display price; H1 close remains
+    # the immutable confirmation price of the PDH/PDL event.
+    m5_bars = _bars(by_tf, "M5")
+    current_price = float(m5_bars[-1].close) if m5_bars else float(current.close)
+    target_candidates = []
+    for tf in ("H4", "D1"):
+        tf_bars = _bars(by_tf, tf)
+        for c in tf_bars[-40:]:
+            px = float(c.high if side == "LONG" else c.low)
+            if (side == "LONG" and px > current_price + av * .35) or (side == "SHORT" and px < current_price - av * .35):
+                target_candidates.append(px)
+    if target_candidates:
+        tr1 = min(target_candidates, key=lambda px: abs(px-current_price))
+    else:
+        tr1 = current_price + (av * .75 if side == "LONG" else -av * .75)
     return {
         "event_id": f"{symbol}|{reference.dt}|{level_kind}|{name}",
         "symbol": symbol,
@@ -169,6 +187,9 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
         "confirmations": confirmations,
         "quality": quality,
         "confidence": confidence,
+        "current_price": current_price,
+        "confirm_close": float(current.close),
+        "tr1": float(tr1),
     }
 
 
@@ -188,6 +209,9 @@ def format_message(event: dict) -> str:
         f"PDH · максимум предыдущего закрытого дня: {_price(event['symbol'], event['day_high'])}",
         f"PDL · минимум предыдущего закрытого дня: {_price(event['symbol'], event['day_low'])}",
         f"Ключевой уровень: {_price(event['symbol'], event['level'])}",
+        f"Цена подтверждения: {_price(event['symbol'], event['confirm_close'])}",
+        f"Текущая цена: {_price(event['symbol'], event['current_price'])}",
+        f"TR1: {_price(event['symbol'], event['tr1'])}",
         f"Подтверждение: H1 и младшие ТФ — {event['confirmations']}/3",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
         f"Факт: {action} Реакция подтверждена закрытой H1-свечой.",
@@ -196,11 +220,11 @@ def format_message(event: dict) -> str:
 
 
 def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
-    """H1-график на реальных закрытых свечах с Daily High/Low и подтверждённой реакцией."""
+    """Readable H1 chart: candles stay unobstructed and the full price scale remains visible."""
     from PIL import Image, ImageDraw, ImageFont
 
     bars = _bars(by_tf, "H1")[-max(36, int(getattr(cfg, "DAILY_LEVEL_CHART_LOOKBACK", 60))):]
-    width, height = 1200, 720
+    width, height = 1280, 720
     image = Image.new("RGB", (width, height), "#10131d")
     draw = ImageDraw.Draw(image, "RGBA")
     try:
@@ -208,21 +232,27 @@ def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
         small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
     except OSError:
         font, small = ImageFont.load_default(), ImageFont.load_default()
-    left, right, top, bottom = 72, 1135, 88, 610
-    values = [v for c in bars for v in (c.low, c.high)] + [event["day_high"], event["day_low"]]
+
+    # Reserve a dedicated right gutter for complete price labels.
+    left, plot_right, scale_x, top, bottom = 72, 1030, 1050, 88, 610
+    values = [v for c in bars for v in (c.low, c.high)] + [event["day_high"], event["day_low"], event["tr1"]]
     pmin, pmax = min(values), max(values)
-    pad = max((pmax-pmin)*.08, abs(event["level"])*.0001)
+    pad = max((pmax-pmin)*.10, abs(event["level"])*.0001)
     pmin, pmax = pmin-pad, pmax+pad
 
     def x_at(i: float) -> float:
-        return left + i/max(1, len(bars)-1)*(right-left)
+        return left + i/max(1, len(bars)-1)*(plot_right-left)
     def y_at(price: float) -> float:
         return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
 
     for n in range(6):
-        y = top+n*(bottom-top)/5
-        draw.line((left, y, right, y), fill="#293040", width=1)
-    candle_w = max(3, int((right-left)/max(1, len(bars))*.55))
+        price = pmax - n*(pmax-pmin)/5
+        y = y_at(price)
+        draw.line((left, y, plot_right, y), fill="#293040", width=1)
+        draw.text((scale_x, y-10), _price(event["symbol"], price), fill="#c8d0dc", font=small)
+    draw.line((1040, top, 1040, bottom), fill="#596273", width=1)
+
+    candle_w = max(3, int((plot_right-left)/max(1, len(bars))*.55))
     for i, c in enumerate(bars):
         x = x_at(i)
         color = "#37d67a" if c.close >= c.open else "#ff5c6c"
@@ -230,22 +260,28 @@ def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
         y1, y2 = y_at(c.open), y_at(c.close)
         draw.rectangle((x-candle_w/2, min(y1,y2), x+candle_w/2, max(y1,y2)+1), fill=color)
 
+    # Keep labels at the left edge; never place boxes over the latest candles.
     for label, price, color in (("PDH", event["day_high"], "#f4c542"), ("PDL", event["day_low"], "#4aa3ff")):
         y = y_at(price)
-        draw.line((left, y, right, y), fill=color, width=3)
-        draw.text((left+8, y-27), f"{label}  {_price(event['symbol'], price)}", fill=color, font=small)
+        draw.line((left, y, plot_right, y), fill=color, width=3)
+        draw.text((left+8, max(top, y-24)), f"{label}  {_price(event['symbol'], price)}", fill=color, font=small)
+
+    tr1_y = y_at(event["tr1"])
+    draw.line((left, tr1_y, plot_right, tr1_y), fill="#b995ff", width=2)
+    draw.text((left+8, max(top, tr1_y-24)), f"TR1  {_price(event['symbol'], event['tr1'])}", fill="#d7c5ff", font=small)
 
     idx = next((i for i,c in enumerate(bars) if c.dt == event.get("h1_dt")), len(bars)-1)
-    x = x_at(max(0, idx)); y = y_at(event["level"])
+    x = x_at(max(0, idx))
+    close_y = y_at(event["confirm_close"])
     side_color = "#42e889" if event["side"] == "LONG" else "#ff6575"
-    draw.ellipse((x-10, y-10, x+10, y+10), fill=side_color, outline="#ffffff", width=2)
-    direction = -1 if event["side"] == "LONG" else 1
-    end_y = max(top+35, min(bottom-35, y + direction*110))
-    draw.line((x, y, min(right-20, x+80), end_y), fill=side_color, width=5)
-    kind = "ПРОБОЙ" if "ПРОБОЙ" in event["name"] else "ОТБОЙ"
-    draw.text((max(left, x-55), max(top, min(bottom-28, y+20))), kind, fill=side_color, font=small)
+    # Compact marker beside the confirming candle, without a text box over price action.
+    draw.ellipse((x-7, close_y-7, x+7, close_y+7), fill=side_color, outline="#ffffff", width=2)
+    arrow_end = close_y - 58 if event["side"] == "LONG" else close_y + 58
+    arrow_end = max(top+12, min(bottom-12, arrow_end))
+    draw.line((x, close_y, x, arrow_end), fill=side_color, width=4)
     draw.text((left, 26), f"{event['symbol']} · {event['name']} · {event['side']}", fill="#f1f5fb", font=font)
-    draw.text((left, 657), "Реальные закрытые H1-свечи · PDH/PDL последнего закрытого D1 · подтверждение по H1", fill="#aeb7c6", font=small)
+    draw.text((left, 640), f"Подтверждение H1: {_price(event['symbol'], event['confirm_close'])} · Текущая: {_price(event['symbol'], event['current_price'])} · TR1: {_price(event['symbol'], event['tr1'])}", fill="#d9e0ea", font=small)
+    draw.text((left, 670), "PDH/PDL последнего закрытого D1 · только закрытые свечи", fill="#aeb7c6", font=small)
     output = io.BytesIO()
     output.name = f"daily_high_low_{event['symbol'].replace('/', '')}_{event['side']}.png"
     image.save(output, format="PNG", optimize=True)

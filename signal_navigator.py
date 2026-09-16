@@ -622,8 +622,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         no_tf_confirmation = (int(master.get("senior_n") or 0) == 0
                               and int(master.get("junior_n") or 0) == 0)
         conflicts = htf_opposite or h1_bias == -direction or directed_gap <= -.03 or zz_opposite
-        fully_confirmed = (not htf_opposite and int(master.get("senior_n") or 0) >= 2
-                           and int(master.get("junior_n") or 0) >= 2
+        fully_confirmed = (not htf_opposite and int(master.get("senior_n") or 0) == 3
+                           and int(master.get("junior_n") or 0) == 3
                            and h1_bias == direction and directed_gap >= .03
                            and not zz_opposite)
         if fully_confirmed:

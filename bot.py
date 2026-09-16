@@ -1137,7 +1137,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_image = chain_entries.image_for_alert(source_text)
                 except Exception:
                     log.exception("Подготовка изображения Chain Entry")
-            if "📅 ПРОБОЙ МАКСИМУМА ДНЯ" in text or "📅 ПРОБОЙ МИНИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МАКСИМУМА ДНЯ" in text or "📅 ОТБОЙ ОТ МИНИМУМА ДНЯ" in text:
+            if ("📅 ПРОБОЙ PDH" in text or "📅 ПРОБОЙ PDL" in text or
+                    "📅 СНЯТИЕ PDH И ВОЗВРАТ" in text or "📅 СНЯТИЕ PDL И ВОЗВРАТ" in text):
                 try:
                     source_image = daily_high_low.image_for_alert(source_text)
                 except Exception:
