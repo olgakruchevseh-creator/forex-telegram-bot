@@ -558,8 +558,16 @@ IDM_NEAR_ATR = 1.20
 IDM_ALIGN_BONUS = 3
 IDM_CONFLICT_PENALTY = 2
 
-# MSS is a stricter tag inside CHOCH, not a standalone notifier.
+# MSS — отдельный строгий внутренний Market Structure Shift; без standalone-спама.
+MSS_ENABLED = True
+MSS_TIMEFRAMES = ("H1", "M15", "M5")
+MSS_LOOKBACK = 80
+MSS_SWING_BARS = 5
 MSS_DISPLACEMENT_ATR = 0.85
+MSS_CLOSE_BUFFER_ATR = 0.08
+MSS_MIN_BODY_RATIO = 0.55
+MSS_ALIGN_BONUS = 6
+MSS_CONFLICT_PENALTY = 7
 
 # Market Regime Controller — weights context, never direction by itself.
 REGIME_HIGH_VOL_RATIO = 1.45

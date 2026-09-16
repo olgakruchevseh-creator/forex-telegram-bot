@@ -13,6 +13,7 @@ import ltf_confirmation
 import bpr
 import propulsion_block
 import choch
+import mss
 import erl
 import premium_discount
 import inducement
@@ -163,6 +164,7 @@ def analyze_symbol(
     bpr_ctx = bpr.analyze_symbol(symbol, by_tf, side)
     propulsion_ctx = propulsion_block.analyze_symbol(symbol, by_tf, side)
     choch_ctx = choch.analyze_symbol(symbol, by_tf, side)
+    mss_ctx = mss.analyze_symbol(symbol, by_tf, side)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
     inducement_ctx = inducement.analyze_symbol(symbol, by_tf, side)
@@ -216,7 +218,10 @@ def analyze_symbol(
         quality += int(getattr(cfg, "BPR_ALIGN_BONUS", 4))
     if propulsion_ctx and propulsion_ctx.alignment > 0:
         quality += int(getattr(cfg, "PROPULSION_ALIGN_BONUS", 4))
-    if choch_ctx and choch_ctx.alignment > 0:
+    # MSS is the stricter member of the same structure-shift family: never double-count it with CHOCH.
+    if mss_ctx and mss_ctx.alignment > 0:
+        quality += int(getattr(cfg, "MSS_ALIGN_BONUS", 6))
+    elif choch_ctx and choch_ctx.alignment > 0:
         quality += int(getattr(cfg, "CHOCH_ALIGN_BONUS", 5))
     if erl_ctx and erl_ctx.alignment > 0: quality += int(getattr(cfg, "ERL_ALIGN_BONUS", 3))
     if premium_discount_ctx and premium_discount_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
@@ -251,7 +256,9 @@ def analyze_symbol(
         quality -= int(getattr(cfg, "BPR_CONFLICT_PENALTY", 4))
     if propulsion_ctx and propulsion_ctx.alignment < 0:
         quality -= int(getattr(cfg, "PROPULSION_CONFLICT_PENALTY", 4))
-    if choch_ctx and choch_ctx.alignment < 0:
+    if mss_ctx and mss_ctx.alignment < 0:
+        quality -= int(getattr(cfg, "MSS_CONFLICT_PENALTY", 7))
+    elif choch_ctx and choch_ctx.alignment < 0:
         quality -= int(getattr(cfg, "CHOCH_CONFLICT_PENALTY", 6))
     if erl_ctx and erl_ctx.alignment < 0: quality -= int(getattr(cfg, "ERL_CONFLICT_PENALTY", 3))
     if premium_discount_ctx and premium_discount_ctx.alignment < 0: quality -= int(getattr(cfg, "PD_CONFLICT_PENALTY", 2))
@@ -295,6 +302,8 @@ def analyze_symbol(
         "propulsion_block_alignment": propulsion_ctx.alignment if propulsion_ctx else 0,
         "choch": choch.describe(choch_ctx),
         "choch_alignment": choch_ctx.alignment if choch_ctx else 0,
+        "mss": mss.describe(mss_ctx),
+        "mss_alignment": mss_ctx.alignment if mss_ctx else 0,
         "erl": erl.describe(erl_ctx), "erl_alignment": erl_ctx.alignment if erl_ctx else 0,
         "premium_discount": premium_discount.describe(premium_discount_ctx), "pd_alignment": premium_discount_ctx.alignment if premium_discount_ctx else 0,
         "inducement": inducement.describe(inducement_ctx), "inducement_alignment": inducement_ctx.alignment if inducement_ctx else 0,

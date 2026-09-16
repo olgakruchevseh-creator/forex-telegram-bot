@@ -78,13 +78,11 @@ def _confirmed_choch(by_tf: dict, tf: str, candidate_side: int) -> ChochContext 
     direction = "bullish" if choch_side > 0 else "bearish"
     relation = "подтверждает кандидата" if alignment > 0 else "противоречит кандидату"
     follow = bars[-1]
-    # MSS here means the CHOCH close itself also establishes a decisive structural shift;
-    # it is a stricter tag inside CHOCH, not a separate signal.
-    mss = disp >= float(getattr(cfg, "MSS_DISPLACEMENT_ATR", 0.85))
-    if mss: score += 2
+    # Compatibility flag only. Independent MSS confirmation lives in mss.py.
+    mss = False
     return ChochContext(
         alignment, score, tf, level, disp, mss,
-        f"{direction} CHOCH подтверждён закрытием и displacement" + (" + MSS" if mss else "") + f"; {relation}"
+        f"{direction} CHOCH подтверждён закрытием и displacement" + f"; {relation}"
     )
 
 

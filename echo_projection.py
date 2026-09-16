@@ -200,7 +200,7 @@ def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
     # not consume anti-spam state or create Telegram alerts. One family vote.
     structure_votes = []
     structure_conflicts = []
-    for module_name in ("ltf_confirmation", "choch", "propulsion_block", "inducement"):
+    for module_name in ("ltf_confirmation", "mss", "choch", "propulsion_block", "inducement"):
         try:
             mod = __import__(module_name)
             ctx = mod.analyze_symbol(symbol, by_tf, side)
