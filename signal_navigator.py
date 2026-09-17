@@ -946,6 +946,25 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int,
         title = "🏆 МАРШРУТ ПОЛНОСТЬЮ ОТРАБОТАН"
         fact = (f"Достигнута последняя доступная структурная цель {reached_names[-1]}. "
                 "Это завершение прежнего пути, а не автоматический сигнал разворота.")
+    elif action == "PULLBACK_HOLD":
+        title = f"↩️ ОТКАТ ВНУТРИ {side} — СДЕЛКУ НЕ СНИМАЕМ"
+        depth = item.get("pullback_depth") or "коррекция"
+        bars = int(item.get("pullback_bars") or 0)
+        retrace = int(item.get("pullback_retrace") or 0)
+        max_h1 = int(getattr(cfg, "NAVIGATOR_TIME_PULLBACK_MAX_H1", 4))
+        left = max(1, max_h1 - bars)
+        fact = (
+            f"По уже присланному {side} идёт {depth}: примерно {bars} часовых свечей "
+            f"и {retrace}% от максимума хода. По времени обычно ещё около {left}–{max_h1} часов. "
+            f"Это не разворот и не новый SHORT/LONG. "
+            f"Направление то же. Ждём окончание отката, маршрут не отменяем."
+        )
+    elif action == "PULLBACK_DONE":
+        title = f"✅ ОТКАТ СНЯТ — {side} ПРОДОЛЖАЕТСЯ"
+        fact = (
+            f"Коррекция внутри {side} закончилась по закрытой часовой свече. "
+            "Исходный сигнал жив, новый противоположный вход не открываем."
+        )
     else:
         title = "❌ СЦЕНАРИЙ ОТМЕНЁН"
         boundary = float(item.get("invalidation") or 0)
@@ -1095,6 +1114,46 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                 and int(item.get("near_for") or 0) != reached_before + 1):
             action = "NEAR"
             next_target = targets[reached_before]
+        if not action and getattr(cfg, "SIGNAL_PULLBACK_ALERTS", True) and not reached and new_h1:
+            start_dt = item.get("start_h1") or ""
+            h1_path = [bar for bar in h1 if not start_dt or bar.dt >= start_dt] or h1[-12:]
+            h1_close_progress = max(0, min(100, int(round(
+                ((h1_bar.close - anchor) * direction) / total * 100))))
+            if direction > 0:
+                h1_best = max(bar.high for bar in h1_path)
+            else:
+                h1_best = min(bar.low for bar in h1_path)
+            h1_best_progress = max(0, min(100, int(round(
+                ((h1_best - anchor) * direction) / total * 100))))
+            max_prog = max(int(item.get("max_progress") or 0), h1_best_progress, progress)
+            retrace = max(0, max_prog - h1_close_progress)
+            min_retrace = int(getattr(cfg, "SIGNAL_PULLBACK_MIN_RETRACE_PCT", 8))
+            deep_at = int(getattr(cfg, "SIGNAL_PULLBACK_DEEP_PCT", 35))
+            recover_at = int(getattr(cfg, "SIGNAL_PULLBACK_DONE_RECOVER_PCT", 3))
+            extreme = None
+            for bar in reversed(h1_path):
+                if direction > 0 and bar.high >= h1_best - 1e-12:
+                    extreme = bar
+                    break
+                if direction < 0 and bar.low <= h1_best + 1e-12:
+                    extreme = bar
+                    break
+            pullback_bars = 0
+            if extreme:
+                pullback_bars = sum(1 for bar in h1_path if bar.dt > extreme.dt)
+            if retrace >= min_retrace and not item.get("pullback_open"):
+                item["pullback_open"] = True
+                item["pullback_retrace"] = retrace
+                item["pullback_bars"] = pullback_bars
+                item["pullback_depth"] = (
+                    "глубокий откат" if retrace >= deep_at else
+                    "средний откат" if retrace >= min_retrace * 2 else
+                    "маленький откат"
+                )
+                action = "PULLBACK_HOLD"
+            elif item.get("pullback_open") and retrace <= recover_at:
+                item["pullback_open"] = False
+                action = "PULLBACK_DONE"
         if not action:
             continue
         message = _lifecycle_message(item, action, current_bar.close, progress,
@@ -1108,7 +1167,7 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         messages.append(message)
     state["pending_lifecycle"] = pending
     _save(state)
-    return messages[:2]
+    return messages[:4]
 
 
 def mark_lifecycle_delivered(text: str) -> bool:

@@ -28,7 +28,8 @@ TIMEFRAMES = [
 
 STRENGTH_TF = "H1"
 # Сила = движение за последнюю ЗАКРЫТУЮ часовую свечу.
-STRENGTH_LOOKBACK = 1
+# Сила по нескольким закрытым H1, а не по одному шумному бару.
+STRENGTH_LOOKBACK = 4
 STRENGTH_RANK_JUMP = 2
 # Автосообщение — только когда закрылась новая H1, не чаще раза за эту свечу.
 STRENGTH_REPORT_EVERY_HOURS = 1
@@ -127,7 +128,8 @@ SIGNAL_COOLDOWN_HOURS = 6
 # Верхний предел НОВЫХ торговых карточек модулей за одну закрытую H1
 # (не обещание «будет ровно N»). 0 = без лимита (опасно: флуд).
 # Обязательные AMD / пробой уровня в этот бюджет не входят.
-MAX_MODULE_ALERTS_PER_H1 = 7
+# После склейки одной идеи на пару 4 разных пары за H1 — потолок, не квота.
+MAX_MODULE_ALERTS_PER_H1 = 4
 SIGNAL_JOURNAL_ENABLED = True
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
@@ -189,6 +191,11 @@ LEVEL_NEWS_MEDIUM_WINDOW_MINUTES = 30
 # Не присылать предположительные предупреждения о близости к цели:
 # только фактическое достижение TR1/TR2/TR3 или подтверждённая отмена.
 SIGNAL_NEAR_TARGET_ALERTS = False
+# Откат внутри уже присланного сигнала: предупреждение, не новый вход.
+SIGNAL_PULLBACK_ALERTS = True
+SIGNAL_PULLBACK_MIN_RETRACE_PCT = 8
+SIGNAL_PULLBACK_DEEP_PCT = 35
+SIGNAL_PULLBACK_DONE_RECOVER_PCT = 3
 MASTER_NEWS_BLOCK_BEFORE_MINUTES = 60
 MASTER_NEWS_BLOCK_AFTER_MINUTES = 30
 
@@ -206,6 +213,9 @@ DXY_SEK_MAX_LAG_HOURS = int(os.getenv("DXY_SEK_MAX_LAG_HOURS") or "2")
 DXY_MIN_PRICE = 50.0
 DXY_MAX_PRICE = 200.0
 BRIEFING_ENABLED = True
+# Часовой брифинг выключен: одна простыня на открытие Азии / Европы / Америки.
+BRIEFING_SESSION_ONLY = True
+BRIEFING_SESSION_CATCH_UP = True
 NEWS_WARN_MINUTES = 60
 NEWS_CACHE_MAX_AGE_HOURS = 168
 # CPI — отдельный строгий фундаментальный слой.
@@ -617,6 +627,14 @@ LIQUIDITY_MAP_STATUS_LOOKBACK_M15 = 16
 # Global new-signal significance gate (ZIP 29 refinement).
 # Detectors still see/store every event internally. Telegram gets a NEW trade
 # signal only when there is enough estimated H1 life AND enough price travel.
+# Общий слой фактов: склейка модулей, подпись отката, запрет позднего входа.
+SIGNAL_CONTEXT_ENABLED = True
+CONTEXT_MIN_JUNIOR_AGREE = 2
+CONTEXT_MIN_DIRECTED_GAP = 0.03
+CONTEXT_ALLOW_LABELED_PULLBACK = True
+CONTEXT_PULLBACK_MAX_PROGRESS_PCT = 25
+CONTEXT_PULLBACK_MAX_OPPOSITE_GAP = 0.12
+
 SIGNAL_SIGNIFICANCE_GATE_ENABLED = True
 SIGNAL_MIN_REMAINING_H1 = 3
 # A strong fresh OHLC/displacement event must not wait for another H1 candle.

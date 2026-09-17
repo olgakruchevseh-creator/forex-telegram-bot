@@ -55,6 +55,7 @@ import ats_reversal_point
 import market_schedule
 import master_direction
 import signal_navigator
+import signal_context
 import signal_journal
 import session_projection_reports
 try:
@@ -850,16 +851,31 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         h1 = h1_series(market)
         closed_dt = last_closed_h1_dt(h1)
         empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
-        iid = briefing.issue_id(closed_dt, chat_id) if closed_dt else ""
+        session_only = bool(getattr(cfg, "BRIEFING_SESSION_ONLY", True))
+        session_due = briefing.just_opened(
+            window_min=int(getattr(cfg, "BRIEFING_OPEN_WINDOW_MIN", 15))
+        ) or bool(getattr(cfg, "BRIEFING_SESSION_CATCH_UP", True))
+        if session_only:
+            iid = briefing.briefing_id() if rank and not empty else ""
+        else:
+            iid = briefing.issue_id(closed_dt, chat_id) if closed_dt else ""
         log.info(
-            "briefing_key=%s pid=%s reason=scan_job h1=%s current=%s empty=%s",
+            "briefing_key=%s pid=%s reason=scan_job h1=%s session_only=%s due=%s empty=%s",
             iid,
             briefing.instance_id(),
             closed_dt,
-            briefing.h1_is_current(closed_dt, cfg.BRIEFING_OPEN_WINDOW_MIN) if closed_dt else False,
+            session_only,
+            session_due,
             empty,
         )
-        if closed_dt and iid and briefing.h1_is_current(closed_dt, cfg.BRIEFING_OPEN_WINDOW_MIN) and not empty and rank:
+        briefing_ok = bool(iid and not empty and rank)
+        if session_only:
+            briefing_ok = briefing_ok and session_due
+        else:
+            briefing_ok = briefing_ok and closed_dt and briefing.h1_is_current(
+                closed_dt, cfg.BRIEFING_OPEN_WINDOW_MIN
+            )
+        if briefing_ok:
             if briefing.issue_sent(state, iid):
                 log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=already_sent", iid, briefing.instance_id())
             elif not briefing.claim_issue(state, iid):
@@ -1226,6 +1242,17 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         significance.get("efficiency"),
                     )
             delivery_alerts = significant_alerts
+        try:
+            bundles, dropped_facts = signal_context.prepare(delivery_alerts, market, strength)
+        except Exception:
+            log.exception("SIGNAL_CONTEXT_FAILED")
+            bundles = [{"primary": t, "source_text": t, "allies": [], "pair": _alert_pair(t), "side": _direct_signal_side(t)} for t in delivery_alerts]
+            dropped_facts = []
+        for reason, raw in dropped_facts:
+            log.info(
+                "SIGNAL_CONTEXT_INTERNAL pair=%s side=%s reason=%s source=%s",
+                _alert_pair(raw), _direct_signal_side(raw), reason, signal_context.source_name(raw),
+            )
         # CPI — единый защитный слой поверх всех модулей: сам факт модуля не теряется,
         # но карточка явно запрещает трактовать новостной импульс как готовый вход.
         try:
@@ -1233,20 +1260,25 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             log.exception("CPI guard calendar")
             cpi_events = []
-        for source_text in delivery_alerts:
-            source_event_id = _source_event_id(source_text)
-            if _event_already_delivered(state, source_event_id):
-                log.warning("DUPLICATE_EVENT_BLOCKED event_id=%s pair=%s side=%s",
-                            source_event_id, _alert_pair(source_text), _direct_signal_side(source_text))
-                # Clear a module pending retry that survived after the global event was delivered.
+        for bundle in bundles:
+            source_text = bundle.get("source_text") or bundle["primary"]
+            allied_texts = [source_text] + list(bundle.get("allies") or [])
+            if any(_event_already_delivered(state, _source_event_id(item)) for item in allied_texts):
+                log.warning("DUPLICATE_EVENT_BLOCKED pair=%s side=%s", bundle.get("pair"), bundle.get("side"))
                 if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in source_text:
                     try: consolidation_zone.mark_delivered(source_text)
                     except Exception: log.exception("Consolidation duplicate ack")
                 continue
+            pair = bundle.get("pair") or _alert_pair(source_text)
+            direct_side = bundle.get("side") or _direct_signal_side(source_text)
+            if pair and direct_side and not cooldown_ok(state, pair, direct_side):
+                log.info("SIGNAL_COOLDOWN_SKIP pair=%s side=%s", pair, direct_side)
+                continue
+            source_event_id = _source_event_id(source_text)
             _enqueue_source(state, source_text)
             save_state(state)
-            text = source_text
-            pair_for_cpi = _alert_pair(text)
+            text = bundle.get("primary") or source_text
+            pair_for_cpi = pair or _alert_pair(text)
             cpi_note = newsmod.cpi_pair_guard(pair_for_cpi, cpi_events) if pair_for_cpi else ""
             if cpi_note and cpi_note not in text:
                 text = text.rstrip() + "\n\n" + cpi_note
@@ -1255,9 +1287,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
                 patterns.mark_card_delivered(text)
             _mark_event_delivered(state, source_event_id)
+            for extra in bundle.get("allies") or []:
+                _mark_event_delivered(state, _source_event_id(extra))
             _ack_source(state, source_text)
+            if pair and direct_side:
+                state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
             save_state(state)
-            delivered_sources = [source_text]
+            delivered_sources = list(allied_texts)
             for source_text in delivered_sources:
                 if "↕️ ZIGZAG —" in source_text:
                     try:
