@@ -417,8 +417,11 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
                       float(getattr(cfg, "SIGNAL_EARLY_OHLC_SCORE", 68)) and
                       not ohlc.get("weak_reversal") and not ohlc.get("range_like"))
 
+    early = ohlc_movement.early_entry_check(by_tf, direction)
     if ohlc.get("weak_reversal") and route_atr < strong_route:
         eligible, reason = False, "weak_reversal_ohlc"
+    elif not early.get("allow", True):
+        eligible, reason = False, early.get("reason") or "late_after_impulse"
     elif remaining_h1 < min_h1 and not early_ohlc:
         eligible, reason = False, "short_horizon"
     elif route_atr < min_route:
@@ -432,6 +435,7 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         "route_atr": round(route_atr, 3), "median_body_atr": round(median_body_atr, 3),
         "efficiency": round(efficiency, 3), "ohlc": ohlc,
         "early_ohlc": early_ohlc, "source_tf": source_tf, "source_age_min": source_age_min,
+        "early_entry": early,
     }
 
 def build_source_companion(source_text: str, market: dict, strength: dict) -> tuple[str, list[str]] | None:

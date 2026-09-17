@@ -648,6 +648,17 @@ SIGNAL_MIN_MEDIAN_H1_BODY_ATR = 0.18
 SIGNAL_STRONG_ROUTE_ATR_OVERRIDE = 1.25
 SIGNAL_RANGE_EFFICIENCY_FLOOR = 0.18
 
+# Ранний вход: новый сигнал не после уже состоявшегося крупного слива.
+# Импульс на текущей или предыдущей H1 — рано. Импульс 2+ бара назад
+# и цена уже далеко от его origin — поздно, в том числе для паттернов.
+EARLY_ENTRY_GATE_ENABLED = True
+EARLY_IMPULSE_MIN_BODY_ATR = 1.15
+EARLY_IMPULSE_MIN_RANGE_ATR = 1.30
+EARLY_IMPULSE_LOOKBACK_H1 = 10
+EARLY_IMPULSE_MAX_AGE_BARS = 1
+EARLY_MAX_TRAVEL_ATR = 1.35
+EARLY_ORIGIN_RETEST_ATR = 0.40
+
 # Unified OHLC movement layer (ZIP 30 -> 31). Internal filter, never a standalone alert.
 OHLC_MOVEMENT_FILTER_ENABLED = True
 OHLC_LOOKBACK_BARS = 6

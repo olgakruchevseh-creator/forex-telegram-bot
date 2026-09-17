@@ -139,6 +139,66 @@ def setup_adjustment(by_tf: dict, side: int) -> dict:
     return {**ctx, "allow": not bool(ctx.get("weak_reversal")), "quality_delta": delta}
 
 
+def early_entry_check(by_tf: dict, side) -> dict:
+    """Allow a NEW entry only near the start of the move.
+
+    A large same-direction H1 impulse on the current or previous bar is early.
+    The same impulse two or more bars ago, with price still far from its origin,
+    is a late continuation and must not be sold as a fresh entry.
+    """
+    import config as cfg
+    from analysis import closed_candles
+    if isinstance(side, str):
+        side_i = 1 if side.upper() == "LONG" else -1 if side.upper() == "SHORT" else 0
+    else:
+        side_i = 1 if side == 1 else -1 if side == -1 else 0
+    empty = {"allow": True, "reason": "disabled", "impulse_age": None, "travel_atr": 0.0}
+    if not getattr(cfg, "EARLY_ENTRY_GATE_ENABLED", True) or side_i not in (-1, 1):
+        return empty
+    bars = closed_candles((by_tf or {}).get("H1") or [], 60)
+    lookback = int(getattr(cfg, "EARLY_IMPULSE_LOOKBACK_H1", 10))
+    if len(bars) < max(16, lookback + 4):
+        return {"allow": True, "reason": "insufficient_data", "impulse_age": None, "travel_atr": 0.0}
+    av = float(atr(bars[:-1], 14))
+    if av <= 0:
+        return {"allow": True, "reason": "insufficient_atr", "impulse_age": None, "travel_atr": 0.0}
+    min_body = float(getattr(cfg, "EARLY_IMPULSE_MIN_BODY_ATR", 1.15))
+    min_range = float(getattr(cfg, "EARLY_IMPULSE_MIN_RANGE_ATR", 1.30))
+    window = bars[-lookback:]
+    found = None
+    for offset, c in enumerate(window):
+        age = len(window) - 1 - offset
+        candle_side = 1 if c.close > c.open else (-1 if c.close < c.open else 0)
+        if candle_side != side_i:
+            continue
+        body_atr = abs(float(c.close) - float(c.open)) / av
+        range_atr = (float(c.high) - float(c.low)) / av
+        if body_atr < min_body or range_atr < min_range:
+            continue
+        if found is None or body_atr > found[2]:
+            found = (age, c, body_atr)
+    if not found:
+        return {"allow": True, "reason": "no_prior_impulse", "impulse_age": None, "travel_atr": 0.0}
+    age, impulse, body_atr = found
+    origin = float(impulse.high) if side_i < 0 else float(impulse.low)
+    last = bars[-1]
+    travel = ((origin - float(last.close)) / av) if side_i < 0 else ((float(last.close) - origin) / av)
+    max_age = int(getattr(cfg, "EARLY_IMPULSE_MAX_AGE_BARS", 1))
+    max_travel = float(getattr(cfg, "EARLY_MAX_TRAVEL_ATR", 1.35))
+    retest = float(getattr(cfg, "EARLY_ORIGIN_RETEST_ATR", 0.40))
+    if age <= max_age:
+        return {"allow": True, "reason": "impulse_is_fresh", "impulse_age": age,
+                "travel_atr": round(travel, 3), "impulse_body_atr": round(body_atr, 3)}
+    if travel <= retest:
+        return {"allow": True, "reason": "retest_of_origin", "impulse_age": age,
+                "travel_atr": round(travel, 3), "impulse_body_atr": round(body_atr, 3)}
+    if travel >= max_travel:
+        return {"allow": False, "reason": "late_after_impulse", "impulse_age": age,
+                "travel_atr": round(travel, 3), "impulse_body_atr": round(body_atr, 3)}
+    return {"allow": True, "reason": "travel_still_early", "impulse_age": age,
+            "travel_atr": round(travel, 3), "impulse_body_atr": round(body_atr, 3)}
+
+
 def guard_event(by_tf: dict, side, quality: int | float | None = None) -> dict:
     """Canonical final OHLC gate for an event produced by another module.
 

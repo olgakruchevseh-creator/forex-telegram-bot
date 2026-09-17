@@ -40,6 +40,7 @@ import consolidation_zone
 import amd_power_of_three
 import crt_candle_range
 import movement_progress
+import ohlc_movement
 import liquidity_sweep
 import poc_profile
 import order_block
@@ -1209,11 +1210,20 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if not (_alert_pair(source_text) and _direct_signal_side(source_text)):
                     significant_alerts.append(source_text)
                     continue
-                # Pattern Scanner owns its structural residual-potential/late-entry gate.
-                # Once the FIRST confirming close is valid, deliver it immediately; the
-                # generic Navigator horizon gate must not turn that event into a delayed card.
+                # Паттерн не обходит запрет входа после крупного слива.
+                # Остальной horizon-gate паттерну не нужен: важен первый close.
                 if "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in source_text:
-                    significant_alerts.append(source_text)
+                    pair = _alert_pair(source_text)
+                    side = _direct_signal_side(source_text)
+                    early = ohlc_movement.early_entry_check(market.get(pair) or {}, side)
+                    if early.get("allow", True):
+                        significant_alerts.append(source_text)
+                    else:
+                        log.info(
+                            "SIGNAL_INTERNAL_ONLY pair=%s side=%s reason=%s age=%s travel=%s",
+                            pair, side, early.get("reason"), early.get("impulse_age"),
+                            early.get("travel_atr"),
+                        )
                     continue
                 try:
                     significance = signal_navigator.assess_new_signal_significance(
