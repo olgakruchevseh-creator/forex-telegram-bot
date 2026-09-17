@@ -145,7 +145,7 @@ MASTER_DIRECTION_ENABLED = True
 MASTER_STRENGTH_MIN_GAP = 0.05
 MASTER_MIN_QUALITY = 78
 MASTER_REQUIRE_MODULE_TRIGGER = True
-MASTER_MAX_SIGNALS_PER_H1 = 7
+MASTER_MAX_SIGNALS_PER_H1 = 4
 # Направленная торговая карточка в чат только после прохождения Master.
 MASTER_REQUIRE_FOR_DELIVERY = True
 # Echo — сессионная информационная проекция. В Master Direction не вмешивается.
@@ -312,12 +312,10 @@ MOVEMENT_PULLBACK_MAX_OPPOSITE_STRENGTH = 0.03
 MOVEMENT_PROGRESS_MIN_TARGET_ATR = 0.8
 MOVEMENT_PROGRESS_MIN_REPORT_PCT = 15
 MOVEMENT_PROGRESS_MIN_CHANGE_PCT = 8
-# Неотправленный модульный сигнал ждёт подтверждения максимум 4 закрытых H1.
-# Торговый кандидат не может становиться «новым входом» спустя несколько часов.
-# 45 минут достаточно для согласования закрытых M15 и ближайшей H1-картины.
-# Память Master Direction: неотправленный кандидат живёт до 4 закрытых часов.
-# Это НЕ задержка доставки исходной карточки — только контекст для Navigator.
-SIGNAL_CANDIDATE_TTL_HOURS = 4.0
+# Внутренний кандидат живёт только 1.5 часа: этого достаточно для согласования
+# закрытых M15/H1, но старый сценарий уже не участвует в свежей агрегации.
+# Это НЕ задержка исходной карточки и не разрешение позднего входа.
+SIGNAL_CANDIDATE_TTL_HOURS = 1.5
 # Одно предупреждение перед структурной целью; промежуточные проценты не спамят.
 SIGNAL_NEAR_TARGET_PCT = 85
 # Экстремумы H4/D1 ближе этого расстояния объединяются в одну цель TR.

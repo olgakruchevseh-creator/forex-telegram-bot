@@ -25,11 +25,10 @@ def rising_bars(count=180):
 
 
 class EchoProjectionTests(unittest.TestCase):
-    def test_insufficient_history_uses_context_fallback(self):
+    def test_insufficient_history_with_ambiguous_context_stays_silent(self):
+        # Новая логика Echo не выдумывает сторону из слабого context-only fallback.
         result = echo.analyze("EUR/USD", {"H1": rising_bars(40)})
-        self.assertIsNotNone(result)
-        self.assertTrue(result.get("estimated"))
-        self.assertEqual(0, result.get("sample"))
+        self.assertIsNone(result)
 
     def test_historical_analogs_project_repeated_direction(self):
         result = echo.analyze("EUR/USD", {"H1": rising_bars()})

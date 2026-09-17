@@ -17,3 +17,11 @@ class RefinementV35(unittest.TestCase):
         for k in ('zones','volatility','news_risk','freshness_utc','data_age_minutes'): self.assertIn(k,d)
         self.assertTrue(d['freshness_utc'])
 if __name__=='__main__': unittest.main()
+
+
+class FreshnessBudgetTests(unittest.TestCase):
+    def test_candidate_ttl_is_fresh_context_only(self):
+        self.assertLessEqual(config.SIGNAL_CANDIDATE_TTL_HOURS, 1.5)
+
+    def test_master_budget_matches_module_budget(self):
+        self.assertLessEqual(config.MASTER_MAX_SIGNALS_PER_H1, config.MAX_MODULE_ALERTS_PER_H1)
