@@ -142,6 +142,8 @@ MASTER_STRENGTH_MIN_GAP = 0.05
 MASTER_MIN_QUALITY = 78
 MASTER_REQUIRE_MODULE_TRIGGER = True
 MASTER_MAX_SIGNALS_PER_H1 = 7
+# Направленная торговая карточка в чат только после прохождения Master.
+MASTER_REQUIRE_FOR_DELIVERY = True
 # Echo — сессионная информационная проекция. В Master Direction не вмешивается.
 ECHO_ENABLED = True
 ECHO_SESSION_MODE = True  # прогноз от текущей до следующей сессии

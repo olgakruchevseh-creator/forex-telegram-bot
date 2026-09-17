@@ -12,3 +12,10 @@ def test_nondirectional_cards_are_not_suppressed():
     got = nav.assess_new_signal_significance("информационная карточка", {}, {})
     assert got["eligible"] is True
     assert got["reason"] == "not_directional"
+
+
+def test_missing_route_stays_internal():
+    text = "Пара: EUR/USD\nНаправление: LONG"
+    got = nav.assess_new_signal_significance(text, {"EUR/USD": {}}, {"EUR": 0.2, "USD": 0.1})
+    assert got["eligible"] is False
+    assert got["reason"] == "insufficient_data"

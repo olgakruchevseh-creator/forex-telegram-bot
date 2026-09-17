@@ -332,8 +332,8 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
     by_tf = market.get(symbol) or {}
     route = _trigger_route(symbol, side, by_tf, source_text)
     if not route:
-        # Do not make missing/insufficient market data a silent global veto.
-        return {"eligible": True, "reason": "insufficient_data"}
+        # Нет маршрута — новый вход в чат не выпускаем. Событие остаётся внутренним.
+        return {"eligible": False, "reason": "insufficient_data"}
 
     direction = 1 if side == "LONG" else -1
     views = {}
@@ -357,7 +357,7 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
     h1 = movement_progress.closed_candles(by_tf.get("H1") or [], 60)
     av = movement_progress.atr(h1, 14) if h1 else 0.0
     if av <= 0:
-        return {"eligible": True, "reason": "insufficient_atr"}
+        return {"eligible": False, "reason": "insufficient_atr"}
     anchor = float(route.get("anchor") or 0)
     tr1 = float(route.get("target") or anchor)
     route_atr = abs(tr1 - anchor) / av

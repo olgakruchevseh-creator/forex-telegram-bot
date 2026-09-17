@@ -38,6 +38,19 @@ class IntegrationConsistencyTests(unittest.TestCase):
         stack = PairStack("AUD/USD", 1, .30, views, 1, 1)
         self.assertIsNone(decide_signal(stack))
 
+    def test_master_delivery_requires_same_pair_and_side(self):
+        allowed = [{"symbol": "EUR/USD", "side": "LONG"}]
+        self.assertTrue(bot._master_allows_delivery("EUR/USD", "LONG", allowed))
+        self.assertFalse(bot._master_allows_delivery("EUR/USD", "SHORT", allowed))
+        self.assertFalse(bot._master_allows_delivery("GBP/USD", "LONG", allowed))
+        self.assertTrue(bot._master_allows_delivery("", "", allowed))
+
+    def test_h4_zigzag_guard_blocks_opposite_delivery(self):
+        snap = {"zigzag_directions": {"H4": -1}}
+        with patch.object(zigzag_scanner, "analyze_symbol", return_value=snap):
+            self.assertFalse(bot.signal_allowed_by_h4_zigzag("EUR/USD", {}, "LONG"))
+            self.assertTrue(bot.signal_allowed_by_h4_zigzag("EUR/USD", {}, "SHORT"))
+
     def test_briefing_marks_h4_conflict_even_when_strength_opposes_technical_side(self):
         views = {
             "D1": TfView("D1", "", 1, "медвежья (LH + LL)", "вниз", 30, -1, None),

@@ -717,6 +717,17 @@ def signal_allowed_by_h4_zigzag(symbol: str, by_tf: dict, side: str) -> bool:
     return not h4_side or h4_side == wanted
 
 
+def _master_allows_delivery(pair: str, side: str, master_results: list[dict]) -> bool:
+    """Служебные карточки без стороны проходят. Направленный вход — только через Master."""
+    if not pair or not side:
+        return True
+    if not getattr(cfg, "MASTER_DIRECTION_ENABLED", True):
+        return True
+    if not getattr(cfg, "MASTER_REQUIRE_FOR_DELIVERY", True):
+        return True
+    return any(item.get("symbol") == pair and item.get("side") == side for item in master_results)
+
+
 def _alert_metric(text: str, label: str) -> int | None:
     match = re.search(rf"(?:^|\n)[^\n]*{re.escape(label)}:\s*(\d{{1,3}})(?:/100|%)?", text or "", re.I)
     return max(0, min(100, int(match.group(1)))) if match else None
@@ -1144,6 +1155,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         candidate_alerts = signal_navigator.remember_candidates(raw_alerts, closed_dt)
         navigator_sources: dict[str, list[str]] = {}
         confirmed_alerts: list[tuple[int, str]] = []
+        master_results: list[dict] = []
         if getattr(cfg, "MASTER_DIRECTION_ENABLED", True):
             try:
                 master_dxy = briefing.collect_extras(
@@ -1214,8 +1226,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 signal_journal.update_market(market)
             except Exception:
                 log.exception("Обновление журнала сигналов")
-        # ZIP 27: confirmed source events no longer wait for Master/Navigator.
-        # Master/Navigator may follow as a stricter companion, but cannot suppress source.
+        # ZIP 31: направленный факт модуля остаётся внутренним, пока его
+        # не подтвердит Master. Navigator снова только сопровождает вход.
         proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + [
             text for _priority, text in selected_alerts
         ]
@@ -1242,7 +1254,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                 except Exception:
                     log.exception("SIGNAL_SIGNIFICANCE_GATE_FAILED")
-                    significance = {"eligible": True, "reason": "gate_error"}
+                    significance = {"eligible": False, "reason": "gate_error"}
                 if significance.get("eligible", True):
                     significant_alerts.append(source_text)
                 else:
@@ -1285,6 +1297,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             direct_side = bundle.get("side") or _direct_signal_side(source_text)
             if pair and direct_side and not cooldown_ok(state, pair, direct_side):
                 log.info("SIGNAL_COOLDOWN_SKIP pair=%s side=%s", pair, direct_side)
+                continue
+            if not _master_allows_delivery(pair, direct_side, master_results):
+                log.info("SIGNAL_MASTER_BLOCK pair=%s side=%s reason=no_master_confirmation", pair, direct_side)
+                continue
+            if pair and direct_side and not signal_allowed_by_h4_zigzag(pair, market.get(pair) or {}, direct_side):
+                log.info("SIGNAL_H4_ZIGZAG_BLOCK pair=%s side=%s", pair, direct_side)
                 continue
             source_event_id = _source_event_id(source_text)
             _enqueue_source(state, source_text)
