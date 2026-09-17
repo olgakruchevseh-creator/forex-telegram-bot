@@ -160,81 +160,89 @@ def _context_score(symbol: str, by_tf: dict, side: int, strength: dict[str, floa
 
 
 
+def _ctx_alignment(ctx) -> float:
+    if ctx is None:
+        return 0.0
+    alignment = getattr(ctx, "alignment", None)
+    if alignment is None and isinstance(ctx, dict):
+        alignment = ctx.get("alignment")
+    try:
+        return float(alignment or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
     """Grouped cross-module confirmation for Echo without mutating scanner state.
 
-    Families are capped so several closely-related SMC modules cannot overwhelm
-    the independent H1 analogue vote. Missing/broken modules stay neutral.
+    One module = one vote. Location modules count only by alignment,
+    never by «object exists». Missing/broken modules stay neutral.
     """
     score = 0
     notes = []
-    # Impulse family
+    seen = set()
+
+    def _take(module_name: str, family: str) -> float:
+        if module_name in seen:
+            return 0.0
+        try:
+            ctx = __import__(module_name).analyze_symbol(symbol, by_tf, side)
+        except Exception:
+            return 0.0
+        seen.add(module_name)
+        align = _ctx_alignment(ctx)
+        if align > 0:
+            notes.append(family)
+        elif align < 0:
+            notes.append(f"{family}-conflict")
+        return align
+
     try:
         import displacement
         hit = displacement.confirm_direction(by_tf, "LONG" if side > 0 else "SHORT")
+        opposite = displacement.confirm_direction(by_tf, "SHORT" if side > 0 else "LONG")
         if hit:
             score += 5; notes.append("Displacement")
+        elif opposite:
+            score -= 4; notes.append("Displacement-conflict")
     except Exception:
         pass
-    # Location / liquidity family
-    loc_votes = []
+
+    loc_for = loc_against = 0
     for module_name in ("premium_discount", "htf_irl", "erl", "bpr"):
-        try:
-            mod = __import__(module_name)
-            ctx = mod.analyze_symbol(symbol, by_tf, side)
-            if ctx is not None:
-                loc_votes.append(module_name)
-        except Exception:
-            pass
-    if loc_votes:
-        score += min(7, 3 + 2 * len(loc_votes)); notes.append("SMC-zone")
+        align = _take(module_name, "SMC-zone")
+        if align > 0:
+            loc_for += 1
+        elif align < 0:
+            loc_against += 1
+    if loc_for:
+        score += min(6, 2 + 2 * loc_for)
+    if loc_against:
+        score -= min(6, 2 + 2 * loc_against)
+
     try:
         import liquidity_map
-        lp=liquidity_map.swept_context(symbol,by_tf,side)
+        lp = liquidity_map.swept_context(symbol, by_tf, side)
         if lp is not None:
             score += 3; notes.append("BSL/SSL-sweep")
     except Exception:
         pass
 
-    # Structure/timing family. These are read-only analyzers and therefore do
-    # not consume anti-spam state or create Telegram alerts. One family vote.
-    structure_votes = []
-    structure_conflicts = []
+    structure_votes, structure_conflicts = [], []
     for module_name in ("ltf_confirmation", "mss", "choch", "propulsion_block", "inducement"):
-        try:
-            mod = __import__(module_name)
-            ctx = mod.analyze_symbol(symbol, by_tf, side)
-            alignment = getattr(ctx, "alignment", None)
-            if alignment is None and isinstance(ctx, dict):
-                alignment = ctx.get("alignment")
-            if alignment is not None:
-                (structure_votes if float(alignment) > 0 else structure_conflicts if float(alignment) < 0 else []).append(module_name)
-        except Exception:
-            pass
+        align = _take(module_name, "structure/LTF")
+        if align > 0:
+            structure_votes.append(module_name)
+        elif align < 0:
+            structure_conflicts.append(module_name)
     if structure_votes:
-        score += min(6, 2 + 2 * len(structure_votes)); notes.append("structure/LTF")
+        score += min(6, 2 + 2 * len(structure_votes))
     if structure_conflicts:
-        score -= min(7, 3 + 2 * len(structure_conflicts)); notes.append("structure-conflict")
-
-    # HTF dealing-range family is deliberately capped separately.
-    htf_votes = []
-    for module_name in ("htf_irl", "premium_discount", "erl", "bpr"):
-        try:
-            mod = __import__(module_name)
-            ctx = mod.analyze_symbol(symbol, by_tf, side)
-            alignment = getattr(ctx, "alignment", None)
-            if alignment is None and isinstance(ctx, dict):
-                alignment = ctx.get("alignment")
-            if ctx is not None and (alignment is None or float(alignment) >= 0):
-                htf_votes.append(module_name)
-        except Exception:
-            pass
-    if htf_votes:
-        score += min(5, 1 + len(htf_votes)); notes.append("HTF-location")
+        score -= min(7, 3 + 2 * len(structure_conflicts))
     return {"score": max(-12, min(18, score)), "notes": sorted(set(notes))}
 
 def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], strength=None, dxy_bias=0) -> dict | None:
-    """Always choose the more likely session direction when H1 data exists, even without analogues."""
+    """Context-only hint. Ambiguous context stays silent instead of inventing a side."""
     bars = closed_candles(by_tf.get("H1") or [], 60)
     if len(bars) < 30 or not horizons:
         return None
@@ -243,28 +251,28 @@ def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], stren
     long_smc = _smc_overlay(symbol, by_tf, 1); short_smc = _smc_overlay(symbol, by_tf, -1)
     long_score = long_ctx["score"] + long_smc["score"]
     short_score = short_ctx["score"] + short_smc["score"]
+    margin = abs(long_score - short_score)
+    # Слишком близкие оценки — это «не знаю», а не 51% в случайную сторону.
+    if margin < float(getattr(cfg, "ECHO_CONTEXT_MIN_MARGIN", 8)):
+        return None
     side = "LONG" if long_score >= short_score else "SHORT"
     side_sign = 1 if side == "LONG" else -1
     ctx = long_ctx if side_sign > 0 else short_ctx
     smc = long_smc if side_sign > 0 else short_smc
-    margin = abs(long_score-short_score)
-    confidence = max(51, min(72, 52 + int(round(margin * .45))))
+    confidence = max(51, min(62, 51 + int(round(margin * .25))))
     av = _atr_at(bars, len(bars)-1)
-    # Контекстный fallback НЕ рисует искусственную линейную траекторию по +N часам.
-    # Без достаточного числа исторических аналогов мы знаем только наиболее вероятное
-    # направление на границе сессии. Внутрисессионные точки остаются неизвестными.
     max_h = max(horizons)
-    data_quality = max(25, min(55, 28 + int(round(min(27, margin * .35)))))
+    data_quality = max(20, min(45, 22 + int(round(min(18, margin * .25)))))
     return {
         "symbol": symbol, "side": side,
         "confidence": confidence, "direction_probability": confidence,
         "raw_confidence": confidence, "data_quality": data_quality,
         "context": ctx, "smc_context": smc, "sample": 0, "estimated": True,
-        "trajectory_available": False, "trajectory_source": "context_only",
+        "weak": True, "trajectory_available": False, "trajectory_source": "context_only",
         "horizons": {}, "expected_atr": None,
         "session_hours": int(max_h), "session_end_probability": confidence,
         "expected_by_horizon": {}, "atr": av, "current": bars[-1].close,
-        "closed_h1": bars[-1].dt,
+        "closed_h1": bars[-1].dt, "context_support": int(ctx.get("score") or 0),
     }
 
 def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
@@ -325,40 +333,46 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     confidence = long_probability if side == "LONG" else 1-long_probability
     minimum_confidence = float(minimum_confidence_override if minimum_confidence_override is not None
                                else getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
-    if confidence < minimum_confidence:
-        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
-
-    # Конец сессии обязан подтверждать итоговое направление.
-    # Один встречный участок внутри пути разрешён как вероятный откат.
     side_sign = 1 if side == "LONG" else -1
     endpoint_ok = (probabilities[end_h] >= .5) if side_sign > 0 else (probabilities[end_h] < .5)
-    if not endpoint_ok:
-        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
     aligned_h = sum(((probabilities[h] >= .5) if side_sign > 0 else (probabilities[h] < .5))
                     for h in horizons)
-    if len(horizons) >= 3 and aligned_h < 2:
-        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
-
     context = _context_score(symbol, by_tf, side_sign, strength, dxy_bias)
-    # Blend historical probability with independent market context. Context can veto
-    # a weak analogue, but cannot manufacture a direction without analogues.
-    adjusted = int(round(confidence * 100 + max(-18, min(18, context["score"]))))
-    adjusted = max(50, min(95, adjusted))
-    hard_conflict = sum(v == -side_sign for v in context["tf_sides"].values()) >= 2
-    if context["zigzag_h4"] == -side_sign and hard_conflict:
-        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
-    if adjusted < int(round(float(getattr(cfg, "ECHO_CONTEXT_MIN_SCORE", .68)) * 100)):
-        return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
+    smc = _smc_overlay(symbol, by_tf, side_sign)
+    # Контекст и SMC уточняют уверенность, но не меняют сторону аналогов.
+    context_delta = max(-18, min(18, int(context["score"]) + int(smc["score"])))
+    raw_pct = int(round(confidence * 100))
+    adjusted = max(50, min(95, raw_pct + context_delta))
+    hard_conflict = (
+        context["zigzag_h4"] == -side_sign
+        and sum(v == -side_sign for v in context["tf_sides"].values()) >= 2
+    )
+    weak = bool(
+        confidence < minimum_confidence
+        or not endpoint_ok
+        or (len(horizons) >= 3 and aligned_h < 2)
+        or hard_conflict
+        or adjusted < int(round(float(getattr(cfg, "ECHO_CONTEXT_MIN_SCORE", .68)) * 100))
+    )
+    if hard_conflict:
+        # Аналоги спорят со старшей структурой — не подменяем сторону контекстом
+        # и не выдаём это как рабочий сценарий сессии.
+        return None
+    if weak:
+        adjusted = min(adjusted, raw_pct, 64)
+    trajectory_ok = bool(endpoint_ok and (aligned_h >= 2 or len(horizons) < 3) and not weak)
     return {
         "symbol": symbol,
         "side": side,
         "confidence": adjusted,
         "direction_probability": adjusted,
-        "raw_confidence": int(round(confidence*100)),
+        "raw_confidence": raw_pct,
+        "context_support": context_delta,
         "data_quality": max(55, min(95, int(round(55 + min(40, len(matches) / max(1, minimum) * 25))))),
-        "trajectory_available": True, "trajectory_source": "historical_analogs",
-        "context": context,
-        "sample": len(matches),
+        "trajectory_available": trajectory_ok,
+        "trajectory_source": "historical_analogs",
+        "context": context, "smc_context": smc,
+        "sample": len(matches), "estimated": False, "weak": weak,
         "horizons": {
             str(h): int(round((probabilities[h] if side == "LONG" else 1-probabilities[h])*100))
             for h in horizons

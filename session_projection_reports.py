@@ -146,20 +146,24 @@ def _minimal_echo_ray(symbol: str, by_tf: dict, side: str) -> io.BytesIO:
     image.save(out,format="PNG"); out.seek(0); return out
 
 def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
-                 current_name: str, next_name: str, strength: dict | None = None) -> dict:
+                 current_name: str, next_name: str, strength: dict | None = None,
+                 dxy_bias: int = 0) -> dict:
     checkpoints = sorted(set((
         max(1, int(round(hours * 0.25))),
         max(1, int(round(hours * 0.50))),
         max(1, int(round(hours * 0.75))),
         hours,
     )))
-    result = echo_projection.analyze(symbol, by_tf, checkpoints, strength=strength or {})
+    result = echo_projection.analyze(
+        symbol, by_tf, checkpoints, strength=strength or {}, dxy_bias=int(dxy_bias or 0))
     news = _news_context(symbol, events, result["direction_probability"] if result else None, hours)
     if result:
-        side, icon = result["side"], ("🟢" if result["side"] == "LONG" else "🔴")
+        weak = bool(result.get("weak") or result.get("estimated"))
+        side = result["side"]
+        icon = "🟡" if weak else ("🟢" if side == "LONG" else "🔴")
         direction_probability = news["confidence"]
         data_quality = int(result.get("data_quality", 0))
-        trajectory_available = bool(result.get("trajectory_available"))
+        trajectory_available = bool(result.get("trajectory_available")) and not weak
         high_news = [e for e in news.get("events", []) if e.impact == "HIGH"]
         if high_news:
             news_split = (f"до {high_news[0].local_hm} — технический сценарий; "
@@ -169,10 +173,15 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
         else:
             news_split = "значимого новостного разрыва нет"
 
+        analog_pct = int(result.get("raw_confidence") or direction_probability)
+        context_support = int(result.get("context_support") or 0)
+        mode = ("КОНТЕКСТНАЯ ОЦЕНКА · СЛАБАЯ" if result.get("estimated")
+                else ("ИСТОРИЧЕСКАЯ ПРОЕКЦИЯ · СЛАБАЯ" if weak else "ИСТОРИЧЕСКАЯ ПРОЕКЦИЯ"))
         scenario = [
-            f"Режим расчёта: {'КОНТЕКСТНАЯ ОЦЕНКА' if result.get('estimated') else 'ИСТОРИКО-КОНТЕКСТНАЯ ПРОЕКЦИЯ'}",
+            f"Режим расчёта: {mode}",
             f"Направление к границе следующей сессии: {side} {icon}",
             f"Вероятность направления: {direction_probability}%",
+            f"Аналоги / контекст: {analog_pct}% / {context_support:+d}",
             f"Достаточность данных для траектории: {data_quality}%",
             f"Новостной слой: {news_split}",
         ]
@@ -221,13 +230,14 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
     return {"text": text, "image": image, "result": result}
 
 def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
-                  current_name: str, next_name: str, strength: dict | None = None) -> dict:
+                  current_name: str, next_name: str, strength: dict | None = None,
+                  dxy_bias: int = 0) -> dict:
     result = next_pivot_projection.analyze_session_symbol(symbol, by_tf, hours, strength=strength or {})
     news = _news_context(symbol, events, result["probability"] if result else None, hours, confidence_floor=30)
     if result:
         side = result["side"]
         probability = int(news["confidence"] or result["probability"])
-        weak = probability < 50
+        weak = bool(probability < 50 or result.get("estimated") or result.get("outside_session"))
         icon = "🟡" if weak else ("🟢" if side == "LONG" else "🔴")
         reaction = "SHORT" if side == "LONG" else "LONG"
         reaction_icon = "🔴" if reaction == "SHORT" else "🟢"
@@ -248,7 +258,9 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
         cautions = ", ".join(result.get("smc_cautions") or []) or "нет"
 
         # Echo + Pivot — последовательный сценарий, а не два конкурирующих сигнала.
-        echo = echo_projection.analyze(symbol, by_tf, sorted(set((max(1, hours//2), hours))), strength=strength or {})
+        echo = echo_projection.analyze(
+            symbol, by_tf, sorted(set((max(1, hours//2), hours))),
+            strength=strength or {}, dxy_bias=int(dxy_bias or 0))
         if echo:
             echo_side = echo.get("side")
             if echo_side == side:
@@ -303,6 +315,14 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
     except Exception:
         log.exception("ECHO_STRENGTH_CONTEXT_FAILED; continuing without strength")
         strength = {}
+    dxy_bias = 0
+    try:
+        cached = getattr(briefing, "_DXY_CACHE", {}) or {}
+        dxy_bias = int(briefing.effective_dxy_bias(cached.get("view")) or 0)
+    except Exception:
+        usd = float((strength or {}).get("USD") or 0)
+        gap = float(getattr(cfg, "ECHO_STRENGTH_MIN_GAP", 0.04))
+        dxy_bias = 1 if usd >= gap else (-1 if usd <= -gap else 0)
     reports = []
     modules = []
     if getattr(cfg, "ECHO_ENABLED", True):
@@ -316,9 +336,9 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
                 continue
             by_tf = market.get(symbol) or {}
             try:
-                report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name, strength)
+                report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias)
                           if module == "echo" else
-                          _pivot_report(symbol, by_tf, events, hours, current_name, next_name, strength))
+                          _pivot_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias))
                 report["key"] = key
                 reports.append(report)
             except Exception:

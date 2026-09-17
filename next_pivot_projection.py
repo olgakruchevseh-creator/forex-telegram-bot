@@ -202,20 +202,22 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
         middle = current + direction * travel
         half = max(av * float(getattr(cfg, "NEXT_PIVOT_MIN_ZONE_ATR", .25)) / 2, av * .18)
         zone_low, zone_high = sorted((middle-half, middle+half))
-        probability = int(round(51 + 14 * agreement))
+        probability = int(round(51 + 10 * agreement))
+        inside = zone_low <= current <= zone_high
         result = {
             "tf": "H1", "side": "LONG" if direction > 0 else "SHORT",
             "kind": "high" if direction > 0 else "low",
-            "structure": "HH" if direction > 0 else "LL",
+            "structure": "н/д",
             "zone_low": zone_low, "zone_high": zone_high,
             "bars_low": max(1, min(int(session_hours), 2)),
             "bars_high": max(3, int(session_hours)), "samples": 0,
-            "probability": probability, "near": True, "distance_atr": round(abs(middle-current)/av, 2),
+            "probability": probability, "near": inside,
+            "distance_atr": round(abs(middle-current)/av, 2),
             "pivot_dt": bars[-1].dt, "current": current, "symbol": symbol,
             "aligned": sum(1 for vote in votes if vote == direction), "available": len(votes),
             "closed_h1": bars[-1].dt, "estimated": True,
             "main_score": probability, "flat_score": max(25, 100-probability),
-            "reaction_score": max(35, 92-probability),
+            "reaction_score": max(20, 80-probability),
         }
     result["_strength"] = strength or {}
     try:
@@ -327,13 +329,21 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
         oc, ohlc_adjust = {"available": False}, 0
     result["probability"] = max(30, min(94, int(result["probability"]) + smc_adjust + ohlc_adjust))
     if result["outside_session"]:
-        result["probability"] = max(30, int(result["probability"]) - 8)
+        result["probability"] = max(30, int(result["probability"]) - 12)
+    if result.get("estimated"):
+        result["probability"] = min(int(result["probability"]), 62)
     result["smc_confirmations"] = sorted(set(confirmations))
     result["smc_cautions"] = sorted(set(cautions))
     result["smc_adjust"] = smc_adjust
     result["ohlc"] = oc
     result["ohlc_adjust"] = ohlc_adjust
-    result["main_score"] = result["probability"]
+    main = max(1, int(result["probability"]))
+    flat = max(1, int(result.get("flat_score") or max(15, 100 - main)))
+    react = max(1, int(result.get("reaction_score") or max(15, 90 - main)))
+    total = main + flat + react
+    result["main_score"] = int(round(100 * main / total))
+    result["flat_score"] = int(round(100 * flat / total))
+    result["reaction_score"] = max(0, 100 - result["main_score"] - result["flat_score"])
     return result
 
 def _price(symbol: str, value: float) -> str:

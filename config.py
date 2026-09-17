@@ -142,7 +142,7 @@ MASTER_STRENGTH_MIN_GAP = 0.05
 MASTER_MIN_QUALITY = 78
 MASTER_REQUIRE_MODULE_TRIGGER = True
 MASTER_MAX_SIGNALS_PER_H1 = 7
-# Echo — историческая проекция, только внутренний фильтр Master Direction.
+# Echo — сессионная информационная проекция. В Master Direction не вмешивается.
 ECHO_ENABLED = True
 ECHO_SESSION_MODE = True  # прогноз от текущей до следующей сессии
 ECHO_HORIZONS_H1 = (1, 2, 4, 8)
@@ -150,7 +150,8 @@ ECHO_MIN_ANALOGS = 30
 ECHO_MAX_ANALOGS = 50
 ECHO_MAX_DISTANCE = 2.6
 ECHO_MIN_CONFIDENCE = 0.62
-# Только уверенная противоположная проекция блокирует торговую карточку.
+ECHO_CONTEXT_MIN_MARGIN = 8
+# Флаг сохранён для совместимости; торговый veto через Echo сейчас выключен.
 ECHO_BLOCK_OPPOSITE_CONFIDENCE = 0.75
 # Самостоятельный Echo: отдельная карточка с графиком, вне торгового лимита.
 ECHO_STANDALONE_ENABLED = False
