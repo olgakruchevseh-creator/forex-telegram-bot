@@ -19,7 +19,7 @@ FAMILY={
  'Imbalance/FVG':'imbalance','Disbalance':'imbalance','BPR':'imbalance','Fib+SMC':'confluence','Fibonacci':'levels',
  'Order Block':'supply_demand','Breaker Block':'supply_demand','Levels':'levels','Daily High/Low':'levels','POC':'levels',
  'Liquidity Sweep':'liquidity','CRT':'liquidity','AMD':'liquidity','Silver Bullet':'liquidity','Inducement':'liquidity',
- 'ZigZag':'structure','MSS':'structure','Patterns':'pattern','Retest':'structure','Chain Entries':'structure',
+ 'ZigZag':'structure','MSS':'structure','Quasimodo':'structure','Patterns':'pattern','Retest':'structure','Chain Entries':'structure',
  'Accumulation/Distribution':'phase','Consolidation':'phase','ATS':'reversal','Smart Money 62-26':'smc'}
 
 def _path():

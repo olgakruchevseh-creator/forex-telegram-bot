@@ -32,6 +32,7 @@ _SOURCE_MARKERS = (
     ("ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ", "Consolidation"),
     ("CHAIN ENTRY", "Chain Entries"),
     ("ПАТТЕРН ПОДТВЕРЖДЁН", "Patterns"),
+    ("QUASIMODO — QM", "Quasimodo"),
     ("ДИСБАЛАНС", "Disbalance"),
     ("IMBALANCE", "Imbalance/FVG"),
     ("СЕТКИ ФИБОНАЧЧИ", "Fibonacci"),
