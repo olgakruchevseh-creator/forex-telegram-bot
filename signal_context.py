@@ -17,6 +17,7 @@ import config as cfg
 import movement_progress
 import ohlc_movement
 import zigzag_scanner
+import decision_journal
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -245,6 +246,13 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
         primary, allies = texts[0], texts[1:]
         ctx = inspect(pair, side, market.get(pair) or {}, strength)
         ok, reason = verdict(ctx)
+        # Passive audit trail: this call cannot alter the verdict or Telegram flow.
+        try:
+            for candidate in texts:
+                decision_journal.record_decision(candidate, market, strength,
+                    "ALLOWED" if ok else "BLOCKED", reason, texts[1:] if candidate == primary else [], ctx)
+        except Exception:
+            log.exception("DECISION_JOURNAL_CONTEXT_SKIPPED pair=%s", pair)
         if not ok:
             for text in texts:
                 dropped.append((reason, text))
@@ -264,10 +272,19 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
             prev_score = prev["ctx"]["directed_gap"] * 10 + prev["ctx"]["junior_n"]
             new_score = ctx["directed_gap"] * 10 + ctx["junior_n"]
             if new_score <= prev_score:
+                try:
+                    for candidate in texts:
+                        decision_journal.record_decision(candidate, market, strength, "BLOCKED", "opposite_weaker", allies, ctx)
+                except Exception:
+                    log.exception("DECISION_JOURNAL_OPPOSITE_SKIPPED pair=%s", pair)
                 dropped.append(("opposite_weaker", primary))
                 for text in allies:
                     dropped.append(("opposite_weaker", text))
                 continue
+            try:
+                decision_journal.record_decision(prev["source_text"], market, strength, "BLOCKED", "opposite_weaker", prev["allies"], prev["ctx"])
+            except Exception:
+                log.exception("DECISION_JOURNAL_OPPOSITE_SKIPPED pair=%s", pair)
             dropped.append(("opposite_weaker", prev["source_text"]))
             for text in prev["allies"]:
                 dropped.append(("opposite_weaker", text))

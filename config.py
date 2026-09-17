@@ -135,6 +135,11 @@ SIGNAL_COOLDOWN_HOURS = 6
 # После склейки одной идеи на пару 4 разных пары за H1 — потолок, не квота.
 MAX_MODULE_ALERTS_PER_H1 = 4
 SIGNAL_JOURNAL_ENABLED = True
+# Passive calibration dataset; never sends Telegram messages or changes scanner decisions.
+DECISION_JOURNAL_ENABLED = True
+# Passive replay/calibration: observe outcomes only; never changes live verdicts.
+REPLAY_CALIBRATION_ENABLED = True
+REPLAY_JOURNAL_SCAN_LIMIT = 4000
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
 # Время Europe/Amsterdam; скан отправит отчёт в ближайший 5-минутный запуск.

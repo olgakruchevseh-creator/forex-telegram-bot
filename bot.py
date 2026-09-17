@@ -58,6 +58,8 @@ import market_schedule
 import master_direction
 import signal_navigator
 import signal_journal
+import decision_journal
+import replay_calibration
 import signal_context
 import session_projection_reports
 try:
@@ -827,6 +829,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         market = fetch_market(env("TWELVE_DATA_API_KEY"))
+        # Passive replay/calibration observes matured journal decisions only.
+        # It cannot veto, rerank or modify any live signal.
+        try:
+            replay_calibration.update(market)
+        except Exception:
+            log.exception("Replay/Calibration update skipped")
         coverage = market_coverage(market)
         if not coverage["complete"]:
             log.warning(
@@ -1372,6 +1380,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     signal_journal.record_sent(text, market, closed_dt)
                 except Exception:
                     log.exception("Запись отправленного сигнала в журнал")
+            # Silent Decision Journal: delivery fact only, no Telegram output and no veto.
+            try:
+                decision_journal.record_sent(text, market, strength)
+            except Exception:
+                log.exception("Запись Decision Journal пропущена")
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
             # Карточка источника уже прошла Master. Navigator не заменяет её
