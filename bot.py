@@ -26,6 +26,7 @@ from analysis import (
     closed_candles,
     currency_strength,
     decide_signal,
+    market_coverage,
     rank_currencies,
 )
 import briefing
@@ -457,6 +458,110 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
         await send(app, chat_id, part)
 
 
+class ScanStats:
+    def __init__(self) -> None:
+        self.ran = 0
+        self.failed = 0
+        self.failed_names: list[str] = []
+
+    def note_run(self, name: str) -> None:
+        self.ran += 1
+
+    def note_fail(self, name: str) -> None:
+        self.failed += 1
+        self.failed_names.append(name)
+
+    def abort_delivery(self) -> bool:
+        if self.ran <= 0:
+            return False
+        ratio = self.failed / self.ran
+        limit = float(getattr(cfg, "SCAN_FAIL_ABORT_RATIO", 0.35))
+        if ratio >= limit:
+            log.error(
+                "SCAN_ABORT_DELIVERY failed=%s/%s ratio=%.2f modules=%s",
+                self.failed, self.ran, ratio, ",".join(self.failed_names),
+            )
+            return True
+        if self.failed:
+            log.warning(
+                "SCAN_PARTIAL failed=%s/%s modules=%s",
+                self.failed, self.ran, ",".join(self.failed_names),
+            )
+        return False
+
+
+def _source_image_for(text: str, source_text: str):
+    """Единая точка картинки. Ключ всегда исходный source_text, не подпись с CPI."""
+    try:
+        if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
+            return disbalance.image_for_alert(source_text)
+        if "IMBALANCE —" in text:
+            return imbalance.image_for_alert(source_text)
+        if "↕️ ZIGZAG —" in text:
+            return zigzag_scanner.image_for_alert(source_text)
+        if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
+            return patterns.image_for_alert(source_text)
+        if "🎯 AMD / POWER OF THREE" in text:
+            return amd_power_of_three.image_for_alert(source_text)
+        if "🕯 CRT — CANDLE RANGE THEORY" in text:
+            return crt_candle_range.image_for_alert(source_text)
+        if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in text:
+            return fibonacci_grid.image_for_alert(source_text)
+        if "🎯 ATS REVERSAL POINT" in text:
+            return ats_reversal_point.image_for_alert(source_text)
+        if "🧬 FIB + SMC —" in text:
+            return fib_smc.image_for_alert(source_text)
+        if "🎯 POC —" in text:
+            return poc_profile.image_for_alert(source_text)
+        if "🧱 РЕТЕСТ ORDER BLOCK" in text:
+            return order_block.image_for_alert(source_text)
+        if "🔄 BREAKER BLOCK ПОДТВЕРЖДЁН" in text:
+            return breaker_block.image_for_alert(source_text)
+        if "🥈 ICT SILVER BULLET —" in text:
+            return silver_bullet_ict.image_for_alert(source_text)
+        if "🏦 SMART MONEY 62-26" in text:
+            return smart_money_62_26.image_for_alert(source_text)
+        if "СНЯТИЕ ЛИКВИДНОСТИ" in text.upper():
+            return liquidity_sweep.image_for_alert(source_text)
+        if "РЕТЕСТ" in text.upper() and "ORDER BLOCK" not in text.upper() and "УРОВЕНЬ" not in text.upper() and "УРОВНЯ" not in text.upper():
+            return retest_confirmation.image_for_alert(source_text)
+        if "⛓️ CHAIN ENTRY" in text:
+            return chain_entries.image_for_alert(source_text)
+        if ("📅 ПРОБОЙ PDH" in text or "📅 ПРОБОЙ PDL" in text or
+                "📅 СНЯТИЕ PDH И ВОЗВРАТ" in text or "📅 СНЯТИЕ PDL И ВОЗВРАТ" in text):
+            return daily_high_low.image_for_alert(source_text)
+        if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in text:
+            return consolidation_zone.image_for_alert(source_text)
+        if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
+            return accumulation_distribution.image_for_alert(source_text)
+        if any(tag in text for tag in (
+            "📍 СИЛЬНЫЙ УРОВЕНЬ", "↘️ ОТБОЙ ОТ СОПРОТИВЛЕНИЯ",
+            "↗️ ОТБОЙ ОТ ПОДДЕРЖКИ", "⚡ ПРОБОЙ УРОВНЯ",
+            "📌 УДЕРЖАНИЕ ПОДТВЕРЖДЕНО", "↘️ ЛОЖНЫЙ ПРОБОЙ СОПРОТИВЛЕНИЯ",
+            "↗️ ЛОЖНЫЙ ПРОБОЙ ПОДДЕРЖКИ", "🔄 РЕТТЕСТ УРОВНЯ",
+            "🔄 СМЕНА РОЛИ УРОВНЯ", "❌ УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН",
+        )):
+            return levels.image_for_alert(source_text)
+    except Exception:
+        log.exception("Подготовка изображения карточки")
+    return None
+
+
+async def _deliver_trade_card(app: Application, chat_id: int, text: str, image=None) -> None:
+    """Единственный выход торговой карточки в Telegram."""
+    if image is not None:
+        if len(text) <= 1000:
+            await app.bot.send_photo(chat_id=int(chat_id), photo=image, caption=text)
+        else:
+            await app.bot.send_photo(
+                chat_id=int(chat_id), photo=image,
+                caption="📊 Сценарий подтверждён · полный разбор следующим сообщением",
+            )
+            await _send_parts(app, int(chat_id), text)
+        return
+    await _send_parts(app, int(chat_id), text)
+
+
 def _source_event_id(text: str) -> str:
     """Stable routing identity. Module-specific IDs win over mutable message text."""
     if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in (text or ""):
@@ -727,6 +832,18 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         market = fetch_market(env("TWELVE_DATA_API_KEY"))
+        coverage = market_coverage(market)
+        if not coverage["complete"]:
+            log.warning(
+                "MARKET_INCOMPLETE present=%s/%s missing=%s short_h1=%s",
+                coverage["present"], coverage["expected"],
+                ",".join(coverage["missing"][:12]) or "-",
+                ",".join(coverage["short_h1"][:8]) or "-",
+            )
+            if getattr(cfg, "MARKET_REQUIRE_COMPLETE", True):
+                log.error("SCAN_SKIP_TRADE reason=incomplete_basket")
+                save_state(state)
+                return
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
 
@@ -794,6 +911,19 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 save_state(state)
 
         module_alerts: list[tuple[int, str]] = []
+        scan_stats = ScanStats()
+        enabled_flags = (
+            "DISBALANCE_ENABLED", "IMBALANCE_ENABLED", "CONSOLIDATION_ZONE_ENABLED",
+            "ACCUMULATION_DISTRIBUTION_ENABLED", "AMD_POWER_OF_THREE_ENABLED",
+            "CRT_CANDLE_RANGE_ENABLED", "LIQUIDITY_SWEEP_ENABLED", "POC_ENABLED",
+            "ORDER_BLOCK_ENABLED", "BREAKER_BLOCK_ENABLED", "SMART_MONEY_62_26_ENABLED",
+            "SILVER_BULLET_ENABLED", "DAILY_HIGH_LOW_ENABLED", "CHAIN_ENTRIES_ENABLED",
+            "RETEST_CONFIRMATION_ENABLED", "FIBONACCI_ENABLED", "ATS_REVERSAL_ENABLED",
+            "FIB_SMC_ENABLED", "LEVELS_ENABLED", "ZIGZAG_SCANNER_ENABLED", "PATTERNS_ENABLED",
+        )
+        for flag in enabled_flags:
+            if getattr(cfg, flag, True):
+                scan_stats.note_run(flag)
         # Полностью подтверждённый AMD — редкое завершённое событие. Оно имеет
         # собственный обязательный канал доставки и не расходует три места
         # часового рейтинга обычных кандидатов.
@@ -804,56 +934,56 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 for text in disbalance.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля дисбаланса")
+                scan_stats.note_fail("disbalance"); log.exception("Ошибка модуля дисбаланса")
 
         if getattr(cfg, "IMBALANCE_ENABLED", True):
             try:
                 for text in imbalance.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля Imbalance/FVG")
+                scan_stats.note_fail("imbalance"); log.exception("Ошибка модуля Imbalance/FVG")
 
         if getattr(cfg, "CONSOLIDATION_ZONE_ENABLED", True):
             try:
                 for text in consolidation_zone.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля Consolidation Zone")
+                scan_stats.note_fail("consolidation_zone"); log.exception("Ошибка модуля Consolidation Zone")
 
         if getattr(cfg, "ACCUMULATION_DISTRIBUTION_ENABLED", True):
             try:
                 for text in accumulation_distribution.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля накопления/распределения")
+                scan_stats.note_fail("accumulation_distribution"); log.exception("Ошибка модуля накопления/распределения")
 
         if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
             try:
                 for text in amd_power_of_three.process_market(market, strength):
                     mandatory_amd_alerts.append(text)
             except Exception:
-                log.exception("Ошибка модуля AMD / Power of Three")
+                scan_stats.note_fail("amd"); log.exception("Ошибка модуля AMD / Power of Three")
 
         if getattr(cfg, "CRT_CANDLE_RANGE_ENABLED", True):
             try:
                 for text in crt_candle_range.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля CRT / Candle Range Theory")
+                scan_stats.note_fail("crt"); log.exception("Ошибка модуля CRT / Candle Range Theory")
 
         if getattr(cfg, "LIQUIDITY_SWEEP_ENABLED", True):
             try:
                 for text in liquidity_sweep.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля снятия ликвидности")
+                scan_stats.note_fail("liquidity_sweep"); log.exception("Ошибка модуля снятия ликвидности")
 
         if getattr(cfg, "POC_ENABLED", True):
             try:
                 for text in poc_profile.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля POC")
+                scan_stats.note_fail("poc"); log.exception("Ошибка модуля POC")
 
         invalidated_order_blocks = []
         if getattr(cfg, "ORDER_BLOCK_ENABLED", True):
@@ -862,21 +992,21 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
                 invalidated_order_blocks = order_block.pop_invalidated_blocks()
             except Exception:
-                log.exception("Ошибка модуля Order Block")
+                scan_stats.note_fail("order_block"); log.exception("Ошибка модуля Order Block")
 
         if getattr(cfg, "BREAKER_BLOCK_ENABLED", True):
             try:
                 for text in breaker_block.process_market(market, strength, invalidated_order_blocks):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля Breaker Block")
+                scan_stats.note_fail("breaker_block"); log.exception("Ошибка модуля Breaker Block")
 
         if getattr(cfg, "SMART_MONEY_62_26_ENABLED", True):
             try:
                 for text in smart_money_62_26.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля Smart Money 62-26")
+                scan_stats.note_fail("smart_money"); log.exception("Ошибка модуля Smart Money 62-26")
 
         if getattr(cfg, "SILVER_BULLET_ENABLED", True):
             try:
@@ -890,42 +1020,42 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 ):
                     module_alerts.append((0, text))
             except Exception:
-                log.exception("Ошибка модуля ICT Silver Bullet")
+                scan_stats.note_fail("silver_bullet"); log.exception("Ошибка модуля ICT Silver Bullet")
 
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
                 for text in daily_high_low.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля дневного максимума/минимума")
+                scan_stats.note_fail("daily_high_low"); log.exception("Ошибка модуля дневного максимума/минимума")
 
         if getattr(cfg, "CHAIN_ENTRIES_ENABLED", True):
             try:
                 for text in chain_entries.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля Chain Entries")
+                scan_stats.note_fail("chain_entries"); log.exception("Ошибка модуля Chain Entries")
 
         if getattr(cfg, "RETEST_CONFIRMATION_ENABLED", True):
             try:
                 for text in retest_confirmation.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля структурного ретеста")
+                scan_stats.note_fail("retest"); log.exception("Ошибка модуля структурного ретеста")
 
         if getattr(cfg, "FIBONACCI_ENABLED", True):
             try:
                 for text in fibonacci_grid.process_market(market, strength):
                     module_alerts.append((1, text))
             except Exception:
-                log.exception("Ошибка модуля сетки Фибоначчи")
+                scan_stats.note_fail("fibonacci"); log.exception("Ошибка модуля сетки Фибоначчи")
 
         if getattr(cfg, "ATS_REVERSAL_ENABLED", True):
             try:
                 for text in ats_reversal_point.process_market(market, strength):
                     module_alerts.append((0, text))
             except Exception:
-                log.exception("Ошибка модуля ATS Reversal Point")
+                scan_stats.note_fail("ats"); log.exception("Ошибка модуля ATS Reversal Point")
 
         if getattr(cfg, "FIB_SMC_ENABLED", True):
             try:
@@ -939,7 +1069,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 ):
                     module_alerts.append((0, text))
             except Exception:
-                log.exception("Ошибка модуля Fib+SMC")
+                scan_stats.note_fail("fib_smc"); log.exception("Ошибка модуля Fib+SMC")
 
         mandatory_level_breakouts: list[str] = []
         if getattr(cfg, "LEVELS_ENABLED", True):
@@ -956,14 +1086,14 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     else:
                         module_alerts.append((0, text))
             except Exception:
-                log.exception("Ошибка модуля уровней")
+                scan_stats.note_fail("levels"); log.exception("Ошибка модуля уровней")
 
         if getattr(cfg, "ZIGZAG_SCANNER_ENABLED", True):
             try:
                 for text in zigzag_scanner.process_market(market, strength):
                     module_alerts.append((2, text))
             except Exception:
-                log.exception("Ошибка отдельного ZigZag-сканера")
+                scan_stats.note_fail("zigzag"); log.exception("Ошибка отдельного ZigZag-сканера")
 
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
@@ -974,7 +1104,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     ))
                     module_alerts.append((1 if structural else 3, text))
             except Exception:
-                log.exception("Ошибка сканера паттернов")
+                scan_stats.note_fail("patterns"); log.exception("Ошибка сканера паттернов")
 
         # Все торговые события сначала становятся внутренними кандидатами.
         # Наружу исходная карточка может выйти только после строгого подтверждения
@@ -1035,9 +1165,18 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # AMD уже будет отправлен обязательным потоком ниже, поэтому повторно
         # не участвует в ранжировании и не может быть вытеснен/задублирован.
 
-        # ZIP 27: event-driven delivery. No shared top-3 H1 budget.
-        # Each module emits only after its own confirmation/anti-spam logic.
-        selected_alerts = list(module_alerts)
+        # Верхний предел новых карточек за H1. 0 = без лимита.
+        # AMD и обязательный пробой уровня идут отдельно и лимит не едят.
+        hourly_cap = int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 7) or 0)
+        if hourly_cap > 0:
+            selected_alerts = [(0, text) for text in select_trade_alerts(module_alerts, limit=hourly_cap)]
+        else:
+            selected_alerts = list(module_alerts)
+        if scan_stats.abort_delivery():
+            selected_alerts = []
+            mandatory_amd_alerts = []
+            mandatory_level_breakouts = []
+            log.error("SCAN_TRADE_CARDS_SUPPRESSED reason=too_many_scanner_failures")
         # Повторяем карточки, чья предыдущая отправка временно не удалась.
         # Они не расходуют лимит новых исходных сигналов.
         await _flush_source_outbox(context.application, int(chat_id), state)
@@ -1111,134 +1250,10 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             cpi_note = newsmod.cpi_pair_guard(pair_for_cpi, cpi_events) if pair_for_cpi else ""
             if cpi_note and cpi_note not in text:
                 text = text.rstrip() + "\n\n" + cpi_note
-            source_image = None
-            if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
-                try:
-                    source_image = disbalance.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Disbalance")
-            if "IMBALANCE —" in text:
-                try:
-                    source_image = imbalance.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Imbalance/FVG")
-            if "↕️ ZIGZAG —" in text:
-                try:
-                    source_image = zigzag_scanner.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения ZigZag")
+            source_image = _source_image_for(text, source_text)
+            await _deliver_trade_card(context.application, int(chat_id), text, source_image)
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
-                try:
-                    source_image = patterns.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения паттерна")
-            if "🎯 AMD / POWER OF THREE" in text:
-                try:
-                    source_image = amd_power_of_three.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения AMD")
-            if "🕯 CRT — CANDLE RANGE THEORY" in text:
-                try:
-                    source_image = crt_candle_range.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения CRT")
-            if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in text:
-                try:
-                    source_image = fibonacci_grid.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Fibonacci")
-            if "🎯 ATS REVERSAL POINT" in text:
-                try:
-                    source_image = ats_reversal_point.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения ATS Reversal Point")
-            if "🧬 FIB + SMC —" in text:
-                try:
-                    source_image = fib_smc.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Fib+SMC")
-            if "🎯 POC —" in text:
-                try:
-                    source_image = poc_profile.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения POC")
-            if "🧱 РЕТЕСТ ORDER BLOCK" in text:
-                try:
-                    source_image = order_block.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Order Block")
-            if "🔄 BREAKER BLOCK ПОДТВЕРЖДЁН" in text:
-                try:
-                    source_image = breaker_block.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Breaker Block")
-            if "🥈 ICT SILVER BULLET —" in text:
-                try:
-                    source_image = silver_bullet_ict.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения ICT Silver Bullet")
-            if "🏦 SMART MONEY 62-26" in text:
-                try:
-                    source_image = smart_money_62_26.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Smart Money 62-26")
-            if "СНЯТИЕ ЛИКВИДНОСТИ" in text.upper():
-                try:
-                    source_image = liquidity_sweep.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения снятия ликвидности")
-            if "РЕТЕСТ" in text.upper() and "ORDER BLOCK" not in text.upper() and "УРОВНЯ" not in text.upper():
-                try:
-                    source_image = retest_confirmation.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Retest")
-            if "⛓️ CHAIN ENTRY" in text:
-                try:
-                    source_image = chain_entries.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Chain Entry")
-            if ("📅 ПРОБОЙ PDH" in text or "📅 ПРОБОЙ PDL" in text or
-                    "📅 СНЯТИЕ PDH И ВОЗВРАТ" in text or "📅 СНЯТИЕ PDL И ВОЗВРАТ" in text):
-                try:
-                    source_image = daily_high_low.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Daily High/Low")
-            if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in text:
-                try:
-                    source_image = consolidation_zone.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Consolidation Zone")
-            if "🚀 ВЫХОД ИЗ ФАЗЫ" in text or "📦 ФАЗА " in text:
-                try:
-                    source_image = accumulation_distribution.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения фазы накопления/распределения")
-            if any(tag in text for tag in (
-                "📍 СИЛЬНЫЙ УРОВЕНЬ", "↘️ ОТБОЙ ОТ СОПРОТИВЛЕНИЯ",
-                "↗️ ОТБОЙ ОТ ПОДДЕРЖКИ", "⚡ ПРОБОЙ УРОВНЯ",
-                "📌 УДЕРЖАНИЕ ПОДТВЕРЖДЕНО", "↘️ ЛОЖНЫЙ ПРОБОЙ СОПРОТИВЛЕНИЯ",
-                "↗️ ЛОЖНЫЙ ПРОБОЙ ПОДДЕРЖКИ", "🔄 РЕТТЕСТ УРОВНЯ",
-                "🔄 СМЕНА РОЛИ УРОВНЯ", "❌ УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН",
-            )):
-                try:
-                    source_image = levels.image_for_alert(source_text)
-                except Exception:
-                    log.exception("Подготовка изображения Levels")
-            if source_image is not None:
-                # Текущая карточка короче лимита Telegram для подписи к фото.
-                # Защитный вариант сохраняет полный текст при будущих расширениях.
-                if len(text) <= 1000:
-                    await context.application.bot.send_photo(
-                        chat_id=int(chat_id), photo=source_image, caption=text)
-                else:
-                    await context.application.bot.send_photo(
-                        chat_id=int(chat_id), photo=source_image,
-                        caption="📊 Сценарий подтверждён · полный разбор следующим сообщением")
-                    await _send_parts(context.application, int(chat_id), text)
-                if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
-                    patterns.mark_card_delivered(text)
-            else:
-                await _send_parts(context.application, int(chat_id), text)
+                patterns.mark_card_delivered(text)
             _mark_event_delivered(state, source_event_id)
             _ack_source(state, source_text)
             save_state(state)
@@ -1389,7 +1404,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Отправка отчёта журнала")
 
         save_state(state)
-        log.info("Скан %s OK top=%s", datetime.now(timezone.utc).strftime("%H:%M"), rank[0][0] if rank else "-")
+        log.info(
+            "Скан %s OK top=%s scanners_failed=%s/%s",
+            datetime.now(timezone.utc).strftime("%H:%M"),
+            rank[0][0] if rank else "-",
+            scan_stats.failed,
+            scan_stats.ran,
+        )
     except Exception:
         log.exception("Ошибка скана")
 
@@ -1397,6 +1418,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     token = env("TELEGRAM_TOKEN")
     env("TWELVE_DATA_API_KEY")
+    state_dir = os.getenv("STATE_DIR", "").strip()
+    if state_dir:
+        dest = Path(state_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        log.info("STATE_DIR=%s persist=%s", dest, dest / "state.json")
+    else:
+        log.warning(
+            "STATE_DIR не задан: state.json рядом с кодом пропадёт после рестарта контейнера"
+        )
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))

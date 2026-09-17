@@ -32,6 +32,8 @@ STRENGTH_LOOKBACK = 1
 STRENGTH_RANK_JUMP = 2
 # Автосообщение — только когда закрылась новая H1, не чаще раза за эту свечу.
 STRENGTH_REPORT_EVERY_HOURS = 1
+# Порог силы пары для decide_signal / старого маршрута /now.
+# Финальный вход Master Direction использует MASTER_STRENGTH_MIN_GAP (ниже).
 PAIR_STRENGTH_MIN = 0.20
 # Лидер брифинга не выбирается при практически равной силе валют.
 BRIEFING_LEADER_MIN_STRENGTH_GAP = 0.05
@@ -39,6 +41,12 @@ BRIEFING_LEADER_MIN_STRENGTH_GAP = 0.05
 SCAN_EVERY_MINUTES = 1
 # Latency policy: scan every minute so a freshly CLOSED M5/M15 candle is processed
 # promptly; this is still well below the configured paid-plan request budget.
+# Полный скан торгует только при синхронной корзине 7 мажоров на рабочих ТФ.
+MARKET_REQUIRE_COMPLETE = True
+MARKET_REQUIRED_TFS = ("H1", "M15", "M5", "H4")
+MARKET_MIN_CLOSED_H1 = 20
+# Если доля сканеров с исключением выше порога — торговые карточки в этот тик не шлём.
+SCAN_FAIL_ABORT_RATIO = 0.35
 # Автоматические сканы и уведомления: только понедельник–пятница.
 # Номера дней Python: понедельник=0, воскресенье=6.
 AUTOMATIC_WEEKDAYS_ONLY = True
@@ -116,7 +124,10 @@ LTF_MIN_AGREE = 2
 SIGNAL_COOLDOWN_HOURS = 6
 # Единый бюджет для всех торговых модулей после одной закрытой H1.
 # Часовой брифинг и новостные сообщения в этот лимит не входят.
-MAX_MODULE_ALERTS_PER_H1 = 0  # ZIP 28: independent event-driven module delivery
+# Верхний предел НОВЫХ торговых карточек модулей за одну закрытую H1
+# (не обещание «будет ровно N»). 0 = без лимита (опасно: флуд).
+# Обязательные AMD / пробой уровня в этот бюджет не входят.
+MAX_MODULE_ALERTS_PER_H1 = 7
 SIGNAL_JOURNAL_ENABLED = True
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
@@ -287,7 +298,9 @@ MOVEMENT_PROGRESS_MIN_CHANGE_PCT = 8
 # Неотправленный модульный сигнал ждёт подтверждения максимум 4 закрытых H1.
 # Торговый кандидат не может становиться «новым входом» спустя несколько часов.
 # 45 минут достаточно для согласования закрытых M15 и ближайшей H1-картины.
-SIGNAL_CANDIDATE_TTL_HOURS = 4.0  # Master context memory only; never delays source/Navigator delivery
+# Память Master Direction: неотправленный кандидат живёт до 4 закрытых часов.
+# Это НЕ задержка доставки исходной карточки — только контекст для Navigator.
+SIGNAL_CANDIDATE_TTL_HOURS = 4.0
 # Одно предупреждение перед структурной целью; промежуточные проценты не спамят.
 SIGNAL_NEAR_TARGET_PCT = 85
 # Экстремумы H4/D1 ближе этого расстояния объединяются в одну цель TR.

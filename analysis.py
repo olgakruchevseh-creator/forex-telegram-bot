@@ -335,6 +335,40 @@ def rank_currencies(strength: dict[str, float]) -> list[tuple[str, float]]:
     return sorted(strength.items(), key=lambda x: x[1], reverse=True)
 
 
+def market_coverage(market: dict[str, dict[str, list]]) -> dict:
+    """Синхронность корзины: все пары и рабочие ТФ должны быть на месте.
+
+    Неполная корзина ломает силу валют (валюта без пары получает 0) и
+    даёт ложные 2-из-3 на младших ТФ.
+    """
+    required_tfs = tuple(getattr(cfg, "MARKET_REQUIRED_TFS", ("H1", "M15", "M5", "H4")))
+    min_h1 = int(getattr(cfg, "MARKET_MIN_CLOSED_H1", 20))
+    missing: list[str] = []
+    short_h1: list[str] = []
+    present = 0
+    expected = len(cfg.PAIRS) * len(required_tfs)
+    for symbol in cfg.PAIRS:
+        tfs = market.get(symbol) or {}
+        for tf_key in required_tfs:
+            candles = tfs.get(tf_key) or []
+            if not candles:
+                missing.append(f"{symbol}:{tf_key}")
+                continue
+            present += 1
+            if tf_key == "H1":
+                closed = closed_candles(candles)
+                if len(closed) < min_h1:
+                    short_h1.append(f"{symbol}:{len(closed)}")
+    complete = not missing and not short_h1
+    return {
+        "complete": complete,
+        "present": present,
+        "expected": expected,
+        "missing": missing,
+        "short_h1": short_h1,
+    }
+
+
 def analyze_tf(tf_key: str, label: str, candles: list[Candle]) -> Optional[TfView]:
     if len(candles) < 20:
         return None
