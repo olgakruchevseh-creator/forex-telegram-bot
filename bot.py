@@ -60,6 +60,7 @@ import signal_navigator
 import signal_journal
 import decision_journal
 import replay_calibration
+import daily_calibration_report
 import signal_context
 import session_projection_reports
 try:
@@ -1463,13 +1464,21 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("SESSION_REPORT_SCAN_FAILED")
 
-        if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
+        if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True) and getattr(cfg, "SIGNAL_JOURNAL_REPORTS_ENABLED", False):
             try:
                 for report_id, report_text in signal_journal.pending_reports(datetime.now(timezone.utc)):
                     await _send_parts(context.application, int(chat_id), report_text)
                     signal_journal.mark_report_sent(report_id)
             except Exception:
                 log.exception("Отправка отчёта журнала")
+
+        if getattr(cfg, "DAILY_CALIBRATION_REPORT_ENABLED", True):
+            try:
+                for report_id, report_text in daily_calibration_report.pending_reports(datetime.now(timezone.utc)):
+                    await _send_parts(context.application, int(chat_id), report_text)
+                    daily_calibration_report.mark_report_sent(report_id)
+            except Exception:
+                log.exception("Отправка Daily Calibration Report")
 
         save_state(state)
         log.info(

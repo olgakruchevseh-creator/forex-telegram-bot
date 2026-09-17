@@ -135,11 +135,17 @@ SIGNAL_COOLDOWN_HOURS = 6
 # После склейки одной идеи на пару 4 разных пары за H1 — потолок, не квота.
 MAX_MODULE_ALERTS_PER_H1 = 4
 SIGNAL_JOURNAL_ENABLED = True
+# Legacy journal still records outcomes, but its separate daily/weekly Telegram summaries are disabled.
+# Daily Calibration Report is the single statistical Telegram report.
+SIGNAL_JOURNAL_REPORTS_ENABLED = False
 # Passive calibration dataset; never sends Telegram messages or changes scanner decisions.
 DECISION_JOURNAL_ENABLED = True
 # Passive replay/calibration: observe outcomes only; never changes live verdicts.
 REPLAY_CALIBRATION_ENABLED = True
 REPLAY_JOURNAL_SCAN_LIMIT = 4000
+# One compact end-of-trading-day calibration report; reporting only.
+DAILY_CALIBRATION_REPORT_ENABLED = True
+DAILY_CALIBRATION_REPORT_HM = (22, 35)
 JOURNAL_TARGET_ATR = 1.0
 JOURNAL_INVALIDATION_ATR = 0.75
 # Время Europe/Amsterdam; скан отправит отчёт в ближайший 5-минутный запуск.

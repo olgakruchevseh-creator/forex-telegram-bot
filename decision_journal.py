@@ -39,6 +39,17 @@ def _targets(text):
  out={}
  for n,p in re.findall(r'\b(TR[123])\b[^\d]*(\d+\.\d+)',text or '',re.I): out[n.upper()]=float(p)
  return out
+
+def _tf(text):
+ m=re.search(r'(?<![A-Z0-9])(W1|D1|H4|H1|M15|M5)(?![A-Z0-9])', text or '', re.I)
+ return m.group(1).upper() if m else ''
+
+def _session(local_dt):
+ h=local_dt.hour
+ if 0 <= h < 8: return 'ASIA'
+ if 8 <= h < 14: return 'EUROPE'
+ if 14 <= h < 22: return 'US'
+ return 'OFF_HOURS'
 def _freshness(by_tf):
  out={}; now=_now()
  for tf,mins in TF_MIN.items():
@@ -66,7 +77,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
  pair=signal_context.pair_of(text); side=signal_context.side_of(text); source=signal_context.source_name(text)
  sources=[source]+[signal_context.source_name(x) for x in (allies or [])]
  sources=list(dict.fromkeys(sources)); by_tf=(market or {}).get(pair) or {}; direction=1 if side=='LONG' else -1 if side=='SHORT' else 0
- now=_now(); snap={}
+ now=_now(); local_now=now.astimezone(ZoneInfo(getattr(cfg,'LOCAL_TZ_NAME','Europe/Amsterdam'))); snap={}
  if pair and direction:
   try: snap=market_state.build(pair,by_tf,direction).as_dict()
   except Exception: log.exception('DECISION_JOURNAL_MARKET_STATE_SKIPPED pair=%s',pair)
@@ -74,7 +85,10 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
  return {'schema':1,'event_id':hashlib.sha256(event_basis.encode()).hexdigest()[:24],
   'recorded_utc':now.isoformat(timespec='seconds'),'recorded_local':_local(now),'status':status,'reason':reason,
   'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(sources),
-  'quality':_num(text,'Качество'),'probability':_num(text,'Вероятность'),'confirmation_price':_price(text,['Подтверждение','Закрытие','close']),
+  'quality':_num(text,'Качество'),'probability':_num(text,'Вероятность'),'timeframe':_tf(text),'session':_session(local_now),
+  'entry_timing':('late' if str(reason).startswith('late_') else 'early' if (ctx or {}).get('progress') is not None and float((ctx or {}).get('progress') or 0)<=15 else 'timely'),
+  'residual_potential_pct':(round(max(0.0,100.0-float((ctx or {}).get('progress'))),1) if (ctx or {}).get('progress') is not None else None),
+  'confirmation_price':_price(text,['Подтверждение','Закрытие','close']),
   'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text),
   'tf_snapshot':_freshness(by_tf),'context_gate':ctx or {},'market_state':snap,
   'strength_snapshot':{k:strength.get(k) for k in pair.split('/') if k in (strength or {})} if pair else {}}
