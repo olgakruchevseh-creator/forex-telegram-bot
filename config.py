@@ -407,6 +407,10 @@ PATTERN_CHART_IMAGES_ENABLED = True
 PATTERN_CHART_LOOKBACK = 55
 PATTERN_NEWS_BEFORE_MINUTES = 60
 PATTERN_NEWS_AFTER_MINUTES = 30
+# Structural pattern late-entry/residual-potential guard.
+PATTERN_LATE_MIN_REMAINING_ATR = 0.45
+PATTERN_LATE_MIN_REMAINING_RATIO = 0.35
+PATTERN_LATE_MAX_REALIZED_RATIO = 0.65
 # Гармоническая геометрия сама по себе не является торговым сигналом.
 # Для отправки требуется подтвержденный импульс H1 и слом структуры M15,
 # поддержанные относительной силой валют.

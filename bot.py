@@ -1063,6 +1063,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if not (_alert_pair(source_text) and _direct_signal_side(source_text)):
                     significant_alerts.append(source_text)
                     continue
+                # Pattern Scanner owns its structural residual-potential/late-entry gate.
+                # Once the FIRST confirming close is valid, deliver it immediately; the
+                # generic Navigator horizon gate must not turn that event into a delayed card.
+                if "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in source_text:
+                    significant_alerts.append(source_text)
+                    continue
                 try:
                     significance = signal_navigator.assess_new_signal_significance(
                         source_text, market, strength

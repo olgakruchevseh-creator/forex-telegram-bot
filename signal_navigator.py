@@ -394,6 +394,8 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         if source_iso:
             upper = (source_text or "").upper()
             m = re.search(r"(?:ПОДТВЕРЖДЕНИЕ(?:\s+ПРОБОЯ)?|ЗАКРЫТ(?:АЯ|ОЙ)?)[^\n]{0,45}\b(M5|M15|H1|H4|D1)\b", upper)
+            if not m and "ПАТТЕРН ПОДТВЕРЖДЁН" in upper:
+                m = re.search(r"^ТАЙМФРЕЙМ:\s*(M5|M15|H1|H4|D1)\b", upper, re.M)
             source_tf = m.group(1) if m else None
             tf_min = {"M5":5,"M15":15,"H1":60,"H4":240,"D1":1440}.get(source_tf or "")
             if tf_min:

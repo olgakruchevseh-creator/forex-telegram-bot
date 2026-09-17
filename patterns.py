@@ -175,12 +175,12 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     # Head & shoulders / inverse H&S with closed neckline break.
     if len(highs) >= 3 and highs[-2][1] > highs[-3][1] and highs[-2][1] > highs[-1][1] and abs(highs[-3][1]-highs[-1][1]) <= av*.65:
         necks = [p for i,p in lows if highs[-3][0] < i < highs[-1][0]]
-        if necks and c.close < min(necks):
-            _add(out, "Голова и плечи", "SHORT", tf, 91, 86, "Правое плечо завершено; линия шеи пробита закрытой свечой.", min(necks), c)
+        if necks and prev.close >= min(necks) and c.close < min(necks):
+            _add(out, "Голова и плечи", "SHORT", tf, 91, 86, "Правое плечо завершено; первая подтверждающая свеча закрылась ниже линии шеи.", min(necks), c)
     if len(lows) >= 3 and lows[-2][1] < lows[-3][1] and lows[-2][1] < lows[-1][1] and abs(lows[-3][1]-lows[-1][1]) <= av*.65:
         necks = [p for i,p in highs if lows[-3][0] < i < lows[-1][0]]
-        if necks and c.close > max(necks):
-            _add(out, "Перевёрнутая голова и плечи", "LONG", tf, 91, 86, "Правое плечо завершено; линия шеи пробита закрытой свечой.", max(necks), c)
+        if necks and prev.close <= max(necks) and c.close > max(necks):
+            _add(out, "Перевёрнутая голова и плечи", "LONG", tf, 91, 86, "Правое плечо завершено; первая подтверждающая свеча закрылась выше линии шеи.", max(necks), c)
     return out
 
 
@@ -448,7 +448,75 @@ def _pattern_allowed(p: Pattern, context_side: str) -> bool:
     return bool(context_side) and p.side == context_side
 
 
-def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "") -> str:
+def _pattern_close_dt(pattern: Pattern) -> datetime | None:
+    """Фактический момент закрытия подтверждающей свечи паттерна."""
+    try:
+        opened = datetime.fromisoformat(str(pattern.dt).replace("Z", "+00:00"))
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        return opened + timedelta(minutes=TF_MINUTES[pattern.tf])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _pattern_origin(pattern: Pattern, bars: list[Candle]) -> float:
+    """Ближайшая структурная точка, от которой измеряется ход к trigger/neckline."""
+    if not bars:
+        return float(pattern.level)
+    piv = _alternating_pivots(_pivots(bars[:-1], max(2, cfg.PATTERN_PIVOT.get(pattern.tf, 3))))
+    wanted = "L" if pattern.side == "LONG" else "H"
+    matches = [float(price) for _i, price, kind in piv if kind == wanted]
+    if matches:
+        return matches[-1]
+    recent = bars[-20:-1] or bars[:-1]
+    return (min(float(b.low) for b in recent) if pattern.side == "LONG"
+            else max(float(b.high) for b in recent))
+
+
+def _residual_potential(pattern: Pattern, by_tf: dict) -> dict:
+    """Late-entry guard for structural/chart patterns.
+
+    The first confirming close is always eligible.  If the detector sees the same
+    setup only after later candles have already travelled most of its measured
+    move, it stays internal instead of creating a late Telegram entry.
+    """
+    if pattern.name in CANDLE_PATTERN_NAMES or pattern.name.startswith("Гармонический"):
+        return {"eligible": True, "reason": "not_structural"}
+    bars = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
+    if len(bars) < 10:
+        return {"eligible": True, "reason": "insufficient_data"}
+    confirmation_i = next((i for i, b in enumerate(bars) if str(b.dt) == str(pattern.dt)), None)
+    if confirmation_i is None:
+        return {"eligible": True, "reason": "confirmation_not_found"}
+    confirmation = bars[confirmation_i]
+    # Critical rule: never wait beyond the first valid neckline/trigger close.
+    if confirmation_i == len(bars) - 1:
+        return {"eligible": True, "reason": "first_confirmation_close"}
+    av = atr(bars[:confirmation_i + 1], 14) or _range(confirmation)
+    origin = _pattern_origin(pattern, bars[:confirmation_i + 1])
+    trigger = float(pattern.level)
+    confirmation_close = float(confirmation.close)
+    current = float(bars[-1].close)
+    direction = 1 if pattern.side == "LONG" else -1
+    measured = abs(trigger - origin)
+    if measured < av * .45:
+        measured = av * .45
+    realized = max(0.0, (current - trigger) * direction)
+    remaining = max(0.0, measured - realized)
+    realized_ratio = realized / measured if measured > 0 else 1.0
+    min_remaining = max(av * float(getattr(cfg, "PATTERN_LATE_MIN_REMAINING_ATR", .45)),
+                        measured * float(getattr(cfg, "PATTERN_LATE_MIN_REMAINING_RATIO", .35)))
+    eligible = remaining >= min_remaining and realized_ratio < float(getattr(cfg, "PATTERN_LATE_MAX_REALIZED_RATIO", .65))
+    return {
+        "eligible": eligible,
+        "reason": "residual_ok" if eligible else "late_entry_low_residual",
+        "origin": origin, "trigger": trigger, "confirmation_close": confirmation_close,
+        "current": current, "atr": av, "realized": realized, "remaining": remaining,
+        "realized_ratio": realized_ratio,
+    }
+
+
+def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", by_tf: dict | None = None) -> str:
     price = f"{p.level:.3f}" if "JPY" in symbol else f"{p.level:.5f}"
     side_icon = "🟢" if p.side == "LONG" else "🔴"
     if p.name in CANDLE_PATTERN_NAMES and context_side and p.side != context_side:
@@ -461,10 +529,16 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "") -
     else:
         advantage = "преимущество покупателей" if p.side == "LONG" else "преимущество продавцов"
         meaning = f"{advantage} после подтверждения закрытой свечой"
+    close_dt = _pattern_close_dt(p)
+    close_time = close_dt.astimezone(__import__("zoneinfo").ZoneInfo("Europe/Amsterdam")).strftime("%d.%m.%Y · %H:%M") if close_dt else ""
+    confirmation_close = _trigger_close(p, by_tf or {})
+    close_price = (f"{confirmation_close:.3f}" if "JPY" in symbol else f"{confirmation_close:.5f}") if confirmation_close else ""
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "🧩 ПАТТЕРН ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {symbol}", f"Паттерн: {p.name}", f"Таймфрейм: {p.tf} ({TF_LABEL[p.tf]})",
         f"Направление: {p.side} {side_icon}", f"Качество: {p.quality}/100", f"Вероятность: {p.confidence}%",
+        *([f"🕐 Время закрытия: {close_time}"] if close_time else []),
+        *([f"Цена закрытия: {close_price}"] if close_price else []),
         f"Ключевой уровень: {price}",
         *( [f"Новости: {news_note}"] if news_note else [] ),
         "", f"Факт: {p.fact}", f"Что означает: {meaning}."
@@ -669,12 +743,21 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
                 if key in sent:
                     continue
+                residual = _residual_potential(p, by_tf)
+                if not residual.get("eligible", True):
+                    # Mark the historical event as consumed: do not leak it later merely
+                    # because current price changes. Geometry remains in observed state.
+                    sent[key] = p.dt
+                    log.info("PATTERN_LATE_ENTRY_BLOCKED pair=%s tf=%s pattern=%s realized=%.2f remaining=%.2f atr=%.5f",
+                             symbol, p.tf, p.name, float(residual.get("realized", 0)),
+                             float(residual.get("remaining", 0)), float(residual.get("atr", 0)))
+                    continue
                 # Новости не стирают уже сформированную фигуру. Они снижают оценку
                 # уверенности и явно предупреждают о риске ложного продолжения.
                 if penalty:
                     p = Pattern(p.name, p.side, p.tf, p.quality, max(1, p.confidence-penalty),
                                 p.fact, p.level, p.dt)
-                text = _fmt(symbol, p, context_side, news_note)
+                text = _fmt(symbol, p, context_side, news_note, by_tf)
                 messages.append(text)
                 _PENDING_CARDS[text] = (symbol, p, freeze_by_tf(by_tf))
                 sent[key] = p.dt
