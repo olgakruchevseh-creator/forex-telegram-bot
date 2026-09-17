@@ -109,6 +109,33 @@ def _module_evidence(symbol: str, side: int, alerts: list[str]) -> tuple[list[st
     return aligned, opposite
 
 
+
+def _evidence_family(text: str) -> str:
+    """Collapse correlated confirmations so one market fact is one vote."""
+    upper = (text or "").upper()
+    if any(x in upper for x in ("QUASIMODO", "MSS", "CHOCH", "ZIGZAG", "СТРУКТУР")):
+        return "structure"
+    if any(x in upper for x in ("BALANCED PRICE RANGE", "BPR", "IMBALANCE", "ИМБАЛАНС", "ДИСБАЛАНС", "FVG")):
+        return "imbalance"
+    if any(x in upper for x in ("СНЯТИЕ ЛИКВИДНОСТИ", "SILVER BULLET", "PDH", "PDL", "EQH", "EQL")):
+        return "liquidity"
+    if any(x in upper for x in ("ORDER BLOCK", "BREAKER BLOCK")):
+        return "blocks"
+    if any(x in upper for x in ("CRT", "POWER OF THREE", "AMD")):
+        return "range_manipulation"
+    if any(x in upper for x in ("ПАТТЕРН", "PATTERN")):
+        return "pattern"
+    if any(x in upper for x in ("ПРОБОЙ УРОВНЯ", "ОТБОЙ ОТ", "РЕТТЕСТ", "LEVEL")):
+        return "levels"
+    return _evidence_name(text)
+
+def _aligned_families(symbol: str, side: int, alerts: list[str]) -> set[str]:
+    out = set()
+    for text in alerts:
+        if _pair(text) == symbol and _side(text) == side:
+            out.add(_evidence_family(text))
+    return out
+
 def _usd_expected(symbol: str, side: int) -> int:
     base, quote = split_pair(symbol)
     if base == "USD":
@@ -140,22 +167,27 @@ def analyze_symbol(
     events: list[newsmod.NewsEvent] | None = None,
     now_utc: datetime | None = None,
     market: dict | None = None,
+    side_override: int = 0,
 ) -> dict | None:
     stack = build_stack(symbol, by_tf, strength)
     if not stack:
         return None
     senior_side = _consensus(stack, ("D1", "H4", "H1"), 2)
     ltf = _consensus(stack, ("H1", "M15", "M5"), 2)
-    # Закрытые H1/M15/M5 определяют текущее торгуемое движение. Старшие ТФ
-    # определяют его режим: основной импульс, откат либо локальное движение.
-    if not ltf:
-        return None
-    side = ltf
+    # A confirmed module event owns its direction. LTF consensus is context/timing,
+    # not a second independent veto of the same event. Without an event override
+    # the legacy market-only path still follows LTF consensus.
+    if side_override in (-1, 1):
+        side = side_override
+    else:
+        if not ltf:
+            return None
+        side = ltf
 
     gap = stack.strength_gap
     minimum_gap = float(getattr(cfg, "MASTER_STRENGTH_MIN_GAP", 0.08))
-    if (side > 0 and gap < minimum_gap) or (side < 0 and gap > -minimum_gap):
-        return None
+    directed_gap = gap * side
+    strength_conflict = directed_gap < minimum_gap
 
     zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
     irl = htf_irl.analyze_symbol(symbol, by_tf, side)
@@ -176,6 +208,7 @@ def analyze_symbol(
         return None
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     aligned, opposite = _module_evidence(symbol, side, alerts)
+    evidence_families = _aligned_families(symbol, side, alerts)
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
         return None
     now_utc = now_utc or datetime.now(timezone.utc)
@@ -190,11 +223,8 @@ def analyze_symbol(
     conflict_groups = sum((higher_conflict, dxy_conflict))
     if conflict_groups >= 2:
         return None
-    # HTF -> LTF handshake: when HTF IRL supports the candidate, an explicitly
-    # opposite M15/M5 structure blocks timing. Neutral LTF stays internal and
-    # does not create a Telegram WAIT message.
-    if irl and irl.alignment > 0 and ltf_ctx and ltf_ctx.alignment < 0:
-        return None
+    # HTF/LTF disagreement is a quality penalty. The hard guards are reserved
+    # for stale/late/no-residual/unconfirmed events and independent risk facts.
 
     senior_n = sum(stack.views[k].bias == side for k in ("D1", "H4", "H1") if k in stack.views)
     junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
@@ -203,8 +233,10 @@ def analyze_symbol(
     quality += 10 if h4_zz == side else (4 if not h4_zz else 0)
     profile_confirmation = int(zz.get("profile_confirmation") or 0)
     quality += 4 if profile_confirmation > 0 else 0
-    quality += min(10, max(3, int(abs(gap) * 40)))
-    quality += min(10, 7 + max(0, len(aligned) - 1) * 3)
+    quality += min(10, max(0, int(max(0.0, directed_gap) * 40)))
+    # Correlated scanners count once per family. Independent families can add
+    # bounded confluence without turning duplicate descriptions into votes.
+    quality += 7 + min(6, max(0, len(evidence_families) - 1) * 2)
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
     # HTF IRL — контекст местоположения, а не самостоятельный триггер.
@@ -241,6 +273,10 @@ def analyze_symbol(
     # не скрывала одиночное противоречие за значением 94/100.
     if opposite:
         quality -= 5
+    if strength_conflict:
+        quality -= min(8, 3 + int(max(0.0, minimum_gap-directed_gap) * 30))
+    if ltf and ltf != side:
+        quality -= 6
     if dxy_conflict:
         quality -= 4
     if higher_conflict:
@@ -281,9 +317,12 @@ def analyze_symbol(
         "quality": quality,
         "confidence": confidence,
         "gap": gap,
+        "strength_conflict": strength_conflict,
+        "ltf_side": "LONG" if ltf > 0 else ("SHORT" if ltf < 0 else "RANGE"),
         "senior_n": senior_n,
         "junior_n": junior_n,
         "evidence": aligned,
+        "evidence_families": sorted(evidence_families),
         "dxy_bias": dxy_bias,
         "zigzag_h4": "LONG" if h4_zz > 0 else ("SHORT" if h4_zz < 0 else "RANGE"),
         "senior_side": "LONG" if senior_side > 0 else ("SHORT" if senior_side < 0 else "RANGE"),
@@ -372,6 +411,7 @@ def analyze_local_amd_symbol(
         "senior_n": senior_n,
         "junior_n": junior_n,
         "evidence": aligned,
+        "evidence_families": sorted(evidence_families),
         "dxy_bias": 0,
         "local_early": True,
         "zigzag_h4": "RANGE",
@@ -462,15 +502,29 @@ def analyze_market(
     """Возвращает подтверждённые результаты без преждевременного форматирования."""
     candidates = []
     for symbol in cfg.PAIRS:
-        try:
-            result = analyze_symbol(
-                symbol, market.get(symbol) or {}, strength, module_alerts,
-                dxy_bias=dxy_bias, events=events, now_utc=now_utc, market=market,
-            )
-            if result:
-                candidates.append(result)
-        except Exception:
-            log.exception("Master Direction %s", symbol)
+        # Evaluate every direction actually produced by a module. This prevents
+        # a strong confirmed reversal/pullback from disappearing merely because
+        # the current 2/3 LTF consensus still points the other way.
+        sides = []
+        for text in module_alerts:
+            if _pair(text) != symbol:
+                continue
+            found = _side(text)
+            if found in (-1, 1) and found not in sides:
+                sides.append(found)
+        if not sides:
+            sides = [0]
+        for candidate_side in sides:
+            try:
+                result = analyze_symbol(
+                    symbol, market.get(symbol) or {}, strength, module_alerts,
+                    dxy_bias=dxy_bias, events=events, now_utc=now_utc, market=market,
+                    side_override=candidate_side,
+                )
+                if result:
+                    candidates.append(result)
+            except Exception:
+                log.exception("Master Direction %s", symbol)
     candidates.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
     limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 2))
     return candidates[:limit]

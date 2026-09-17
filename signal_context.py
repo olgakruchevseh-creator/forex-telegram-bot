@@ -167,10 +167,9 @@ def verdict(ctx: dict) -> tuple[bool, str]:
 
     if ctx.get("weak_reversal"):
         return False, "weak_reversal"
-    if ctx["junior_n"] < min_junior:
-        return False, "junior_conflict"
-    if ctx["directed_gap"] < min_gap and ctx["mode"] != "PULLBACK":
-        return False, "strength_against"
+    # Partial TF disagreement and ordinary strength mismatch are context, not
+    # independent vetoes. Master already prices them into quality/probability.
+    # Keep hard blocks only for objectively non-executable/false-reversal cases.
     if ctx["progress"] > max_progress and ctx["mode"] != "PULLBACK":
         return False, "late_tr1"
     if ctx["against_h4"] or ctx["mode"] == "PULLBACK":
@@ -181,6 +180,10 @@ def verdict(ctx: dict) -> tuple[bool, str]:
         if ctx["directed_gap"] < -float(getattr(cfg, "CONTEXT_PULLBACK_MAX_OPPOSITE_GAP", 0.12)):
             return False, "pullback_strength_crush"
         return True, "pullback"
+    if ctx["junior_n"] < min_junior:
+        return True, "junior_conflict_soft"
+    if ctx["directed_gap"] < min_gap:
+        return True, "strength_against_soft"
     return True, "impulse" if ctx["mode"] == "IMPULSE" else "local"
 
 
