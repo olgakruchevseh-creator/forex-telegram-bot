@@ -57,7 +57,8 @@ python bot.py
 | Кэш / частота | `ttl_min` у таймфрейма в `TIMEFRAMES` |
 
 Правило старого стека: `decide_signal` в `analysis.py`.
-Финальный торговый контроль: `master_direction.py` + `signal_navigator.py`.
+Финальный торговый контроль: `master_direction.py`.
+В чат: карточка модуля-источника + сопровождение `signal_navigator.py` (TR1–TR3), не два независимых входа.
 
 ## Railway: постоянное состояние
 
@@ -75,6 +76,7 @@ python bot.py
 - `/data/briefing.db` — атомарный замок часового брифинга
 - `/data/levels_state.json` — уровни
 - `/data/patterns_state.json` — паттерны
+- `/data/poc_state.json` — антиспам POC между рестартами
 
 Важно: путь `/data` без подключённого Volume **не** является постоянным хранилищем.
 

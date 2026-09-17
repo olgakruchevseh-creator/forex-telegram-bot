@@ -229,7 +229,7 @@ def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
         pass
 
     structure_votes, structure_conflicts = [], []
-    for module_name in ("ltf_confirmation", "mss", "choch", "propulsion_block", "inducement"):
+    for module_name in ("ltf_confirmation", "mss", "choch", "propulsion_block", "idm"):
         align = _take(module_name, "structure/LTF")
         if align > 0:
             structure_votes.append(module_name)

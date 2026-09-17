@@ -16,7 +16,6 @@ import choch
 import mss
 import erl
 import premium_discount
-import inducement
 import market_regime
 import market_state
 import imd
@@ -167,7 +166,6 @@ def analyze_symbol(
     mss_ctx = mss.analyze_symbol(symbol, by_tf, side)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
-    inducement_ctx = inducement.analyze_symbol(symbol, by_tf, side)
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
     state_ctx = market_state.build(symbol, by_tf, side, events or [], now_utc) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
@@ -225,7 +223,6 @@ def analyze_symbol(
         quality += int(getattr(cfg, "CHOCH_ALIGN_BONUS", 5))
     if erl_ctx and erl_ctx.alignment > 0: quality += int(getattr(cfg, "ERL_ALIGN_BONUS", 3))
     if premium_discount_ctx and premium_discount_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
-    if inducement_ctx and inducement_ctx.alignment > 0: quality += int(getattr(cfg, "IDM_ALIGN_BONUS", 3))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     if idm_sweep_ctx and idm_sweep_ctx.alignment > 0:
@@ -262,7 +259,6 @@ def analyze_symbol(
         quality -= int(getattr(cfg, "CHOCH_CONFLICT_PENALTY", 6))
     if erl_ctx and erl_ctx.alignment < 0: quality -= int(getattr(cfg, "ERL_CONFLICT_PENALTY", 3))
     if premium_discount_ctx and premium_discount_ctx.alignment < 0: quality -= int(getattr(cfg, "PD_CONFLICT_PENALTY", 2))
-    if inducement_ctx and inducement_ctx.alignment < 0: quality -= int(getattr(cfg, "IDM_CONFLICT_PENALTY", 2))
     if imd_ctx and imd_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
     if idm_sweep_ctx and idm_sweep_ctx.alignment < 0:
@@ -306,7 +302,7 @@ def analyze_symbol(
         "mss_alignment": mss_ctx.alignment if mss_ctx else 0,
         "erl": erl.describe(erl_ctx), "erl_alignment": erl_ctx.alignment if erl_ctx else 0,
         "premium_discount": premium_discount.describe(premium_discount_ctx), "pd_alignment": premium_discount_ctx.alignment if premium_discount_ctx else 0,
-        "inducement": inducement.describe(inducement_ctx), "inducement_alignment": inducement_ctx.alignment if inducement_ctx else 0,
+        "inducement": idm.describe(idm_sweep_ctx), "inducement_alignment": idm_sweep_ctx.alignment if idm_sweep_ctx else 0,
         "market_regime": market_regime.describe(regime_ctx),
         "market_regime_weight": regime_weight,
         "imd": imd.describe(imd_ctx),

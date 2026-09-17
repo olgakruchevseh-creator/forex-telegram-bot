@@ -110,11 +110,15 @@ IMD_MIN_MOVE_ATR = 0.20
 IMD_ALIGN_BONUS = 4
 IMD_CONFLICT_PENALTY = 4
 
-# IDM (Inducement): внутренний SMC-фильтр качества входа.
+# IDM (Inducement): один внутренний SMC-фильтр качества входа.
+# Рабочий детектор — idm.py (H1/H4 swing). inducement.py только алиас.
 IDM_ENABLED = True
 IDM_NEAR_ATR = 1.25
 IDM_SWEEP_BONUS = 4
 IDM_UNSWEPT_PENALTY = 3
+IDM_ALIGN_BONUS = IDM_SWEEP_BONUS
+IDM_CONFLICT_PENALTY = IDM_UNSWEPT_PENALTY
+IDM_LOOKBACK = 40
 
 HTF_KEYS = ["W1", "D1", "H4"]
 HTF_MIN_AGREE = 2
@@ -580,13 +584,6 @@ PD_LOOKBACK = 48
 PD_EQ_BAND = 0.08
 PD_ALIGN_BONUS = 2
 PD_CONFLICT_PENALTY = 2
-
-# Inducement / IDM (internal only)
-IDM_ENABLED = True
-IDM_LOOKBACK = 40
-IDM_NEAR_ATR = 1.20
-IDM_ALIGN_BONUS = 3
-IDM_CONFLICT_PENALTY = 2
 
 # MSS — отдельный строгий внутренний Market Structure Shift; без standalone-спама.
 MSS_ENABLED = True

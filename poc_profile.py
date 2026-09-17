@@ -9,8 +9,11 @@ from __future__ import annotations
 from chart_snapshot import freeze_by_tf
 
 import io
+import json
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import config as cfg
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
@@ -19,6 +22,32 @@ log = logging.getLogger("fxbot.poc")
 TF_MINUTES = {"H4": 240, "H1": 60, "M15": 15}
 _LAST_CHART_CARDS: dict[str, tuple[dict, dict]] = {}
 _LAST_KEYS: dict[str, str] = {}
+
+
+def _state_path() -> Path:
+    root = os.getenv("STATE_DIR", "").strip()
+    return (Path(root) if root else Path(__file__).resolve().parent) / "poc_state.json"
+
+
+def _load_keys() -> dict[str, str]:
+    global _LAST_KEYS
+    if _LAST_KEYS:
+        return _LAST_KEYS
+    try:
+        data = json.loads(_state_path().read_text())
+        if isinstance(data, dict):
+            _LAST_KEYS = {str(k): str(v) for k, v in data.items()}
+    except (FileNotFoundError, ValueError, OSError):
+        _LAST_KEYS = {}
+    return _LAST_KEYS
+
+
+def _save_keys() -> None:
+    dest = _state_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_LAST_KEYS, ensure_ascii=False, indent=2))
+    tmp.replace(dest)
 
 
 @dataclass
@@ -148,6 +177,8 @@ def format_message(e: dict) -> str:
 
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     out = []
+    keys = _load_keys()
+    dirty = False
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -155,14 +186,20 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             if not e:
                 continue
             key = f"{e['side']}|{e['dt']}|{e['poc']:.6f}"
-            if _LAST_KEYS.get(symbol) == key:
+            if keys.get(symbol) == key:
                 continue
-            _LAST_KEYS[symbol] = key
+            keys[symbol] = key
+            dirty = True
             text = format_message(e)
             out.append(text)
             _LAST_CHART_CARDS[text] = (e, freeze_by_tf(by_tf))
         except Exception:
             log.exception("POC %s", symbol)
+    if dirty:
+        try:
+            _save_keys()
+        except Exception:
+            log.exception("POC_STATE_SAVE_FAILED")
     return out
 
 
