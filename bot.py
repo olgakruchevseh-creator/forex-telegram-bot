@@ -35,6 +35,7 @@ import levels
 import zigzag_scanner
 import disbalance
 import imbalance
+import bpr
 import accumulation_distribution
 import consolidation_zone
 import amd_power_of_three
@@ -497,6 +498,8 @@ def _source_image_for(text: str, source_text: str):
     try:
         if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
             return disbalance.image_for_alert(source_text)
+        if "⚖️ BPR — BALANCED PRICE RANGE" in text:
+            return bpr.image_for_alert(source_text)
         if "IMBALANCE —" in text:
             return imbalance.image_for_alert(source_text)
         if "↕️ ZIGZAG —" in text:
@@ -920,7 +923,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         module_alerts: list[tuple[int, str]] = []
         scan_stats = ScanStats()
         enabled_flags = (
-            "DISBALANCE_ENABLED", "IMBALANCE_ENABLED", "CONSOLIDATION_ZONE_ENABLED",
+            "DISBALANCE_ENABLED", "IMBALANCE_ENABLED", "BPR_ENABLED", "CONSOLIDATION_ZONE_ENABLED",
             "ACCUMULATION_DISTRIBUTION_ENABLED", "AMD_POWER_OF_THREE_ENABLED",
             "CRT_CANDLE_RANGE_ENABLED", "LIQUIDITY_SWEEP_ENABLED", "POC_ENABLED",
             "ORDER_BLOCK_ENABLED", "BREAKER_BLOCK_ENABLED", "SMART_MONEY_62_26_ENABLED",
@@ -949,6 +952,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("imbalance"); log.exception("Ошибка модуля Imbalance/FVG")
+
+        if getattr(cfg, "BPR_ENABLED", True):
+            try:
+                for text in bpr.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                scan_stats.note_fail("bpr"); log.exception("Ошибка модуля BPR")
 
         if getattr(cfg, "CONSOLIDATION_ZONE_ENABLED", True):
             try:
@@ -1312,6 +1322,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         disbalance.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Disbalance")
+                if "⚖️ BPR — BALANCED PRICE RANGE" in source_text:
+                    try:
+                        bpr.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного BPR")
                 if "IMBALANCE —" in source_text:
                     try:
                         imbalance.mark_delivered(source_text)
