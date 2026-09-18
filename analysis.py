@@ -331,6 +331,51 @@ def currency_strength(series: dict[str, list[Candle]], lookback: int) -> dict[st
     return {c: scores[c] - mean for c in scores}
 
 
+
+def currency_strength_dynamics(
+    series: dict[str, list[Candle]], symbol: str, lookback: int, samples: int = 4,
+) -> dict:
+    """Return noise-resistant H1 history of the relative strength gap for a pair.
+
+    The current strength value remains the basket calculation used elsewhere.
+    This helper repeats the same calculation on several *closed-candle* endpoints,
+    so Navigator can distinguish a persistent change from one isolated jump.
+    It is context only: it never vetoes a confirmed module event by itself.
+    """
+    try:
+        base, quote = split_pair(symbol)
+    except (TypeError, ValueError):
+        return {"gaps": [], "state": "UNKNOWN", "delta": 0.0, "crossed": False}
+    n = max(3, int(samples or 4))
+    closed = {pair: closed_candles(candles) for pair, candles in (series or {}).items()}
+    gaps: list[float] = []
+    # Oldest -> newest. All basket members use the same endpoint offset.
+    for offset in range(n - 1, -1, -1):
+        snapshot = {pair: (bars[:-offset] if offset else bars) for pair, bars in closed.items()}
+        strength = currency_strength(snapshot, lookback)
+        if base not in strength or quote not in strength:
+            continue
+        gaps.append(float(strength[base]) - float(strength[quote]))
+    if len(gaps) < 3:
+        return {"gaps": gaps, "state": "UNKNOWN", "delta": 0.0, "crossed": False}
+
+    noise = float(getattr(cfg, "NAVIGATOR_STRENGTH_DYNAMICS_NOISE", 0.015))
+    cross = float(getattr(cfg, "NAVIGATOR_STRENGTH_CROSS_CONFIRM", 0.025))
+    diffs = [gaps[i] - gaps[i - 1] for i in range(1, len(gaps))]
+    meaningful = [d for d in diffs if abs(d) >= noise]
+    delta = gaps[-1] - gaps[0]
+    state = "STABLE"
+    if len(meaningful) >= 2 and all(d > 0 for d in meaningful[-2:]):
+        state = "RISING"
+    elif len(meaningful) >= 2 and all(d < 0 for d in meaningful[-2:]):
+        state = "FALLING"
+
+    # A risk cross needs persistence: the previous and current samples must both
+    # be beyond the opposite side of zero. A single zero-crossing spike is noise.
+    crossed = ((gaps[-2] >= cross and gaps[-1] >= cross and gaps[0] <= -cross)
+               or (gaps[-2] <= -cross and gaps[-1] <= -cross and gaps[0] >= cross))
+    return {"gaps": gaps, "state": state, "delta": delta, "crossed": crossed}
+
 def rank_currencies(strength: dict[str, float]) -> list[tuple[str, float]]:
     return sorted(strength.items(), key=lambda x: x[1], reverse=True)
 

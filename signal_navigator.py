@@ -18,7 +18,7 @@ import market_state
 import zigzag_scanner
 import next_pivot_projection
 from chart_snapshot import freeze_by_tf
-from analysis import analyze_tf
+from analysis import analyze_tf, currency_strength_dynamics
 
 log = logging.getLogger(__name__)
 
@@ -505,7 +505,7 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
         "zigzag_h4": zz_text, "evidence": [f"{_source_name(source_text)} подтвердил событие"],
         "source_accepted": True, "tf_biases": views,
-        "next_pivot": pivot, "by_tf": by_tf,
+        "next_pivot": pivot, "by_tf": by_tf, "market": market,
     }
     if same_active:
         previous_names = [part.strip() for part in str(active.get("sources") or "").split("·") if part.strip()]
@@ -588,6 +588,41 @@ def _time_horizon_lines(h: dict) -> list[str]:
     return lines
 
 
+
+def _strength_dynamics_context(symbol: str, side: str, by_tf: dict) -> dict:
+    """Translate basket-gap dynamics into Navigator context, never a hard veto."""
+    h1_series = {}
+    # Strength is a basket measure, therefore this helper is normally fed the
+    # whole market via ``master['market']``. Keep a safe empty fallback.
+    market = by_tf if all('/' in str(k) for k in (by_tf or {})) else {}
+    for pair, frames in market.items():
+        h1_series[pair] = (frames or {}).get("H1") or []
+    raw = currency_strength_dynamics(
+        h1_series, symbol, int(getattr(cfg, "STRENGTH_LOOKBACK", 4)),
+        int(getattr(cfg, "NAVIGATOR_STRENGTH_DYNAMICS_SAMPLES", 4)),
+    ) if h1_series else {"gaps": [], "state": "UNKNOWN", "delta": 0.0, "crossed": False}
+    direction = 1 if side == "LONG" else -1
+    gaps = list(raw.get("gaps") or [])
+    directed = [g * direction for g in gaps]
+    delta = float(raw.get("delta") or 0.0) * direction
+    state = str(raw.get("state") or "UNKNOWN")
+    if direction < 0:
+        state = {"RISING": "FALLING", "FALLING": "RISING"}.get(state, state)
+    risk_cross = bool(raw.get("crossed")) and len(directed) >= 2 and directed[-1] < 0 and directed[-2] < 0
+    if risk_cross:
+        label = "⚠️ устойчиво перешла против направления · риск маршрута вырос"
+        adjustment = -3
+    elif state == "RISING" and delta > 0:
+        label = "🟢 преимущество усиливается"
+        adjustment = 2
+    elif state == "FALLING" and delta < 0:
+        label = "🟡 относительная сила последовательно ослабевает"
+        adjustment = -2
+    else:
+        label = "⚪ без устойчивого изменения"
+        adjustment = 0
+    return {**raw, "directed_delta": delta, "label": label, "adjustment": adjustment, "risk_cross": risk_cross}
+
 def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bool = False) -> str:
     side = master["side"]
     icon = "🟢" if side == "LONG" else "🔴"
@@ -617,6 +652,13 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         strength_line = f"• Разница силы {pair_label}: {raw_gap:+.2f} · 🔴 против направления {side}"
     else:
         strength_line = f"• Разница силы {pair_label}: {raw_gap:+.2f} · 🟡 почти равная"
+    strength_dynamic = _strength_dynamics_context(symbol, side, master.get("market") or {})
+    strength_dynamic_line = f"• Динамика силы: {strength_dynamic['label']}"
+    adjustment = int(strength_dynamic.get("adjustment") or 0)
+    if adjustment:
+        master = dict(master)
+        master["quality"] = max(0, min(100, int(master.get("quality") or 0) + adjustment))
+        master["confidence"] = max(0, min(100, int(master.get("confidence") or 0) + adjustment))
     navigator_status = ""
     assessment = f"{icon} направление {side} подтверждено по закрытой H1-свече."
     display_mode = mode_names.get(route["mode"], route["mode"])
@@ -692,6 +734,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"• H1/M15/M5: {master['junior_n']} из 3",
         zz_line,
         strength_line,
+        strength_dynamic_line,
     ]
     if master.get("htf_irl"):
         lines.append(f"• {master['htf_irl']}")
@@ -788,6 +831,7 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
         reversal = bool(previous and previous.get("side") != side)
         result = dict(result)
         result["by_tf"] = pair_market
+        result["market"] = market
         output.append((format_confirmed(result, route, sources, reversal=reversal), sources))
     return output
 

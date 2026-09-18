@@ -33,6 +33,10 @@ STRENGTH_LOOKBACK = 4
 STRENGTH_RANK_JUMP = 2
 # Автосообщение — только когда закрылась новая H1, не чаще раза за эту свечу.
 STRENGTH_REPORT_EVERY_HOURS = 1
+# Navigator: H1 basket-strength dynamics are contextual, never a standalone veto.
+NAVIGATOR_STRENGTH_DYNAMICS_SAMPLES = 4
+NAVIGATOR_STRENGTH_DYNAMICS_NOISE = 0.015
+NAVIGATOR_STRENGTH_CROSS_CONFIRM = 0.025
 # Порог силы пары для decide_signal / старого маршрута /now.
 # Финальный вход Master Direction использует MASTER_STRENGTH_MIN_GAP (ниже).
 PAIR_STRENGTH_MIN = 0.20
