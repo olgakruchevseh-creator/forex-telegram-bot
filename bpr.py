@@ -13,6 +13,7 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+from zone_reaction_confirmation import confirm_zone_reaction
 from analysis import Candle, atr, closed_candles
 from chart_snapshot import freeze_by_tf
 
@@ -109,19 +110,27 @@ def _reaction(zone: BPRZone, bars: list[Candle], by_tf: dict) -> tuple[str, dict
     c = fresh[-1]
     if c.dt == zone.last_seen_dt: return None
     zone.last_seen_dt = c.dt
-    width = max(zone.high-zone.low, 1e-12)
-    touched = c.low <= zone.high and c.high >= zone.low
-    if touched: zone.touch_dt = c.dt
-    # A reaction is allowed only after a real return/touch, never merely because
-    # price is already outside a historical overlap.
-    if not zone.touch_dt: return None
-    recent = fresh[-4:]
-    touched_recently = any(x.dt == zone.touch_dt for x in recent)
-    if not touched_recently: return None
-    long_hold = c.close > zone.high and c.close > c.open
-    short_hold = c.close < zone.low and c.close < c.open
-    side_i = 1 if long_hold else -1 if short_hold else 0
-    if not side_i: return None
+
+    # Touch is internal state only. Candle 2 sweep+reclaim OR Candle 3 recovery
+    # closure may confirm the SAME reaction; they are never independent votes.
+    reactions = []
+    for side_i in (1, -1):
+        r = confirm_zone_reaction(
+            bars, zone.low, zone.high, side_i, created_dt=zone.created_dt,
+            touch_dt=zone.touch_dt,
+            max_touch_age=int(getattr(cfg, "ZONE_REACTION_MAX_TOUCH_AGE", 2)),
+            sweep_lookback=int(getattr(cfg, "ZONE_REACTION_SWEEP_LOOKBACK", 3)),
+            reclaim_buffer_atr=float(getattr(cfg, "ZONE_REACTION_RECLAIM_BUFFER_ATR", .03)),
+            recovery_body_fraction=float(getattr(cfg, "ZONE_REACTION_RECOVERY_BODY_FRACTION", .50)),
+        )
+        if r.touch_dt and (not zone.touch_dt or r.touched):
+            zone.touch_dt = r.touch_dt
+            zone.status = "ZONE_TOUCHED"
+        if r.confirmed:
+            reactions.append((side_i, r))
+    if len(reactions) != 1:
+        return None
+    side_i, reaction = reactions[0]
 
     guard = ohlc_movement.guard_event(by_tf, side_i, 76)
     if not guard.get("allow", True) or guard.get("range_like"):
@@ -130,8 +139,6 @@ def _reaction(zone: BPRZone, bars: list[Candle], by_tf: dict) -> tuple[str, dict
     directional = int(detail.get("directional_bars", 0))
     net_atr = float(detail.get("net_atr", 0.0))
     score = float(guard.get("score", 50.0))
-    # Global policy: don't turn a one-candle twitch into a signal. Three useful
-    # candles are enough; a genuinely large equivalent displacement may qualify sooner.
     multi_bar = directional >= int(getattr(cfg, "BPR_MIN_DIRECTIONAL_BARS", 3))
     equivalent_move = net_atr >= float(getattr(cfg, "BPR_EQUIVALENT_MOVE_ATR", 0.85)) and score >= 68
     if not (multi_bar or equivalent_move):
@@ -143,7 +150,8 @@ def _reaction(zone: BPRZone, bars: list[Candle], by_tf: dict) -> tuple[str, dict
     if zone.delivered_side == side: return None
     zone.delivered_side = side
     zone.status = f"РЕАКЦИЯ {side} ПОДТВЕРЖДЕНА"
-    return side, {"guard": guard, "directional": directional, "net_atr": net_atr, "score": score, "close": c.close, "dt": c.dt}
+    return side, {"guard": guard, "directional": directional, "net_atr": net_atr, "score": score,
+                  "close": reaction.close, "dt": reaction.confirm_dt, "reaction_path": reaction.path}
 
 
 def format_message(zone: BPRZone, side: str, meta: dict) -> str:
@@ -154,7 +162,7 @@ def format_message(zone: BPRZone, side: str, meta: dict) -> str:
         f"💱 Пара: {zone.symbol}", f"📊 Таймфрейм BPR: {zone.tf}", f"Направление: {side}",
         f"📦 Зона BPR: {_price(zone.symbol, zone.low)}–{_price(zone.symbol, zone.high)}",
         "Основа: пересечение противоположных FVG/Imbalance",
-        f"🕯 Подтверждение: возврат в BPR + удержание {side} + OHLC Movement",
+        f"🕯 Подтверждение зоны: {meta.get('reaction_path', 'REACTION')} → OHLC Movement",
         f"🕐 Время закрытия: {meta['dt']}", f"💵 Цена закрытия: {_price(zone.symbol, meta['close'])}",
         f"Движение OHLC: {meta['directional']} направл. свеч. · {meta['net_atr']:.2f} ATR · score {meta['score']:.0f}/100",
         f"Качество: {quality}/100", f"Вероятность: {confidence}%", "",

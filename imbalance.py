@@ -12,6 +12,7 @@ from pathlib import Path
 import config as cfg
 import ohlc_movement
 import displacement
+from zone_reaction_confirmation import confirm_zone_reaction
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.imbalance")
@@ -42,6 +43,9 @@ class FvgZone:
     gap_atr: float = 0.0
     impulse_atr: float = 0.0
     fill_pct: float = 0.0
+    touch_dt: str = ""
+    reaction_path: str = ""
+    reaction_dt: str = ""
 
 
 def _path() -> Path:
@@ -162,7 +166,7 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
     fact = (
         "Трёхсвечная неэффективность сформирована закрытой свечой и подтверждена направлением таймфреймов."
         if event == "new" else
-        "Цена вернулась в FVG и закрылась обратно по основному направлению; реакция подтверждена."
+        "Цена вернулась в FVG; реакция подтверждена через Sweep+Reclaim или Recovery Closure и прошла общие фильтры."
     )
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "", f"Пара: {zone.symbol}",
@@ -171,7 +175,7 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
         f"Состояние: {zone.status}", f"Согласованные ТФ: {' · '.join(zone.aligned)}",
         f"Разница силы валют: {zone.strength_gap:+.2f}",
         f"Размер FVG: {zone.gap_atr:.2f} ATR · импульс: {zone.impulse_atr:.2f} ATR",
-        f"Заполнение зоны: {zone.fill_pct:.0f}%", f"Качество: {zone.quality}/100",
+        f"Заполнение зоны: {zone.fill_pct:.0f}%", f"Подтверждение зоны: {zone.reaction_path or '—'}", f"Качество: {zone.quality}/100",
         f"Вероятность: {zone.confidence}%", "", f"Факт: {fact}"
     ])
 
@@ -261,31 +265,33 @@ def _update_zone(zone: FvgZone, bars: list[Candle]) -> str:
     if c.dt == zone.last_seen_dt:
         return ""
     zone.last_seen_dt = c.dt
-    width = max(zone.high - zone.low, 1e-12)
-    min_penetration = float(getattr(cfg, "IMBALANCE_RETEST_MIN_PENETRATION", 0.20))
-    min_rejection_body = float(getattr(cfg, "IMBALANCE_RETEST_MIN_BODY_RATIO", 0.45))
-    body_ratio = abs(c.close - c.open) / max(c.high - c.low, 1e-12)
+    width = max(zone.high-zone.low, 1e-12)
     if zone.side == "LONG":
-        penetration = max(0.0, min(1.0, (zone.high - c.low) / width)) if c.low <= zone.high else 0.0
-        zone.fill_pct = max(zone.fill_pct, penetration * 100.0)
-        # A close through the far edge means the bullish inefficiency failed.
+        penetration = max(0.0, min(1.0, (zone.high-c.low)/width)) if c.low <= zone.high else 0.0
         if c.close < zone.low:
-            zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"
-            return ""
-        if (not zone.retest_sent and penetration >= min_penetration and c.close > zone.high
-                and c.close > c.open and body_ratio >= min_rejection_body):
-            zone.retest_sent, zone.status = True, "РЕТЕСТ ПОДТВЕРЖДЁН"
-            return "retest"
+            zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"; return ""
     else:
-        penetration = max(0.0, min(1.0, (c.high - zone.low) / width)) if c.high >= zone.low else 0.0
-        zone.fill_pct = max(zone.fill_pct, penetration * 100.0)
+        penetration = max(0.0, min(1.0, (c.high-zone.low)/width)) if c.high >= zone.low else 0.0
         if c.close > zone.high:
-            zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"
-            return ""
-        if (not zone.retest_sent and penetration >= min_penetration and c.close < zone.low
-                and c.close < c.open and body_ratio >= min_rejection_body):
-            zone.retest_sent, zone.status = True, "РЕТЕСТ ПОДТВЕРЖДЁН"
-            return "retest"
+            zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"; return ""
+    zone.fill_pct = max(zone.fill_pct, penetration*100.0)
+
+    reaction = confirm_zone_reaction(
+        bars, zone.low, zone.high, zone.side, created_dt=zone.created_dt, touch_dt=zone.touch_dt,
+        max_touch_age=int(getattr(cfg, "ZONE_REACTION_MAX_TOUCH_AGE", 2)),
+        sweep_lookback=int(getattr(cfg, "ZONE_REACTION_SWEEP_LOOKBACK", 3)),
+        reclaim_buffer_atr=float(getattr(cfg, "ZONE_REACTION_RECLAIM_BUFFER_ATR", .03)),
+        recovery_body_fraction=float(getattr(cfg, "ZONE_REACTION_RECOVERY_BODY_FRACTION", .50)),
+    )
+    if reaction.touch_dt and (not zone.touch_dt or reaction.touched):
+        zone.touch_dt = reaction.touch_dt
+        zone.status = "ZONE_TOUCHED"
+    if not zone.retest_sent and reaction.confirmed:
+        zone.reaction_path = reaction.path
+        zone.reaction_dt = reaction.confirm_dt
+        zone.status = "REACTION_CONFIRMED_INTERNAL"
+    if zone.reaction_dt and not zone.retest_sent:
+        return "reaction_pending"
     return ""
 
 
@@ -307,13 +313,23 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             # Update only zones created by this module after installation.
             for zone in [z for z in stored.values() if z.symbol == symbol]:
                 event = _update_zone(zone, closed_map.get(zone.tf) or [])
-                if event == "retest" and validate_zone(zone, closed_map, strength) and not first:
-                    key = f"{zone.zone_id}|retest"
-                    pending_events[key] = {"zone": asdict(zone), "event": "retest"}
-                    text = format_message(zone, "retest")
-                    if text not in messages:
-                        messages.append(text)
-                    _PENDING_CARDS[text] = (zone, "retest", freeze_by_tf(market.get(symbol) or {}))
+                if event == "reaction_pending" and validate_zone(zone, closed_map, strength):
+                    side_i = 1 if zone.side == "LONG" else -1
+                    og = ohlc_movement.guard_event(market.get(symbol) or {}, side_i, zone.quality)
+                    detail = (og.get("details") or {}).get(zone.tf) or (og.get("details") or {}).get("M15") or {}
+                    directional = int(detail.get("directional_bars", 0)); net = float(detail.get("net_atr", 0.0))
+                    score = float(og.get("score", 50.0))
+                    meaningful = directional >= int(getattr(cfg, "IMBALANCE_REACTION_MIN_DIRECTIONAL_BARS", 3))
+                    meaningful = meaningful or (net >= float(getattr(cfg, "IMBALANCE_REACTION_EQUIVALENT_MOVE_ATR", .85)) and score >= 68)
+                    early = ohlc_movement.early_entry_check(market.get(symbol) or {}, side_i)
+                    if og.get("allow", True) and not og.get("range_like") and meaningful and early.get("allow", True):
+                        zone.retest_sent = True; zone.status = "РЕТЕСТ ПОДТВЕРЖДЁН"
+                        if not first:
+                            key = f"{zone.zone_id}|retest|{zone.reaction_dt[:19]}"
+                            pending_events[key] = {"zone": asdict(zone), "event": "retest"}
+                            text = format_message(zone, "retest")
+                            if text not in messages: messages.append(text)
+                            _PENDING_CARDS[text] = (zone, "retest", freeze_by_tf(market.get(symbol) or {}))
             for tf in MAIN_TFS:
                 zone = newest_fvg(symbol, tf, closed_map[tf])
                 if not zone or zone.zone_id in stored:
