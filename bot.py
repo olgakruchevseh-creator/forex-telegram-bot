@@ -37,6 +37,7 @@ import disbalance
 import imbalance
 import bpr
 import quasimodo_engine
+import killer_engine
 import accumulation_distribution
 import consolidation_zone
 import amd_power_of_three
@@ -506,6 +507,8 @@ def _source_image_for(text: str, source_text: str):
             return bpr.image_for_alert(source_text)
         if "🔄 QUASIMODO — QM" in text:
             return quasimodo_engine.image_for_alert(source_text)
+        if "🏹🎯 KILLER" in source_text:
+            return killer_engine.image_for_alert(source_text)
         if "IMBALANCE —" in text:
             return imbalance.image_for_alert(source_text)
         if "↕️ ZIGZAG —" in text:
@@ -1147,6 +1150,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # по той же паре и стороне. Navigator идёт отдельным сопровождением TR.
         source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts + mandatory_level_breakouts]
         raw_alerts = [text for _priority, text in source_alerts]
+        # KILLER is a meta-selector over confirmed module facts; it never invents a setup.
+        if getattr(cfg, "KILLER_ENABLED", True):
+            try:
+                for text in killer_engine.process_candidates(raw_alerts, market, strength):
+                    module_alerts.append((-2, text))
+                    source_alerts.append((-2, text))
+                    raw_alerts.append(text)
+            except Exception:
+                scan_stats.note_fail("killer"); log.exception("Ошибка KILLER meta-engine")
         # События, не подтверждённые в эту H1, не теряются: они остаются
         # внутренними кандидатами ограниченное число часов.
         candidate_alerts = signal_navigator.remember_candidates(raw_alerts, closed_dt)
@@ -1351,6 +1363,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         quasimodo_engine.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Quasimodo")
+                if "🏹🎯 KILLER" in source_text:
+                    try:
+                        killer_engine.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного KILLER")
                 if "IMBALANCE —" in source_text:
                     try:
                         imbalance.mark_delivered(source_text)
