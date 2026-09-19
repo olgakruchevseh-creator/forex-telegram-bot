@@ -77,6 +77,13 @@ def analyze(pair: str, side: str, by_tf: dict, texts: list[str] | None,
         erl_marks=("ERL LOW","SELL-SIDE","SELL SIDE","PDL","EQL")
     erl=any(x in u for x in erl_marks)
     sweep=("SWEEP" in u or "СНЯТИЕ ЛИКВИДНОСТИ" in u) and erl
+    # Prefer the shared BSL/SSL context when available. A pool/sweep remains
+    # contextual and never becomes an independent confirmation family.
+    if liquidity_ctx is not None:
+        expected="BSL" if side=="SHORT" else "SSL"
+        pool_level=(getattr(liquidity_ctx,"bsl_level",None) if expected=="BSL" else getattr(liquidity_ctx,"ssl_level",None))
+        erl=erl or pool_level is not None
+        sweep=sweep or getattr(liquidity_ctx,"sweep_side","")==expected
     structure=any(x in u for x in ("MSS","BOS","CHOCH","STRUCTURE SHIFT","СЛОМ СТРУКТУР"))
     displacement=any(x in u for x in ("DISPLACEMENT","ИМПУЛЬС","FVG","IMBALANCE","ИМБАЛАНС","BPR"))
     pd_array=any(x in u for x in ("FVG","IFVG","I-FVG","IMBALANCE","ИМБАЛАНС","BREAKER","MITIGATION BLOCK","ORDER BLOCK","BPR"))

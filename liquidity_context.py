@@ -10,6 +10,7 @@ import re
 import config as cfg
 import htf_irl
 import erl
+import liquidity_map
 from analysis import atr, closed_candles
 
 _MIN={"D1":1440,"H4":240,"H1":60}
@@ -19,6 +20,8 @@ class LiquidityContext:
     side:int; timeframe:str; dealing_low:float; dealing_high:float
     irl_low:float|None; irl_high:float|None; erl_target:float|None
     erl_distance_atr:float|None; residual_state:str; route:str; alignment:int
+    bsl_level:float|None=None; bsl_status:str="UNKNOWN"; ssl_level:float|None=None; ssl_status:str="UNKNOWN"
+    sweep_side:str=""; sweep_reclaimed:bool=False
 
 
 def _event_levels(texts, side):
@@ -69,7 +72,25 @@ def analyze_symbol(symbol, by_tf, side, events=None):
         else: route=("IRL → ERL LOW" if imid<=px else "ERL HIGH → IRL → ERL LOW")
     else:
         route="→ ERL HIGH" if side>0 else "→ ERL LOW"
-    return LiquidityContext(side,tf,lo,hi,ilow,ihigh,target,dist,residual,route,align)
+
+    # BSL/SSL are one shared liquidity layer, not extra votes or signals.
+    # The map uses closed candles only and merges PDH/PDL, EQH/EQL and swings.
+    bsl=liquidity_map.nearest(symbol,by_tf,"BSL")
+    ssl=liquidity_map.nearest(symbol,by_tf,"SSL")
+    swept=liquidity_map.swept_context(symbol,by_tf,side)
+    # Prefer the concrete directional pool as ERL target when it is still ahead.
+    directional=bsl if side>0 else ssl
+    if directional is not None:
+        dd=((directional.level-px)/av if side>0 else (px-directional.level)/av)
+        if dd>=0 and (dist<0 or dd<dist):
+            target=float(directional.level); dist=float(dd)
+            if dist<=near: residual="LOW"; align=-1
+            else: residual="OPEN"; align=1
+    return LiquidityContext(side,tf,lo,hi,ilow,ihigh,target,dist,residual,route,align,
+        getattr(bsl,"level",None),getattr(bsl,"status","UNKNOWN"),
+        getattr(ssl,"level",None),getattr(ssl,"status","UNKNOWN"),
+        getattr(swept,"side","") if swept else "",
+        bool(swept and getattr(swept,"status","")=="reclaimed"))
 
 
 def score_delta(ctx):
@@ -84,4 +105,9 @@ def describe(ctx):
     erl_name="ERL HIGH" if ctx.side>0 else "ERL LOW"
     d="—" if ctx.erl_distance_atr is None else f"{ctx.erl_distance_atr:.2f} ATR"
     residual={"OPEN":"потенциал открыт","LOW":"остаточный потенциал мал","EXHAUSTED":"целевая ERL уже снята"}.get(ctx.residual_state,ctx.residual_state)
-    return f"IRL/ERL {ctx.timeframe}: {ctx.route} · {erl_name} {ctx.erl_target:.5f} · {d} · {residual}"
+    pools=[]
+    if ctx.bsl_level is not None: pools.append(f"BSL {ctx.bsl_level:.5f} ({ctx.bsl_status})")
+    if ctx.ssl_level is not None: pools.append(f"SSL {ctx.ssl_level:.5f} ({ctx.ssl_status})")
+    sweep=(f" · sweep {ctx.sweep_side}" + (" + reclaim" if ctx.sweep_reclaimed else "")) if ctx.sweep_side else ""
+    pool_text=(" · " + " · ".join(pools)) if pools else ""
+    return f"IRL/ERL {ctx.timeframe}: {ctx.route} · {erl_name} {ctx.erl_target:.5f} · {d} · {residual}{pool_text}{sweep}"
