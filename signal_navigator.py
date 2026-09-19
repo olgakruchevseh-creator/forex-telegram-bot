@@ -17,6 +17,7 @@ import movement_progress
 import market_state
 import zigzag_scanner
 import structure_context
+import precision_entry
 import next_pivot_projection
 from chart_snapshot import freeze_by_tf
 from analysis import analyze_tf, currency_strength_dynamics
@@ -752,6 +753,12 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         lines.append(f"• {master['liquidity_context']}")
     if master.get("structure_context"):
         lines.append(f"• {master['structure_context']}")
+    try:
+        pe_ctx = precision_entry.analyze(master.get("symbol", ""), side, master.get("by_tf") or {}, sources)
+        if pe_ctx.available:
+            lines.append(f"• {precision_entry.describe(pe_ctx)}")
+    except Exception:
+        log.exception("PRECISION_ENTRY_NAVIGATOR_SKIPPED symbol=%s", master.get("symbol", ""))
     if master.get("po3_fvg_confirmed") and master.get("po3_fvg_context"):
         lines.append(f"• {master['po3_fvg_context']}")
     elif master.get("htf_irl"):

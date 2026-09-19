@@ -733,3 +733,13 @@ KILLER_CHART_IMAGES_ENABLED = True
 
 # PO3 x FVG shared scenario context. Internal only; never a Telegram source.
 PO3_FVG_CONTEXT_ENABLED = True
+
+# Precision Entry / Entry Refinement: OTE + CE + IOFED are one correlated
+# execution/location family. Internal context only; never a standalone alert.
+PRECISION_ENTRY_ENABLED = True
+PRECISION_ENTRY_OTE_MIN = 0.62
+PRECISION_ENTRY_OTE_MAX = 0.79
+PRECISION_ENTRY_MIN_IMPULSE_ATR = 1.20
+PRECISION_ENTRY_ZIGZAG_PCT = 0.18
+PRECISION_ENTRY_CE_TOLERANCE_ATR = 0.12
+PRECISION_ENTRY_READY_SCORE_BONUS = 4.0
