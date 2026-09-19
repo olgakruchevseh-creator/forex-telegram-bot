@@ -15,6 +15,7 @@ import propulsion_block
 import choch
 import mss
 import erl
+import liquidity_context
 import premium_discount
 import market_regime
 import market_state
@@ -197,6 +198,7 @@ def analyze_symbol(
     choch_ctx = choch.analyze_symbol(symbol, by_tf, side)
     mss_ctx = mss.analyze_symbol(symbol, by_tf, side)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
+    liquidity_ctx = liquidity_context.analyze_symbol(symbol, by_tf, side, alerts)
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
     state_ctx = market_state.build(symbol, by_tf, side, events or [], now_utc) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
@@ -239,9 +241,8 @@ def analyze_symbol(
     quality += 7 + min(6, max(0, len(evidence_families) - 1) * 2)
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
-    # HTF IRL — контекст местоположения, а не самостоятельный триггер.
-    if irl and irl.alignment > 0:
-        quality += int(getattr(cfg, "HTF_IRL_ALIGN_BONUS", 5))
+    # IRL + ERL are one liquidity-route family: never double-count them.
+    quality += max(0, liquidity_context.score_delta(liquidity_ctx))
     if ltf_ctx and ltf_ctx.alignment > 0:
         quality += int(getattr(cfg, "LTF_CONFIRM_ALIGN_BONUS", 5))
     if bpr_ctx and bpr_ctx.alignment > 0:
@@ -253,7 +254,6 @@ def analyze_symbol(
         quality += int(getattr(cfg, "MSS_ALIGN_BONUS", 6))
     elif choch_ctx and choch_ctx.alignment > 0:
         quality += int(getattr(cfg, "CHOCH_ALIGN_BONUS", 5))
-    if erl_ctx and erl_ctx.alignment > 0: quality += int(getattr(cfg, "ERL_ALIGN_BONUS", 3))
     if premium_discount_ctx and premium_discount_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
@@ -281,8 +281,8 @@ def analyze_symbol(
         quality -= 4
     if higher_conflict:
         quality -= 4
-    if irl and irl.alignment < 0:
-        quality -= int(getattr(cfg, "HTF_IRL_CONFLICT_PENALTY", 3))
+    if liquidity_ctx and liquidity_context.score_delta(liquidity_ctx) < 0:
+        quality += liquidity_context.score_delta(liquidity_ctx)
     if ltf_ctx and ltf_ctx.alignment < 0:
         quality -= int(getattr(cfg, "LTF_CONFIRM_CONFLICT_PENALTY", 5))
     if bpr_ctx and bpr_ctx.alignment < 0:
@@ -293,7 +293,6 @@ def analyze_symbol(
         quality -= int(getattr(cfg, "MSS_CONFLICT_PENALTY", 7))
     elif choch_ctx and choch_ctx.alignment < 0:
         quality -= int(getattr(cfg, "CHOCH_CONFLICT_PENALTY", 6))
-    if erl_ctx and erl_ctx.alignment < 0: quality -= int(getattr(cfg, "ERL_CONFLICT_PENALTY", 3))
     if premium_discount_ctx and premium_discount_ctx.alignment < 0: quality -= int(getattr(cfg, "PD_CONFLICT_PENALTY", 2))
     if imd_ctx and imd_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
@@ -329,6 +328,8 @@ def analyze_symbol(
         "conflict_groups": conflict_groups,
         "htf_irl": htf_irl.describe(irl),
         "htf_irl_alignment": irl.alignment if irl else 0,
+        "liquidity_context": liquidity_context.describe(liquidity_ctx),
+        "liquidity_residual_state": liquidity_ctx.residual_state if liquidity_ctx else "UNKNOWN",
         "ltf_confirmation": ltf_confirmation.describe(ltf_ctx),
         "ltf_confirmation_alignment": ltf_ctx.alignment if ltf_ctx else 0,
         "bpr": bpr.describe(bpr_ctx),

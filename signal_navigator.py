@@ -736,7 +736,9 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         strength_line,
         strength_dynamic_line,
     ]
-    if master.get("htf_irl"):
+    if master.get("liquidity_context"):
+        lines.append(f"• {master['liquidity_context']}")
+    elif master.get("htf_irl"):
         lines.append(f"• {master['htf_irl']}")
     if master.get("imd"):
         lines.append(f"• {master['imd']}")

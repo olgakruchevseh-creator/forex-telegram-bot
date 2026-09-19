@@ -11,6 +11,7 @@ from collections import defaultdict
 import config as cfg
 import market_regime
 import ohlc_movement
+import liquidity_context
 from analysis import analyze_tf, atr, closed_candles
 
 _PENDING: dict[str, dict] = {}
@@ -122,6 +123,10 @@ def evaluate(pair, side, texts, market, strength):
  if guard.get("weak_reversal") or (not guard.get("allow",True)):
   return {"eligible":False,"reason":"ohlc_contradiction","families":families}
  regime=market_regime.analyze_symbol(pair,by_tf); rname=regime.name if regime else "UNKNOWN"
+ liquidity_ctx=liquidity_context.analyze_symbol(pair,by_tf,direction,texts)
+ # A KILLER entry cannot be exceptional if its external liquidity target is already consumed.
+ if liquidity_ctx and liquidity_ctx.residual_state=="EXHAUSTED":
+  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx}
  # Hard contradiction only for genuinely poor context; soft disagreements reduce score.
  if senior==0 or junior==0:return {"eligible":False,"reason":"critical_tf_contradiction","families":families}
  family_score=sum(_WEIGHTS[f] for f in families)
@@ -130,12 +135,13 @@ def evaluate(pair, side, texts, market, strength):
  score=family_score + min(14,senior*3+junior*1.5) + max(-4,min(6,(quality-70)*.18)) + max(-4,min(5,(ohlc_score-55)*.16)) + max(-3,min(4,gap*18))
  if rname in ("TREND","EXPANSION"):score+=3
  elif rname in ("RANGE","COMPRESSION"):score-=3
+ score += liquidity_context.score_delta(liquidity_ctx)
  score=max(0,min(100,int(round(score))))
  threshold=int(getattr(cfg,"KILLER_SCORE_THRESHOLD",88))
  if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families}
  av=atr(h1,14); entry=float(h1[-1].close); mult=(1 if direction>0 else -1)
  targets=[entry+mult*av*x for x in (1.0,1.75,2.5)]
- return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early}
+ return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx}
 
 def process_candidates(alerts, market, strength):
  _PENDING.clear(); grouped=defaultdict(list)
@@ -155,7 +161,7 @@ def process_candidates(alerts, market, strength):
   labels=" · ".join(_LABELS[f] for f in fams)
   def px(v):return f"{v:.3f}" if "JPY" in pair else f"{v:.5f}"
   tr=meta["targets"]
-  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
+  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
   out.append(text);_PENDING[text]={"pair":pair,"side":side,"meta":meta,"event_id":event_id,"by_tf":by_tf if (by_tf:=market.get(pair)) else {}}
  return out
 
