@@ -16,6 +16,7 @@ import ohlc_movement
 import movement_progress
 import market_state
 import zigzag_scanner
+import structure_context
 import next_pivot_projection
 from chart_snapshot import freeze_by_tf
 from analysis import analyze_tf, currency_strength_dynamics
@@ -346,6 +347,11 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         gap = float(strength.get(base, 0)) - float(strength.get(quote, 0))
     except (TypeError, ValueError):
         gap = 0.0
+    try:
+        structure_ctx = structure_context.analyze_symbol(symbol, by_tf, direction)
+        structure_text = structure_context.describe(structure_ctx)
+    except Exception:
+        structure_text = ""
     master = {
         "gap": gap,
         "senior_n": sum(views[tf] == direction for tf in ("D1", "H4", "H1")),
@@ -496,6 +502,11 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
                     views[tf] = int(displayed_dirs.get(tf) or 0)
     except Exception:
         zz_text = "RANGE"
+    try:
+        structure_ctx = structure_context.analyze_symbol(symbol, by_tf, direction)
+        structure_text = structure_context.describe(structure_ctx)
+    except Exception:
+        structure_text = ""
     master = {
         "symbol": symbol, "side": side,
         "quality": _source_number(source_text, "💪 Качество", _source_number(source_text, "Качество", 75)),
@@ -503,6 +514,7 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         "gap": gap,
         "senior_n": sum(views[tf] == direction for tf in ("D1", "H4", "H1")),
         "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),
+        "structure_context": structure_text,
         "zigzag_h4": zz_text, "evidence": [f"{_source_name(source_text)} подтвердил событие"],
         "source_accepted": True, "tf_biases": views,
         "next_pivot": pivot, "by_tf": by_tf, "market": market,
@@ -738,6 +750,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     ]
     if master.get("liquidity_context"):
         lines.append(f"• {master['liquidity_context']}")
+    if master.get("structure_context"):
+        lines.append(f"• {master['structure_context']}")
     if master.get("po3_fvg_confirmed") and master.get("po3_fvg_context"):
         lines.append(f"• {master['po3_fvg_context']}")
     elif master.get("htf_irl"):

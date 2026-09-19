@@ -17,6 +17,7 @@ import mss
 import erl
 import liquidity_context
 import po3_fvg_context
+import structure_context
 import premium_discount
 import market_regime
 import market_state
@@ -198,6 +199,7 @@ def analyze_symbol(
     propulsion_ctx = propulsion_block.analyze_symbol(symbol, by_tf, side)
     choch_ctx = choch.analyze_symbol(symbol, by_tf, side)
     mss_ctx = mss.analyze_symbol(symbol, by_tf, side)
+    structure_ctx = structure_context.analyze_symbol(symbol, by_tf, side)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
     liquidity_ctx = liquidity_context.analyze_symbol(symbol, by_tf, side, alerts)
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
@@ -237,7 +239,9 @@ def analyze_symbol(
     junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
     quality = 56 + (12 if senior_n == 3 else (8 if senior_n == 2 else 4))
     quality += 10 if junior_n == 3 else 7
-    quality += 10 if h4_zz == side else (4 if not h4_zz else 0)
+    # HH/HL + ZigZag + MSS/BOS are one correlated STRUCTURE family.
+    # One bounded adjustment replaces separate ZigZag/MSS stacking.
+    quality += structure_context.score_delta(structure_ctx, side)
     profile_confirmation = int(zz.get("profile_confirmation") or 0)
     quality += 4 if profile_confirmation > 0 else 0
     quality += min(10, max(0, int(max(0.0, directed_gap) * 40)))
@@ -254,11 +258,8 @@ def analyze_symbol(
         quality += int(getattr(cfg, "BPR_ALIGN_BONUS", 4))
     if propulsion_ctx and propulsion_ctx.alignment > 0:
         quality += int(getattr(cfg, "PROPULSION_ALIGN_BONUS", 4))
-    # MSS is the stricter member of the same structure-shift family: never double-count it with CHOCH.
-    if mss_ctx and mss_ctx.alignment > 0:
-        quality += int(getattr(cfg, "MSS_ALIGN_BONUS", 6))
-    elif choch_ctx and choch_ctx.alignment > 0:
-        quality += int(getattr(cfg, "CHOCH_ALIGN_BONUS", 5))
+    # MSS/CHOCH are already represented inside the single STRUCTURE adjustment above.
+    # Do not add a second structural vote/bonus here.
     if premium_discount_ctx and premium_discount_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
@@ -327,6 +328,8 @@ def analyze_symbol(
         "junior_n": junior_n,
         "evidence": aligned,
         "evidence_families": sorted(evidence_families),
+        "structure_context": structure_context.describe(structure_ctx),
+        "structure_state": structure_ctx.state,
         "dxy_bias": dxy_bias,
         "zigzag_h4": "LONG" if h4_zz > 0 else ("SHORT" if h4_zz < 0 else "RANGE"),
         "senior_side": "LONG" if senior_side > 0 else ("SHORT" if senior_side < 0 else "RANGE"),
@@ -419,7 +422,7 @@ def analyze_local_amd_symbol(
         "senior_n": senior_n,
         "junior_n": junior_n,
         "evidence": aligned,
-        "evidence_families": sorted(evidence_families),
+        "evidence_families": ["range_manipulation"],
         "dxy_bias": 0,
         "local_early": True,
         "zigzag_h4": "RANGE",
