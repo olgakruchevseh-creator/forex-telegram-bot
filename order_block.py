@@ -10,6 +10,7 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+import mitigation_block
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.order_block")
@@ -195,7 +196,8 @@ def format_message(event: dict) -> str:
         f"Цена закрытия {event.get('confirm_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
         f"Сопутствующий FVG: {fvg}", f"Подтверждение реакции: закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
+        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%",
+        *( [f"Mitigation Block: подтверждённый контекст · {event['mitigation_block']['tf']} · {event['mitigation_block']['reaction_path']} (то же семейство OB/MB, не отдельный голос)"] if event.get('mitigation_block') else [] ), "",
         f"✅ Факт: после импульсного BOS цена вернулась в Order Block, удержала зону и закрытой {event.get('confirm_tf', 'H1')}-свечой подтвердила {event['side']}.",
     ])
 
@@ -223,6 +225,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
                     if og.get('allow',True):
                         if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
+                        event=mitigation_block.annotate_event(event,by_tf)
                         confirmed.append(event)
             if confirmed and not first:
                 best = max(confirmed, key=lambda e: (e["quality"], e["tf"] == "H4"))

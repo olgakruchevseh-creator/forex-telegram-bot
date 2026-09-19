@@ -36,3 +36,9 @@
 
 Почасовые одиночные Echo/Next Pivot по-прежнему выключены.
 Echo по-прежнему не veto Master Direction — это отдельное продуктовое решение.
+
+## v62 — Mitigation Block context layer
+- Added mitigation_block.py as a context-only OB/MB layer.
+- MB requires sweep -> structural break/displacement -> return -> Zone Reaction -> OHLC/late-entry checks.
+- MB never emits an independent Telegram LONG/SHORT.
+- OB/MB remain one correlated supply/demand family in KILLER/Journal.

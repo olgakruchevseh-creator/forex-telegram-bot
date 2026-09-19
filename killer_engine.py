@@ -75,14 +75,14 @@ _FAMILIES={
  "structure":("ZIGZAG","MSS","BOS","QUASIMODO","DOUBLE TOP","DOUBLE BOTTOM","ДВОЙН","ГОЛОВА И ПЛЕЧИ","1-2-3"),
  "liquidity":("СНЯТИЕ ЛИКВИДНОСТИ","LIQUIDITY SWEEP","PDH","PDL","EQH","EQL","INDUCEMENT","IDM"),
  "imbalance":("IMBALANCE","FVG","ДИСБАЛАНС","BPR","BALANCED PRICE RANGE"),
- "blocks":("ORDER BLOCK","BREAKER BLOCK","PROPULSION"),
+ "blocks":("ORDER BLOCK","MITIGATION BLOCK","BREAKER BLOCK","PROPULSION"),
  "levels":("ПРОБОЙ УРОВНЯ","ОТБОЙ ОТ","РЕТТЕСТ УРОВНЯ","CONSOLIDATION","КОНСОЛИДАЦ","POC"),
  "smc_fib":("FIB + SMC","ФИБОНАЧЧИ","SMART MONEY 62-26","PREMIUM","DISCOUNT"),
  "session_setup":("SILVER BULLET","POWER OF THREE","AMD","CRT —","CANDLE RANGE THEORY"),
  "reversal":("ATS REVERSAL","EXHAUSTION"),
 }
 _LABELS={"structure":"Structure/MSS","liquidity":"Liquidity","imbalance":"FVG/BPR/Imbalance",
- "blocks":"OB/Breaker","levels":"Levels/PDH-PDL","smc_fib":"Fib/SMC","session_setup":"Session/CRT/AMD","reversal":"Reversal"}
+ "blocks":"OB/MB/Breaker","levels":"Levels/PDH-PDL","smc_fib":"Fib/SMC","session_setup":"Session/CRT/AMD","reversal":"Reversal"}
 _WEIGHTS={"structure":13,"liquidity":12,"imbalance":10,"blocks":9,"levels":9,"smc_fib":8,"session_setup":8,"reversal":7}
 
 def _pair(t):

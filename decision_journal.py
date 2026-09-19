@@ -17,7 +17,7 @@ log=logging.getLogger('fxbot.decision_journal')
 TF_MIN={'W1':10080,'D1':1440,'H4':240,'H1':60,'M15':15,'M5':5}
 FAMILY={
  'Imbalance/FVG':'imbalance','Disbalance':'imbalance','BPR':'imbalance','Fib+SMC':'confluence','Fibonacci':'levels',
- 'Order Block':'supply_demand','Breaker Block':'supply_demand','Levels':'levels','Daily High/Low':'levels','POC':'levels',
+ 'Order Block':'supply_demand','Mitigation Block':'supply_demand','Breaker Block':'supply_demand','Levels':'levels','Daily High/Low':'levels','POC':'levels',
  'Liquidity Sweep':'liquidity','CRT':'liquidity','AMD':'liquidity','Silver Bullet':'liquidity','Inducement':'liquidity',
  'ZigZag':'structure','MSS':'structure','Quasimodo':'structure','Patterns':'pattern','Retest':'structure','Chain Entries':'structure',
  'Accumulation/Distribution':'phase','Consolidation':'phase','ATS':'reversal','Smart Money 62-26':'smc'}
