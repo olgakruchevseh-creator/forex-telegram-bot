@@ -5,7 +5,7 @@ selects only exceptional same-side convergence. Correlated modules are grouped
 into families so FVG/BPR/Imbalance or ZigZag/MSS/BOS cannot inflate the score.
 """
 from __future__ import annotations
-import hashlib, io, re
+import hashlib, io, re, time
 from collections import defaultdict
 
 import config as cfg
@@ -14,7 +14,61 @@ import ohlc_movement
 from analysis import analyze_tf, atr, closed_candles
 
 _PENDING: dict[str, dict] = {}
+# Fresh confirmed facts survive across scan cycles so KILLER can recognize a real
+# sequence (sweep -> structure -> zone reaction) instead of requiring same-tick alerts.
+_FACT_MEMORY: dict[tuple[str,str,str], dict] = {}
 _TF_MIN={"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
+
+_TF_FRESH_SECONDS={"D1":36*3600,"H4":12*3600,"H1":4*3600,"M15":90*60,"M5":30*60}
+
+def _tf_of(t):
+ m=re.search(r"(?:TF|Таймфрейм):\s*(D1|H4|H1|M15|M5)\b",t or "",re.I)
+ if not m: m=re.search(r"\b(D1|H4|H1|M15|M5)\b",t or "",re.I)
+ return m.group(1).upper() if m else "H1"
+
+def _fresh_seconds(tf):
+ custom=getattr(cfg,"KILLER_FAMILY_FRESHNESS_SECONDS",None)
+ if isinstance(custom,dict) and tf in custom:
+  try:return max(60,int(custom[tf]))
+  except Exception:pass
+ return _TF_FRESH_SECONDS.get(tf,4*3600)
+
+def _expire_memory(now=None):
+ now=float(now if now is not None else time.time())
+ for key,fact in list(_FACT_MEMORY.items()):
+  if now-float(fact.get("seen_at",0)) > _fresh_seconds(fact.get("tf","H1")):
+   _FACT_MEMORY.pop(key,None)
+
+def _remember_alerts(alerts, now=None):
+ """Store one freshest fact per pair/side/family; structure flip invalidates opposite setup."""
+ now=float(now if now is not None else time.time()); _expire_memory(now)
+ for t in alerts:
+  pair,side=_pair(t),_side(t)
+  if not pair or not side: continue
+  fams=_families(t)
+  if not fams: continue
+  tf=_tf_of(t); q=_quality(t); fp=hashlib.sha1(t.encode()).hexdigest()[:12]
+  if "structure" in fams:
+   opposite="SHORT" if side=="LONG" else "LONG"
+   # A fresh opposite structural confirmation invalidates the accumulated thesis.
+   for key in [k for k in _FACT_MEMORY if k[0]==pair and k[1]==opposite]: _FACT_MEMORY.pop(key,None)
+  for fam in fams:
+   _FACT_MEMORY[(pair,side,fam)]={"text":t,"seen_at":now,"tf":tf,"quality":q,"fingerprint":fp}
+
+def _memory_texts(pair,side,now=None):
+ _expire_memory(now)
+ facts=[v for (p,s,_f),v in _FACT_MEMORY.items() if p==pair and s==side]
+ # De-duplicate a single source text that legitimately maps to more than one family.
+ seen=set(); out=[]
+ for f in sorted(facts,key=lambda x:x.get("seen_at",0)):
+  fp=f.get("fingerprint")
+  if fp in seen: continue
+  seen.add(fp); out.append(f["text"])
+ return out
+
+def reset_memory():
+ """Test/maintenance hook; does not affect normal event delivery state."""
+ _FACT_MEMORY.clear()
 
 _FAMILIES={
  "structure":("ZIGZAG","MSS","BOS","QUASIMODO","DOUBLE TOP","DOUBLE BOTTOM","ДВОЙН","ГОЛОВА И ПЛЕЧИ","1-2-3"),
@@ -85,11 +139,15 @@ def evaluate(pair, side, texts, market, strength):
 
 def process_candidates(alerts, market, strength):
  _PENDING.clear(); grouped=defaultdict(list)
+ _remember_alerts(alerts)
+ # Only a pair/side touched in the current scan may emit KILLER; memory supplies
+ # preceding fresh confirmations but can never emit an event by itself.
  for t in alerts:
   p,s=_pair(t),_side(t)
   if p and s:grouped[(p,s)].append(t)
  out=[]
- for (pair,side),texts in grouped.items():
+ for (pair,side),current_texts in grouped.items():
+  texts=_memory_texts(pair,side)
   meta=evaluate(pair,side,texts,market,strength)
   if not meta.get("eligible"):continue
   fams=sorted(meta["families"]); sig="|".join(sorted(hashlib.sha1(t.encode()).hexdigest()[:10] for t in texts))

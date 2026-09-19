@@ -95,7 +95,13 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
 def record_decision(text,market,strength,status,reason='',allies=None,ctx=None):
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
  _append(_base(text,market,strength,status,reason,allies,ctx))
-def record_sent(text,market,strength=None):
+def record_sent(text,market,strength=None,allies=None,ctx=None):
+ """Record delivery while preserving the Signal Context bundle."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
- rec=_base(text,market,strength or {},'SENT','telegram_delivered')
+ rec=_base(text,market,strength or {},'SENT','telegram_delivered',allies,ctx)
  rec['delivery']=True; _append(rec)
+
+def record_stage(text,market,strength,status,allies=None,ctx=None,reason=''):
+ """Passive funnel marker; never participates in a trading verdict."""
+ if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
+ _append(_base(text,market,strength or {},status,reason,allies,ctx))

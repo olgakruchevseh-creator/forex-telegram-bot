@@ -1322,6 +1322,15 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if pair and direct_side and not signal_allowed_by_h4_zigzag(pair, market.get(pair) or {}, direct_side):
                 log.info("SIGNAL_H4_ZIGZAG_BLOCK pair=%s side=%s", pair, direct_side)
                 continue
+            # Passive funnel marker after all final delivery gates.
+            try:
+                decision_journal.record_stage(
+                    source_text, market, strength, "MASTER_CONFIRMED",
+                    bundle.get("allies") or [], bundle.get("ctx") or {},
+                    "final_delivery_gates_passed",
+                )
+            except Exception:
+                log.exception("Запись этапа MASTER_CONFIRMED пропущена")
             source_event_id = _source_event_id(source_text)
             _enqueue_source(state, source_text)
             save_state(state)
@@ -1415,7 +1424,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Запись отправленного сигнала в журнал")
             # Silent Decision Journal: delivery fact only, no Telegram output and no veto.
             try:
-                decision_journal.record_sent(text, market, strength)
+                decision_journal.record_sent(source_text, market, strength, bundle.get("allies") or [], bundle.get("ctx") or {})
             except Exception:
                 log.exception("Запись Decision Journal пропущена")
             pair = _alert_pair(text)

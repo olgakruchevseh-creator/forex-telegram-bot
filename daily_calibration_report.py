@@ -47,6 +47,9 @@ def _report(day):
     outcomes_all=_read_jsonl(_replay())
     outcomes={r.get('decision_id'):r for r in outcomes_all if r.get('decision_id')}
     counts=Counter(r.get('status','?') for r in decisions)
+    unique_counts=Counter()
+    for status in ('ALLOWED','BLOCKED','MASTER_CONFIRMED','SENT'):
+        unique_counts[status]=len({r.get('event_id') for r in decisions if r.get('status')==status and r.get('event_id')})
     sent=[r for r in decisions if r.get('status')=='SENT']
     sent_out=[outcomes.get(r.get('event_id')) for r in sent if outcomes.get(r.get('event_id'))]
     target=Counter(); mfe=[]; mae=[]; timing=Counter(); by_pair=defaultdict(list); by_src=defaultdict(list); by_tf=defaultdict(list); by_reg=defaultdict(list); by_session=defaultdict(list)
@@ -63,15 +66,18 @@ def _report(day):
     pending=len(sent)-len(sent_out)
     residual=[float(r['residual_potential_pct']) for r in sent if r.get('residual_potential_pct') is not None]
     blocks=[r for r in decisions if r.get('status')=='BLOCKED']
-    useful=wrong=0; block_reasons=Counter()
+    useful=wrong=ambiguous=block_pending=0; block_reasons=Counter()
     for d in blocks:
         block_reasons[d.get('reason') or 'unknown']+=1
         o=outcomes.get(d.get('event_id'))
-        if not o: continue
+        if not o:
+            block_pending+=1
+            continue
         h=(o.get('horizons_h1') or {}).get('3') or {}
         mf=float(h.get('mfe_atr') or 0); ma=float(h.get('mae_atr') or 0)
         if mf < .35 or ma > mf: useful+=1
         elif mf >= .75 and mf > ma: wrong+=1
+        else: ambiguous+=1
     def group_line(name, groups):
         scored=[]
         for k,vals in groups.items():
@@ -93,19 +99,22 @@ def _report(day):
     source_counts=[int(((r.get('confirmation_families') or {}).get('source_count') or 0)) for r in sent]
     problems=[]
     if wrong: problems.append(f'ошибочных блокировок {wrong}')
+    if ambiguous: problems.append(f'неоднозначных блокировок {ambiguous}')
+    if block_pending: problems.append(f'BLOCKED ещё не созрели для replay {block_pending}')
     late=sum(v for k,v in timing.items() if k=='late')
     if late: problems.append(f'поздних входов {late}')
     if pending: problems.append(f'ещё не созрели для replay {pending}')
     if not problems: problems=['явных систематических проблем по доступной выборке не выявлено']
     return '\n'.join([
       '━━━━━━━━━━━━━━━━━━','📊 DAILY CALIBRATION · OBSERVE_ONLY','━━━━━━━━━━━━━━━━━━',f'Дата: {day} · Europe/Amsterdam','',
-      f"Решения: SENT {counts['SENT']} · ALLOWED {counts['ALLOWED']} · BLOCKED {counts['BLOCKED']}",
+      f"Воронка: CONTEXT_ALLOWED {counts['ALLOWED']} (уник. {unique_counts['ALLOWED']}) · MASTER_CONFIRMED {counts['MASTER_CONFIRMED']} (уник. {unique_counts['MASTER_CONFIRMED']}) · SENT {counts['SENT']} (уник. {unique_counts['SENT']})",
+      f"BLOCKED: {counts['BLOCKED']} решений (уник. {unique_counts['BLOCKED']})",
       f'Фактический replay SENT: {len(sent_out)} · ещё без полного окна: {pending}',
       f"TR1: {target['TR1']}/{target['TR1_known']} · TR2: {target['TR2']}/{target['TR2_known']} · TR3: {target['TR3']}/{target['TR3_known']}",
       f"MFE: {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
       f"Вход: early {timing['early']} · timely {timing['timely']} · late {timing['late']} · residual avg {sum(residual)/len(residual):.0f}%" if residual else f"Вход: early {timing['early']} · timely {timing['timely']} · late {timing['late']}",'',
       group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Regime',by_reg),group_line('Сессии',by_session),'',
-      f'Блокировки: полезные {useful} · ошибочные {wrong} · причины: {_top(block_reasons)}',
+      f'Блокировки: полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
       (f'Подтверждения: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f}' if source_counts else 'Подтверждения: —'),
       f"Контроль: {'; '.join(problems)}",'',
