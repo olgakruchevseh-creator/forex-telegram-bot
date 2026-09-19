@@ -18,6 +18,7 @@ import market_state
 import zigzag_scanner
 import structure_context
 import precision_entry
+import market_maker_model
 import next_pivot_projection
 from chart_snapshot import freeze_by_tf
 from analysis import analyze_tf, currency_strength_dynamics
@@ -759,6 +760,12 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
             lines.append(f"• {precision_entry.describe(pe_ctx)}")
     except Exception:
         log.exception("PRECISION_ENTRY_NAVIGATOR_SKIPPED symbol=%s", master.get("symbol", ""))
+    try:
+        mmm_ctx = market_maker_model.analyze(master.get("symbol", ""), side, master.get("by_tf") or {}, sources, precision_ctx=locals().get("pe_ctx"))
+        if mmm_ctx.available and mmm_ctx.stage_no >= 2:
+            lines.append(f"• {market_maker_model.describe(mmm_ctx)}")
+    except Exception:
+        log.exception("MMM_NAVIGATOR_SKIPPED symbol=%s", master.get("symbol", ""))
     if master.get("po3_fvg_confirmed") and master.get("po3_fvg_context"):
         lines.append(f"• {master['po3_fvg_context']}")
     elif master.get("htf_irl"):
