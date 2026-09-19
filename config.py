@@ -730,3 +730,6 @@ KILLER_ENABLED = True
 KILLER_SCORE_THRESHOLD = 88
 KILLER_MIN_FAMILIES = 5
 KILLER_CHART_IMAGES_ENABLED = True
+
+# PO3 x FVG shared scenario context. Internal only; never a Telegram source.
+PO3_FVG_CONTEXT_ENABLED = True

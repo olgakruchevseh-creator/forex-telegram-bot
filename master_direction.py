@@ -16,6 +16,7 @@ import choch
 import mss
 import erl
 import liquidity_context
+import po3_fvg_context
 import premium_discount
 import market_regime
 import market_state
@@ -211,6 +212,10 @@ def analyze_symbol(
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     aligned, opposite = _module_evidence(symbol, side, alerts)
     evidence_families = _aligned_families(symbol, side, alerts)
+    po3_fvg_ctx = po3_fvg_context.analyze(symbol, "LONG" if side > 0 else "SHORT", by_tf, alerts)
+    evidence_families = po3_fvg_context.collapse_families(
+        evidence_families, po3_fvg_ctx, "range_manipulation", "imbalance"
+    )
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
         return None
     now_utc = now_utc or datetime.now(timezone.utc)
@@ -329,6 +334,8 @@ def analyze_symbol(
         "htf_irl": htf_irl.describe(irl),
         "htf_irl_alignment": irl.alignment if irl else 0,
         "liquidity_context": liquidity_context.describe(liquidity_ctx),
+        "po3_fvg_context": po3_fvg_context.describe(po3_fvg_ctx),
+        "po3_fvg_confirmed": bool(po3_fvg_ctx.confirmed),
         "liquidity_residual_state": liquidity_ctx.residual_state if liquidity_ctx else "UNKNOWN",
         "ltf_confirmation": ltf_confirmation.describe(ltf_ctx),
         "ltf_confirmation_alignment": ltf_ctx.alignment if ltf_ctx else 0,

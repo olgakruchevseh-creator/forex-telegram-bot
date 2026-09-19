@@ -738,6 +738,8 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     ]
     if master.get("liquidity_context"):
         lines.append(f"• {master['liquidity_context']}")
+    if master.get("po3_fvg_confirmed") and master.get("po3_fvg_context"):
+        lines.append(f"• {master['po3_fvg_context']}")
     elif master.get("htf_irl"):
         lines.append(f"• {master['htf_irl']}")
     if master.get("imd"):
