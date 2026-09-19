@@ -78,7 +78,7 @@ def reset_memory():
 _FAMILIES={
  "structure":("ZIGZAG","MSS","BOS","QUASIMODO","DOUBLE TOP","DOUBLE BOTTOM","ДВОЙН","ГОЛОВА И ПЛЕЧИ","1-2-3"),
  "liquidity":("СНЯТИЕ ЛИКВИДНОСТИ","LIQUIDITY SWEEP","PDH","PDL","EQH","EQL","INDUCEMENT","IDM"),
- "imbalance":("IMBALANCE","FVG","ДИСБАЛАНС","BPR","BALANCED PRICE RANGE"),
+ "imbalance":("IMBALANCE","FVG","SIBI","BISI","ДИСБАЛАНС","BPR","BALANCED PRICE RANGE"),
  "blocks":("ORDER BLOCK","MITIGATION BLOCK","BREAKER BLOCK","PROPULSION"),
  "levels":("ПРОБОЙ УРОВНЯ","ОТБОЙ ОТ","РЕТТЕСТ УРОВНЯ","CONSOLIDATION","КОНСОЛИДАЦ","POC"),
  "smc_fib":("FIB + SMC","ФИБОНАЧЧИ","SMART MONEY 62-26","PREMIUM","DISCOUNT"),

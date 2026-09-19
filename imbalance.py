@@ -46,6 +46,7 @@ class FvgZone:
     touch_dt: str = ""
     reaction_path: str = ""
     reaction_dt: str = ""
+    fvg_class: str = ""  # BISI = bullish FVG, SIBI = bearish FVG
 
 
 def _path() -> Path:
@@ -116,6 +117,7 @@ def newest_fvg(symbol: str, tf: str, bars: list[Candle]) -> FvgZone | None:
         _zone_id(symbol, tf, side, c.dt), symbol, tf, side, low, high, c.dt,
         quality, max(70, min(92, quality - 4)), [], 0.0, last_seen_dt=c.dt,
         gap_atr=gap_atr, impulse_atr=impulse_atr,
+        fvg_class=("BISI" if side == "LONG" else "SIBI"),
     )
 
 
@@ -161,6 +163,15 @@ def _price(symbol: str, value: float) -> str:
     return f"{value:.3f}" if "JPY" in symbol else f"{value:.5f}"
 
 
+def _fvg_class(zone: FvgZone) -> str:
+    """ICT classification inside the existing Imbalance/FVG family.
+
+    BISI is a bullish FVG (LONG context); SIBI is a bearish FVG (SHORT context).
+    This label is context only and must never become an independent vote/signal.
+    """
+    return zone.fvg_class or ("BISI" if zone.side == "LONG" else "SIBI")
+
+
 def format_message(zone: FvgZone, event: str = "new") -> str:
     title = "🟦 IMBALANCE — НОВАЯ FVG" if event == "new" else "🔄 IMBALANCE — РЕТЕСТ ПОДТВЕРЖДЁН"
     fact = (
@@ -171,6 +182,7 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "", f"Пара: {zone.symbol}",
         f"Таймфрейм: {zone.tf}", f"Направление: {zone.side}",
+        f"Классификация FVG: {_fvg_class(zone)}",
         f"Зона FVG: {_price(zone.symbol, zone.low)}–{_price(zone.symbol, zone.high)}",
         f"Состояние: {zone.status}", f"Согласованные ТФ: {' · '.join(zone.aligned)}",
         f"Разница силы валют: {zone.strength_gap:+.2f}",
@@ -216,7 +228,7 @@ def render_chart(zone: FvgZone, event: str, by_tf: dict) -> io.BytesIO:
     zone_color = "#42e889" if zone.side == "LONG" else "#ff6575"
     draw.rectangle((zone_x, y_at(zone.high), right, y_at(zone.low)),
                    fill=zone_color+"35", outline=zone_color, width=3)
-    draw.text((zone_x+10, y_at(zone.high)-27), "FVG ЗОНА", fill=zone_color, font=small)
+    draw.text((zone_x+10, y_at(zone.high)-27), f"{_fvg_class(zone)} · FVG ЗОНА", fill=zone_color, font=small)
     impulse_index = max(0, created_index-1)
     if bars:
         x = x_at(impulse_index)
@@ -226,7 +238,7 @@ def render_chart(zone: FvgZone, event: str, by_tf: dict) -> io.BytesIO:
     if event == "retest":
         draw.text((right-300, y_at((zone.low+zone.high)/2)-28), "РЕТЕСТ ПОДТВЕРЖДЁН", fill="#ffffff", font=small)
     title = "НОВАЯ FVG" if event == "new" else "РЕТЕСТ FVG"
-    draw.text((left, 25), f"{zone.symbol} · {zone.tf} · IMBALANCE {title} · {zone.side}", fill="#f1f5fb", font=font)
+    draw.text((left, 25), f"{zone.symbol} · {zone.tf} · IMBALANCE {title} · {_fvg_class(zone)} · {zone.side}", fill="#f1f5fb", font=font)
     draw.text((left, 655), "Зона построена только по закрытым свечам · NO REPAINT", fill="#c9d1df", font=small)
     out = io.BytesIO()
     out.name = f"imbalance_{zone.symbol.replace('/', '')}_{zone.tf}_{event}.png"
@@ -300,10 +312,13 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
     stored = {k: FvgZone(**v) for k, v in (state.get("zones") or {}).items()}
+    for zone in stored.values():
+        zone.fvg_class = _fvg_class(zone)
     pending_events = state.setdefault("pending_events", {})
     messages = []
     for raw in pending_events.values():
         zone = FvgZone(**raw["zone"])
+        zone.fvg_class = _fvg_class(zone)
         text = format_message(zone, raw["event"])
         messages.append(text)
         _PENDING_CARDS[text] = (zone, raw["event"], freeze_by_tf(market.get(zone.symbol) or {}))
