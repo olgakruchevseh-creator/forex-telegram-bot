@@ -131,6 +131,9 @@ LTF_KEYS = ["H1", "M15", "M5"]
 LTF_MIN_AGREE = 2
 
 SIGNAL_COOLDOWN_HOURS = 6
+# Independent setups must not be suppressed for six hours just because pair/side match.
+# Delivery cooldown is scoped by source family; durable event IDs still block exact duplicates.
+SIGNAL_SETUP_COOLDOWN_HOURS = 1.5
 # Единый бюджет для всех торговых модулей после одной закрытой H1.
 # Часовой брифинг и новостные сообщения в этот лимит не входят.
 # Верхний предел НОВЫХ торговых карточек модулей за одну закрытую H1
@@ -653,6 +656,7 @@ LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR = 0.20
 LIQUIDITY_MAP_MERGE_ATR = 0.16
 LIQUIDITY_MAP_APPROACH_ATR = 0.35
 LIQUIDITY_MAP_STATUS_LOOKBACK_M15 = 16
+LIQUIDITY_LEVELS_MIN_STRENGTH = 68
 LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR_H4 = 0.16
 LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR_H1 = 0.18
 LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR_M15 = 0.20

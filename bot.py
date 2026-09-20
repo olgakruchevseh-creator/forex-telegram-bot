@@ -342,11 +342,20 @@ def rank_changed(old: list, new: list[tuple[str, float]]) -> bool:
     return False
 
 
-def cooldown_ok(state: dict, symbol: str, side: str) -> bool:
-    last = state.get("last_signals", {}).get(f"{symbol}:{side}")
+def cooldown_ok(state: dict, symbol: str, side: str, source: str = "") -> bool:
+    """Anti-spam cooldown scoped to a setup family, not the whole pair+side.
+
+    Exact repeats are handled by durable event IDs.  This guard only prevents a
+    scanner family from re-presenting essentially the same idea too quickly, while
+    allowing a genuinely independent setup on the same pair/direction.
+    """
+    family = (source or "GENERAL").strip().upper()
+    key = f"{symbol}:{side}:{family}"
+    last = state.get("last_setups", {}).get(key)
     if not last:
         return True
-    return (time.time() - last) / 3600 >= cfg.SIGNAL_COOLDOWN_HOURS
+    hours = float(getattr(cfg, "SIGNAL_SETUP_COOLDOWN_HOURS", 1.5))
+    return (time.time() - last) / 3600 >= hours
 
 
 async def send(app: Application, chat_id: int, text: str):
@@ -1204,7 +1213,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             for text, sources in built_navigator:
                 pair = _alert_pair(text)
                 side = _direct_signal_side(text)
-                if pair and side and cooldown_ok(state, pair, side):
+                if pair and side and cooldown_ok(state, pair, side, "NAVIGATOR"):
                     confirmed_alerts.append((-1, text))
                     navigator_sources[text] = sources
                     signal_navigator.register_card(text, sources, closed_dt)
@@ -1313,7 +1322,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             pair = bundle.get("pair") or _alert_pair(source_text)
             direct_side = bundle.get("side") or _direct_signal_side(source_text)
-            if pair and direct_side and not cooldown_ok(state, pair, direct_side):
+            if pair and direct_side and not cooldown_ok(state, pair, direct_side, signal_context.source_name(source_text)):
                 log.info("SIGNAL_COOLDOWN_SKIP pair=%s side=%s", pair, direct_side)
                 continue
             if not _master_allows_delivery(pair, direct_side, master_results):
@@ -1349,6 +1358,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             _ack_source(state, source_text)
             if pair and direct_side:
                 state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
+                state.setdefault("last_setups", {})[f"{pair}:{direct_side}:{signal_context.source_name(source_text).strip().upper()}"] = time.time()
             save_state(state)
             delivered_sources = list(allied_texts)
             for source_text in delivered_sources:
@@ -1452,6 +1462,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await _flush_navigator_outbox(context.application, int(chat_id), state)
                 if pair and direct_side:
                     state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
+                state.setdefault("last_setups", {})[f"{pair}:{direct_side}:{signal_context.source_name(source_text).strip().upper()}"] = time.time()
 
         # Активные сценарии сопровождаются отдельно от лимита новых сигналов:
         # только близость к цели, завершение либо подтверждённая отмена.

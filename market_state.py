@@ -73,9 +73,13 @@ def build(symbol,by_tf,direction,events=None,now_utc=None):
     d=1 if direction in (1,'LONG') else -1 if direction in (-1,'SHORT') else 0
     now=now_utc or datetime.now(timezone.utc); regime=market_regime.analyze_symbol(symbol,by_tf)
     fresh,age=_freshness(by_tf)
+    liquidity = (liquidity_narrative.analyze_symbol(symbol,by_tf,d)
+                 if d and getattr(__import__('config'), 'LIQUIDITY_NARRATIVE_ENABLED', True) else None)
+    exhaustion = (exhaustion_engine.analyze_symbol(symbol,by_tf,d)
+                  if d and getattr(__import__('config'), 'EXHAUSTION_ENABLED', True) else None)
     return MarketState(symbol,d,regime,
-        liquidity_narrative.analyze_symbol(symbol,by_tf,d) if d else None,
-        exhaustion_engine.analyze_symbol(symbol,by_tf,d) if d else None,
+        liquidity,
+        exhaustion,
         ohlc_movement.setup_adjustment(by_tf,d) if d else {'available':False},
         _zones(symbol,by_tf),_volatility(by_tf,regime),_news(symbol,events or [],now),
         (lambda c: c.as_dict() if c else None)(inside_bar_context.analyze_symbol(symbol,by_tf,d)),fresh,age)

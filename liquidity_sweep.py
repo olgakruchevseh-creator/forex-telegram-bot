@@ -10,6 +10,7 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+import liquidity_map
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 _LAST_CHART_CARDS: dict[str, tuple[dict, dict]] = {}
@@ -109,32 +110,31 @@ def liquidity_levels(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[C
     return unique
 
 
-def detect_new_sweep(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[Candle]) -> SweepSetup | None:
+def detect_new_sweep(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[Candle], by_tf: dict | None = None) -> SweepSetup | None:
     lookback = int(getattr(cfg, "LIQUIDITY_CHOCH_LOOKBACK", 5))
     if len(h1) < max(25, lookback+2) or len(h4) < 20:
         return None
-    current = h1[-1]
-    av = atr(h1, 14)
-    if av <= 0:
-        return None
-    buffer = av * float(getattr(cfg, "LIQUIDITY_MIN_SWEEP_ATR", .08))
-    prior = h1[-lookback-1:-1]
-    choices = []
-    for item in liquidity_levels(symbol, d1, h4, h1, av):
-        level = item["level"]
-        if item["kind"] == "high" and current.high > level+buffer and current.close < level:
-            side, swept, confirm = "SHORT", current.high, min(c.low for c in prior)
-        elif item["kind"] == "low" and current.low < level-buffer and current.close > level:
-            side, swept, confirm = "LONG", current.low, max(c.high for c in prior)
+    current=h1[-1]; av=atr(h1,14)
+    if av<=0:return None
+    buffer=av*float(getattr(cfg,"LIQUIDITY_MIN_SWEEP_ATR",.08))
+    prior=h1[-lookback-1:-1]; choices=[]
+    # One shared Liquidity + Levels Context: PDH/PDL, EQH/EQL, Old High/Low,
+    # Liquidity Pools and significant S/R zones.  No source is an independent vote.
+    if by_tf is None:
+        by_tf={"D1":d1,"H4":h4,"H1":h1}
+    pools=liquidity_map.build_map(symbol,by_tf)
+    for pool in pools:
+        level=pool.level; upper=pool.zone_high if pool.zone_high is not None else level; lower=pool.zone_low if pool.zone_low is not None else level
+        if pool.side=="BSL" and current.high>upper+buffer and current.close<upper:
+            side,swept,confirm="SHORT",current.high,min(c.low for c in prior); key_level=upper
+        elif pool.side=="SSL" and current.low<lower-buffer and current.close>lower:
+            side,swept,confirm="LONG",current.low,max(c.high for c in prior); key_level=lower
         else:
             continue
-        precision = 3 if "JPY" in symbol else 5
-        setup_id = f"{symbol}|{side}|{item['source']}|{level:.{precision}f}|{current.dt}"
-        choices.append((item["rank"], SweepSetup(
-            setup_id, symbol, side, item["source"], level, swept, current.dt,
-            confirm, last_dt=current.dt,
-        )))
-    return max(choices, key=lambda x: x[0], default=(0, None))[1]
+        precision=3 if "JPY" in symbol else 5
+        setup_id=f"{symbol}|{side}|{pool.source}|{key_level:.{precision}f}|{current.dt}"
+        choices.append((pool.rank,SweepSetup(setup_id,symbol,side,pool.source,key_level,swept,current.dt,confirm,last_dt=current.dt)))
+    return max(choices,key=lambda x:x[0],default=(0,None))[1]
 
 
 def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: list[Candle], strength: dict[str, float]) -> dict | None:
@@ -228,7 +228,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     messages.append(message)
 
                     _LAST_CHART_CARDS[message] = (event, freeze_by_tf(by_tf))
-            fresh = detect_new_sweep(symbol, d1, h4, h1)
+            fresh = detect_new_sweep(symbol, d1, h4, h1, by_tf)
             if fresh and fresh.setup_id not in setups:
                 # Один активный sweep каждого направления на пару.
                 for old in setups.values():

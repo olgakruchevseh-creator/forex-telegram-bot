@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 import config as cfg
 from analysis import atr, closed_candles, zigzag
+import levels as levels_engine
 
 TF_MIN={"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
 
@@ -21,6 +22,9 @@ class LiquidityPool:
     rank:int
     status:str               # intact / approached / swept / reclaimed / invalidated
     distance_atr:float
+    zone_low:float|None=None
+    zone_high:float|None=None
+    family:str="LIQUIDITY_LEVELS"
 
 
 def _bars(by_tf,tf):
@@ -47,7 +51,7 @@ def _raw_pools(by_tf,av):
         try:
             swings=zigzag(h4,float(cfg.ZIGZAG_PCT.get("H4",.35)),int(cfg.ZIGZAG_MIN_BARS))[-8:]
             for s in swings:
-                out.append(("BSL" if s.kind=="high" else "SSL",s.price,"confirmed H4 swing", "H4",4))
+                out.append(("BSL" if s.kind=="high" else "SSL",s.price,"Old High H4" if s.kind=="high" else "Old Low H4", "H4",4))
         except Exception: pass
     # Multi-timeframe EQH/EQL. All inputs are already restricted to CLOSED candles
     # by _bars(); pivot confirmation itself requires candles to the right.
@@ -66,11 +70,36 @@ def _raw_pools(by_tf,av):
 
     # Confirmed recent H1 pivots provide local liquidity, below EQH/EQL rank.
     h1_piv=_pivots(h1)
-    for _,p,k in h1_piv[-10:]: out.append(("BSL" if k=="high" else "SSL",p,"confirmed H1 swing","H1",2))
+    for _,p,k in h1_piv[-10:]: out.append(("BSL" if k=="high" else "SSL",p,"Old High H1" if k=="high" else "Old Low H1","H1",2))
+    return out
+
+
+def _significant_sr_zones(symbol, by_tf):
+    """Read significant S/R as zones and expose them to the same liquidity family.
+
+    This is context only.  A zone touch is never a LONG/SHORT event.
+    """
+    try:
+        zones, _, _, _, _ = levels_engine.build_pair_zones(symbol, by_tf)
+    except Exception:
+        return []
+    min_strength=float(getattr(cfg,"LIQUIDITY_LEVELS_MIN_STRENGTH",68))
+    out=[]
+    for z in zones:
+        if float(getattr(z,"strength",0)) < min_strength:
+            continue
+        tfs=list(getattr(z,"tfs",[]) or [])
+        tf=next((x for x in ("W1","D1","H4","H1","M15","M5") if x in tfs), tfs[0] if tfs else "H1")
+        rank=5 if tf in ("W1","D1") else 4 if tf=="H4" else 3
+        side="BSL" if z.kind=="resistance" else "SSL"
+        source="Resistance zone" if z.kind=="resistance" else "Support zone"
+        out.append((side,float(z.mid),source,tf,rank,float(z.low),float(z.high)))
     return out
 
 
 def build_map(symbol,by_tf):
+    if not getattr(cfg, "LIQUIDITY_MAP_ENABLED", True):
+        return []
     h1=_bars(by_tf,"H1"); m15=_bars(by_tf,"M15")
     ref=m15[-1] if m15 else (h1[-1] if h1 else None)
     if ref is None:return []
@@ -78,27 +107,34 @@ def build_map(symbol,by_tf):
     if not av:return []
     tol=av*float(getattr(cfg,"LIQUIDITY_MAP_MERGE_ATR",.16))
     approach=av*float(getattr(cfg,"LIQUIDITY_MAP_APPROACH_ATR",.35))
-    raw=sorted(_raw_pools(by_tf,av),key=lambda x:x[4],reverse=True)
+    raw0=[(*x, None, None) for x in _raw_pools(by_tf,av)]
+    raw=sorted(raw0+_significant_sr_zones(symbol,by_tf),key=lambda x:x[4],reverse=True)
     unique=[]
     for x in raw:
-        if not any(y[0]==x[0] and abs(y[1]-x[1])<=tol for y in unique): unique.append(x)
+        # De-duplicate only the same semantic source here. Cross-source overlap is
+        # intentionally retained for explainability, but every item belongs to the
+        # same LIQUIDITY_LEVELS family and must never be counted as another vote.
+        if not any(y[0]==x[0] and y[2]==x[2] and abs(y[1]-x[1])<=tol for y in unique):
+            unique.append(x)
     recent=m15[-int(getattr(cfg,"LIQUIDITY_MAP_STATUS_LOOKBACK_M15",16)):] if m15 else []
     pools=[]
-    for side,level,source,tf,rank in unique:
+    for side,level,source,tf,rank,zone_low,zone_high in unique:
         status="intact"
         # A wick through + close back is a sweep/reclaim. A close through is invalidation.
         if recent:
+            upper=zone_high if zone_high is not None else level
+            lower=zone_low if zone_low is not None else level
             if side=="BSL":
-                if any(c.close>level+tol for c in recent): status="invalidated"
-                elif any(c.high>level and c.close<level for c in recent): status="reclaimed"
-                elif any(c.high>level for c in recent): status="swept"
+                if any(c.close>upper+tol for c in recent): status="invalidated"
+                elif any(c.high>upper and c.close<upper for c in recent): status="reclaimed"
+                elif any(c.high>upper for c in recent): status="swept"
             else:
-                if any(c.close<level-tol for c in recent): status="invalidated"
-                elif any(c.low<level and c.close>level for c in recent): status="reclaimed"
-                elif any(c.low<level for c in recent): status="swept"
+                if any(c.close<lower-tol for c in recent): status="invalidated"
+                elif any(c.low<lower and c.close>lower for c in recent): status="reclaimed"
+                elif any(c.low<lower for c in recent): status="swept"
         dist=abs(ref.close-level)/av
         if status=="intact" and abs(ref.close-level)<=approach: status="approached"
-        pools.append(LiquidityPool(side,level,source,tf,rank,status,dist))
+        pools.append(LiquidityPool(side,level,source,tf,rank,status,dist,zone_low,zone_high))
     return pools
 
 
