@@ -19,6 +19,7 @@ import zigzag_scanner
 import structure_context
 import precision_entry
 import market_maker_model
+import demand_supply_context
 import next_pivot_projection
 from chart_snapshot import freeze_by_tf
 from analysis import analyze_tf, currency_strength_dynamics
@@ -754,6 +755,12 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         lines.append(f"• {master['liquidity_context']}")
     if master.get("structure_context"):
         lines.append(f"• {master['structure_context']}")
+    try:
+        ds_ctx = demand_supply_context.analyze_symbol(master.get("symbol", ""), master.get("by_tf") or {}, direction)
+        if ds_ctx and ds_ctx.available:
+            lines.append(f"• {demand_supply_context.describe(ds_ctx)}")
+    except Exception:
+        log.exception("DEMAND_SUPPLY_NAVIGATOR_SKIPPED symbol=%s", master.get("symbol", ""))
     try:
         pe_ctx = precision_entry.analyze(master.get("symbol", ""), side, master.get("by_tf") or {}, sources)
         if pe_ctx.available:
