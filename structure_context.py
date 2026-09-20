@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import config as cfg
 import mss
+import cisd
 import ohlc_movement
 import zigzag_scanner
 
@@ -23,9 +24,11 @@ class StructureContext:
     sequence: str
     raw_side: int
     transition_side: int
+    cisd_confirmed: bool
     mss_confirmed: bool
     ohlc_confirmed: bool
-    family: str = "structure"
+    cisd_timeframe: str = ""
+    family: str = "structure_delivery_shift"
 
 
 def _labels(sequence: str) -> list[str]:
@@ -75,17 +78,21 @@ def analyze_symbol(symbol: str, by_tf: dict, candidate_side: int = 0) -> Structu
         state = "THREATENED"
 
     transition_side = -side if side and state == "THREATENED" else 0
-    mss_ok = ohlc_ok = False
+    cisd_ok = mss_ok = ohlc_ok = False
+    cisd_tf = ""
     if transition_side:
-        mss_ctx = mss.analyze_symbol(symbol, by_tf, transition_side)
+        cisd_ctx = cisd.analyze_symbol(symbol, by_tf, transition_side)
+        cisd_ok = bool(cisd_ctx and cisd_ctx.side == transition_side)
+        cisd_tf = cisd_ctx.timeframe if cisd_ctx else ""
+        mss_ctx = mss.analyze_symbol(symbol, by_tf, transition_side) if cisd_ok else None
         mss_ok = bool(mss_ctx and mss_ctx.alignment > 0 and mss_ctx.side == transition_side)
-        if mss_ok:
+        if cisd_ok and mss_ok:
             guard = ohlc_movement.guard_event(by_tf, transition_side, 75)
             ohlc_ok = bool(guard.get("allow", True) and not guard.get("weak_reversal"))
-        if mss_ok and ohlc_ok:
+        if cisd_ok and mss_ok and ohlc_ok:
             side, state = transition_side, "SHIFT_CONFIRMED"
 
-    return StructureContext(side, state, tf, sequence, raw_side, transition_side, mss_ok, ohlc_ok)
+    return StructureContext(side, state, tf, sequence, raw_side, transition_side, cisd_ok, mss_ok, ohlc_ok, cisd_tf)
 
 
 def alignment(ctx: StructureContext | None, candidate_side: int) -> int:
@@ -110,4 +117,6 @@ def describe(ctx: StructureContext | None) -> str:
     direction = "LONG" if ctx.side > 0 else "SHORT" if ctx.side < 0 else "RANGE"
     names = {"CONFIRMED":"подтверждена", "THREATENED":"под угрозой", "SHIFT_CONFIRMED":"смена подтверждена", "FORMING":"формируется"}
     seq = f" · {ctx.sequence}" if ctx.sequence else ""
-    return f"Structure Context {ctx.timeframe}: {direction} · {names.get(ctx.state, ctx.state)}{seq}"
+    delivery = (f" · CISD {ctx.cisd_timeframe} → MSS/BOS" if ctx.cisd_confirmed and ctx.mss_confirmed else
+                f" · CISD {ctx.cisd_timeframe}" if ctx.cisd_confirmed else "")
+    return f"Structure Context {ctx.timeframe}: {direction} · {names.get(ctx.state, ctx.state)}{delivery}{seq}"

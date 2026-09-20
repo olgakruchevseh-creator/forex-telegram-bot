@@ -719,6 +719,19 @@ QUASIMODO_MIN_DIRECTIONAL_BARS = 3
 QUASIMODO_EQUIVALENT_MOVE_ATR = 0.85
 QUASIMODO_CHART_IMAGES_ENABLED = True
 
+# CISD (Change in State of Delivery) — internal early delivery-shift context.
+# Never a standalone Telegram source; correlated with MSS/BOS as one family.
+CISD_ENABLED = True
+CISD_TIMEFRAMES = ("H1", "M15", "M5")
+CISD_LOOKBACK = 60
+CISD_DELIVERY_BARS = 4
+CISD_SWEEP_LOOKBACK = 8
+CISD_ANCHOR_MAX_AGE = 6
+CISD_CLOSE_BUFFER_ATR = 0.03
+CISD_MIN_BODY_ATR = 0.35
+CISD_MIN_BODY_RATIO = 0.50
+CISD_MIN_SWEEP_ATR = 0.03
+
 # Shared Zone Reaction Confirmation (internal shared layer; no Telegram module)
 ZONE_REACTION_MAX_TOUCH_AGE = 2
 ZONE_REACTION_SWEEP_LOOKBACK = 3

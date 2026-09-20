@@ -26,8 +26,9 @@ def test_lost_hl_does_not_auto_flip_without_mss(monkeypatch):
     assert ctx.side==1
 
 
-def test_threat_can_flip_only_with_mss_and_ohlc(monkeypatch):
+def test_threat_can_flip_only_with_cisd_mss_and_ohlc(monkeypatch):
     monkeypatch.setattr(structure_context.zigzag_scanner,"analyze_symbol",lambda *_:_zz("HH → HL → HH → LL"))
+    monkeypatch.setattr(structure_context.cisd,"analyze_symbol",lambda *a:SimpleNamespace(side=-1,timeframe="M15"))
     monkeypatch.setattr(structure_context.mss,"analyze_symbol",lambda *a:SimpleNamespace(alignment=1,side=-1))
     monkeypatch.setattr(structure_context.ohlc_movement,"guard_event",lambda *a,**k:{"allow":True,"weak_reversal":False})
     ctx=structure_context.analyze_symbol("EUR/USD",{},-1)
