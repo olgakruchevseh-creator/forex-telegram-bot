@@ -1,21 +1,21 @@
 """Single read-only normalized market context shared by aggregators."""
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-import market_regime, liquidity_narrative, liquidity_map, exhaustion_engine, ohlc_movement
+import market_regime, liquidity_narrative, liquidity_map, exhaustion_engine, ohlc_movement, inside_bar_context
 from analysis import closed_candles, atr, split_pair
 
 _TF_MIN={"W1":10080,"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
 @dataclass(frozen=True)
 class MarketState:
     symbol:str; direction:int; regime:object; liquidity:object; exhaustion:object; ohlc:dict
-    zones:dict; volatility:dict; news_risk:dict; freshness_utc:str; data_age_minutes:float|None
+    zones:dict; volatility:dict; news_risk:dict; price_action:dict|None; freshness_utc:str; data_age_minutes:float|None
     def as_dict(self):
         return {'symbol':self.symbol,'direction':self.direction,
                 'regime':asdict(self.regime) if self.regime else None,
                 'liquidity':self.liquidity.as_dict() if self.liquidity else None,
                 'exhaustion':self.exhaustion.as_dict() if self.exhaustion else None,
                 'ohlc':self.ohlc,'zones':self.zones,'volatility':self.volatility,
-                'news_risk':self.news_risk,'freshness_utc':self.freshness_utc,
+                'news_risk':self.news_risk,'price_action':self.price_action,'freshness_utc':self.freshness_utc,
                 'data_age_minutes':self.data_age_minutes}
 
 def _dt(value):
@@ -77,4 +77,5 @@ def build(symbol,by_tf,direction,events=None,now_utc=None):
         liquidity_narrative.analyze_symbol(symbol,by_tf,d) if d else None,
         exhaustion_engine.analyze_symbol(symbol,by_tf,d) if d else None,
         ohlc_movement.setup_adjustment(by_tf,d) if d else {'available':False},
-        _zones(symbol,by_tf),_volatility(by_tf,regime),_news(symbol,events or [],now),fresh,age)
+        _zones(symbol,by_tf),_volatility(by_tf,regime),_news(symbol,events or [],now),
+        (lambda c: c.as_dict() if c else None)(inside_bar_context.analyze_symbol(symbol,by_tf,d)),fresh,age)
