@@ -58,7 +58,7 @@ def _raw_pools(by_tf,av):
         tol_mult=float(getattr(cfg,f"LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR_{tf}",
                                getattr(cfg,"LIQUIDITY_MAP_EQUAL_TOLERANCE_ATR",.20)))
         eq_tol=av*tol_mult
-        for kind,side,name in (("high","BSL","equal highs"),("low","SSL","equal lows")):
+        for kind,side,name in (("high","BSL","EQH"),("low","SSL","EQL")):
             vals=[(i,p) for i,p,k in piv if k==kind]
             for a,b in zip(vals,vals[1:]):
                 if b[0]-a[0]>=min_gap and abs(b[1]-a[1])<=eq_tol:

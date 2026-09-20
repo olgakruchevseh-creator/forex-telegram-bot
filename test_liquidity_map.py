@@ -34,10 +34,24 @@ def test_multitimeframe_eqh_eql_are_built_and_ranked():
     for i in (8,16): m15[i].high=1.10300
     for i in (10,20): m15[i].low=1.09700
     mp=liquidity_map.build_map('EUR/USD',{'D1':d,'H4':h4,'H1':h1,'M15':m15})
-    h4_eqh=[x for x in mp if x.source=='equal highs H4']
-    m15_eqh=[x for x in mp if x.source=='equal highs M15']
-    h4_eql=[x for x in mp if x.source=='equal lows H4']
-    m15_eql=[x for x in mp if x.source=='equal lows M15']
+    h4_eqh=[x for x in mp if x.source=='EQH H4']
+    m15_eqh=[x for x in mp if x.source=='EQH M15']
+    h4_eql=[x for x in mp if x.source=='EQL H4']
+    m15_eql=[x for x in mp if x.source=='EQL M15']
     assert h4_eqh and m15_eqh and h4_eql and m15_eql
     assert h4_eqh[0].rank > m15_eqh[0].rank
     assert h4_eql[0].rank > m15_eql[0].rank
+
+
+def test_h1_eqh_eql_are_explicit_liquidity_context_labels():
+    d=bars(25); h4=bars(40); h1=_eq_bars(60,40); m15=bars(100)
+    mp=liquidity_map.build_map('EUR/USD',{'D1':d,'H4':h4,'H1':h1,'M15':m15})
+    assert any(x.source=='EQH H1' and x.side=='BSL' for x in mp)
+    assert any(x.source=='EQL H1' and x.side=='SSL' for x in mp)
+
+def test_eqh_eql_remain_context_only_not_direction_signal():
+    d=bars(25); h4=_eq_bars(240,30); h1=_eq_bars(60,40); m15=_eq_bars(15,40)
+    mp=liquidity_map.build_map('EUR/USD',{'D1':d,'H4':h4,'H1':h1,'M15':m15})
+    assert mp
+    # LiquidityPool intentionally has no LONG/SHORT/direction field: a pool or sweep is context only.
+    assert all(not hasattr(x,'direction') and not hasattr(x,'signal') for x in mp)
