@@ -5,8 +5,9 @@ selects only exceptional same-side convergence. Correlated modules are grouped
 into families so FVG/BPR/Imbalance or ZigZag/MSS/BOS cannot inflate the score.
 """
 from __future__ import annotations
-import hashlib, io, re, time
+import hashlib, io, json, logging, os, re, time
 from collections import defaultdict
+from pathlib import Path
 
 import config as cfg
 import market_regime
@@ -21,10 +22,13 @@ import demand_supply_context
 import evidence_families
 from analysis import analyze_tf, atr, closed_candles
 
+log = logging.getLogger("fxbot.killer")
+
 _PENDING: dict[str, dict] = {}
 # Fresh confirmed facts survive across scan cycles so KILLER can recognize a real
 # sequence (sweep -> structure -> zone reaction) instead of requiring same-tick alerts.
 _FACT_MEMORY: dict[tuple[str,str,str], dict] = {}
+_MEMORY_LOADED = False
 _TF_MIN={"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
 
 _TF_FRESH_SECONDS={"D1":36*3600,"H4":12*3600,"H1":4*3600,"M15":90*60,"M5":30*60}
@@ -41,15 +45,54 @@ def _fresh_seconds(tf):
   except Exception:pass
  return _TF_FRESH_SECONDS.get(tf,4*3600)
 
+def _state_path():
+ root=os.getenv("STATE_DIR","").strip()
+ return (Path(root) if root else Path(__file__).resolve().parent) / "killer_state.json"
+
+def _ensure_memory_loaded():
+ global _MEMORY_LOADED
+ if _MEMORY_LOADED: return
+ _MEMORY_LOADED=True
+ if not getattr(cfg,"KILLER_PERSIST_MEMORY",True): return
+ try:
+  raw=json.loads(_state_path().read_text())
+ except (FileNotFoundError, ValueError, OSError):
+  return
+ rows=raw.get("facts") if isinstance(raw,dict) else raw
+ if not isinstance(rows,list): return
+ now=time.time()
+ for row in rows:
+  if not isinstance(row,dict): continue
+  pair,side,fam=row.get("pair"),row.get("side"),row.get("family")
+  if not pair or not side or not fam: continue
+  fact={"text":row.get("text") or "","seen_at":float(row.get("seen_at") or 0),"tf":row.get("tf") or "H1","quality":int(row.get("quality") or 70),"fingerprint":row.get("fingerprint") or ""}
+  if now-float(fact["seen_at"]) > _fresh_seconds(fact["tf"]): continue
+  _FACT_MEMORY[(str(pair),str(side),str(fam))]=fact
+
+def _save_memory():
+ if not getattr(cfg,"KILLER_PERSIST_MEMORY",True): return
+ rows=[{"pair":p,"side":s,"family":f,"text":v.get("text",""),"seen_at":v.get("seen_at",0),"tf":v.get("tf","H1"),"quality":v.get("quality",70),"fingerprint":v.get("fingerprint","")} for (p,s,f),v in _FACT_MEMORY.items()]
+ try:
+  dest=_state_path(); dest.parent.mkdir(parents=True,exist_ok=True)
+  tmp=dest.with_suffix(".tmp")
+  tmp.write_text(json.dumps({"facts":rows},ensure_ascii=False))
+  tmp.replace(dest)
+ except OSError:
+  log.exception("KILLER_MEMORY_SAVE_FAILED")
+
 def _expire_memory(now=None):
+ _ensure_memory_loaded()
  now=float(now if now is not None else time.time())
+ changed=False
  for key,fact in list(_FACT_MEMORY.items()):
   if now-float(fact.get("seen_at",0)) > _fresh_seconds(fact.get("tf","H1")):
-   _FACT_MEMORY.pop(key,None)
+   _FACT_MEMORY.pop(key,None); changed=True
+ if changed: _save_memory()
 
 def _remember_alerts(alerts, now=None):
  """Store one freshest fact per pair/side/family; structure flip invalidates opposite setup."""
  now=float(now if now is not None else time.time()); _expire_memory(now)
+ before=len(_FACT_MEMORY)
  for t in alerts:
   pair,side=_pair(t),_side(t)
   if not pair or not side: continue
@@ -62,8 +105,11 @@ def _remember_alerts(alerts, now=None):
    for key in [k for k in _FACT_MEMORY if k[0]==pair and k[1]==opposite]: _FACT_MEMORY.pop(key,None)
   for fam in fams:
    _FACT_MEMORY[(pair,side,fam)]={"text":t,"seen_at":now,"tf":tf,"quality":q,"fingerprint":fp}
+ if len(_FACT_MEMORY)!=before or alerts:
+  _save_memory()
 
 def _memory_texts(pair,side,now=None):
+ _ensure_memory_loaded()
  _expire_memory(now)
  facts=[v for (p,s,_f),v in _FACT_MEMORY.items() if p==pair and s==side]
  # De-duplicate a single source text that legitimately maps to more than one family.
@@ -75,8 +121,9 @@ def _memory_texts(pair,side,now=None):
  return out
 
 def reset_memory():
- """Test/maintenance hook; does not affect normal event delivery state."""
- _FACT_MEMORY.clear()
+ """Test/maintenance hook; clears RAM and skips reloading a leftover state file."""
+ global _MEMORY_LOADED
+ _FACT_MEMORY.clear(); _PENDING.clear(); _MEMORY_LOADED=True
 
 _FAMILIES={
  "structure":("ZIGZAG","MSS","BOS","QUASIMODO","DOUBLE TOP","DOUBLE BOTTOM","ДВОЙН","ГОЛОВА И ПЛЕЧИ","1-2-3"),
@@ -135,7 +182,9 @@ def evaluate(pair, side, texts, market, strength):
  # both inflate the count and later drop below the threshold silently.
  if demand_supply_ctx and demand_supply_ctx.confirmed:
   families.add("demand_supply_pd_array"); fam_best["demand_supply_pd_array"]=max(fam_best.get("demand_supply_pd_array",0),82)
-  families.discard("blocks"); families.discard("imbalance")
+  # 1:1 collapse: PD-array replaces the overlapping origin-block family.
+  # FVG/imbalance stays — it is a separate inefficiency confirmation.
+  families.discard("blocks")
  if len(families)<int(getattr(cfg,"KILLER_MIN_FAMILIES",5)):
   return {"eligible":False,"reason":"not_enough_independent_families","families":families,"po3_fvg_context":po3_ctx,"precision_entry":precision_ctx,"demand_supply_context":demand_supply_ctx}
  h1=closed_candles(by_tf.get("H1") or [],60)
@@ -195,13 +244,22 @@ def process_candidates(alerts, market, strength):
  for (pair,side),current_texts in grouped.items():
   texts=_memory_texts(pair,side)
   meta=evaluate(pair,side,texts,market,strength)
-  if not meta.get("eligible"):continue
-  fams=sorted(meta["families"]); sig="|".join(sorted(hashlib.sha1(t.encode()).hexdigest()[:10] for t in texts))
+  fams=sorted(meta.get("families") or [])
+  if not meta.get("eligible"):
+   log.info(
+    "KILLER_REJECT pair=%s side=%s reason=%s score=%s families=%s/%s names=%s",
+    pair,side,meta.get("reason"),meta.get("score"),
+    len(fams),int(getattr(cfg,"KILLER_MIN_FAMILIES",5)),",".join(fams) or "-",
+   )
+   continue
+  log.info("KILLER_ELIGIBLE pair=%s side=%s score=%s families=%s names=%s",
+           pair,side,meta.get("score"),len(fams),",".join(fams))
+  sig="|".join(sorted(hashlib.sha1(t.encode()).hexdigest()[:10] for t in texts))
   event_id=hashlib.sha1(f"{pair}|{side}|{','.join(fams)}|{sig}".encode()).hexdigest()[:20]
   labels=" · ".join(_LABELS.get(f, f) for f in fams)
   def px(v):return f"{v:.3f}" if "JPY" in pair else f"{v:.5f}"
   tr=meta["targets"]
-  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"{structure_context.describe(meta.get('structure_context'))}",f"{po3_fvg_context.describe(meta.get('po3_fvg_context'))}",f"{precision_entry.describe(meta.get('precision_entry'))}",f"{market_maker_model.describe(meta.get('market_maker_model'))}",f"{inside_bar_context.describe(meta.get('inside_bar_context'))}",f"{demand_supply_context.describe(meta.get('demand_supply_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
+  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Качество: {meta['score']}",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"{structure_context.describe(meta.get('structure_context'))}",f"{po3_fvg_context.describe(meta.get('po3_fvg_context'))}",f"{precision_entry.describe(meta.get('precision_entry'))}",f"{market_maker_model.describe(meta.get('market_maker_model'))}",f"{inside_bar_context.describe(meta.get('inside_bar_context'))}",f"{demand_supply_context.describe(meta.get('demand_supply_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
   out.append(text);_PENDING[text]={"pair":pair,"side":side,"meta":meta,"event_id":event_id,"by_tf":by_tf if (by_tf:=market.get(pair)) else {}}
  return out
 

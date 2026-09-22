@@ -23,6 +23,7 @@ from analysis import analyze_tf
 log = logging.getLogger("fxbot.context")
 
 _SOURCE_MARKERS = (
+    ("KILLER", "Killer"),
     ("ICT SILVER BULLET", "Silver Bullet"),
     ("POWER OF THREE", "AMD"),
     ("СНЯТИЕ ЛИКВИДНОСТИ", "Liquidity Sweep"),
@@ -82,7 +83,7 @@ def source_name(text: str) -> str:
 
 
 def _quality(text: str) -> int:
-    match = re.search(r"(?:Качество|Уверенность модели|Вероятность):\s*(\d{1,3})", text or "")
+    match = re.search(r"(?:Killer Score|Качество|Уверенность модели|Вероятность):\s*(\d{1,3})", text or "")
     return int(match.group(1)) if match else 70
 
 
@@ -247,6 +248,9 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
     winners: dict[str, dict] = {}
     for (pair, side), texts in grouped.items():
         texts = sorted(texts, key=_quality, reverse=True)
+        killer = next((item for item in texts if "🏹🎯 KILLER" in item), None)
+        if killer:
+            texts = [killer] + [item for item in texts if item != killer]
         primary, allies = texts[0], texts[1:]
         ctx = inspect(pair, side, market.get(pair) or {}, strength)
         ok, reason = verdict(ctx)

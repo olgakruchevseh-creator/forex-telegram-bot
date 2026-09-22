@@ -751,6 +751,10 @@ KILLER_ENABLED = True
 KILLER_SCORE_THRESHOLD = 88
 KILLER_MIN_FAMILIES = 5
 KILLER_CHART_IMAGES_ENABLED = True
+# Memory of confirmed families survives Railway restarts when STATE_DIR is set.
+KILLER_PERSIST_MEMORY = True
+# Meta-card is not competing with its own source modules for the H1 budget.
+KILLER_BYPASS_HOURLY_CAP = True
 
 # PO3 x FVG shared scenario context. Internal only; never a Telegram source.
 PO3_FVG_CONTEXT_ENABLED = True

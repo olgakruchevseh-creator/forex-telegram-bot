@@ -601,6 +601,13 @@ def _source_event_id(text: str) -> str:
                 return event_id
         except Exception:
             log.exception("ZIGZAG_EVENT_ID_FAILED")
+    if "🏹🎯 KILLER" in (text or ""):
+        try:
+            event_id = killer_engine.event_id_for_alert(text)
+            if event_id:
+                return event_id
+        except Exception:
+            log.exception("KILLER_EVENT_ID_FAILED")
     return hashlib.sha256((text or "").encode()).hexdigest()[:24]
 
 
@@ -747,9 +754,13 @@ def _alert_rank(item: tuple[int, str]) -> tuple[float, int, int]:
     """Качество/вероятность главнее прежнего фиксированного порядка модулей."""
     priority, text = item
     quality = _alert_metric(text, "Качество")
+    if quality is None:
+        quality = _alert_metric(text, "Killer Score")
     probability = _alert_metric(text, "Уверенность модели")
     if probability is None:
         probability = _alert_metric(text, "Вероятность")
+    if probability is None:
+        probability = _alert_metric(text, "Killer Score")
     # У ZigZag и некоторых структурных событий числовой оценки нет. Для них
     # сохраняется спокойный базовый балл и прежний приоритет как tie-breaker.
     default = {0: 78, 1: 75, 2: 70, 3: 68}.get(priority, 70)
@@ -1224,12 +1235,18 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # не участвует в ранжировании и не может быть вытеснен/задублирован.
 
         # Верхний предел новых карточек за H1. 0 = без лимита.
-        # AMD и обязательный пробой уровня идут отдельно и лимит не едят.
+        # AMD, обязательный пробой уровня и KILLER идут отдельно и лимит не едят.
         hourly_cap = int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 7) or 0)
+        killer_cards = []
+        trade_pool = list(module_alerts)
+        if getattr(cfg, "KILLER_BYPASS_HOURLY_CAP", True):
+            killer_cards = [(-2, text) for _p, text in module_alerts if "🏹🎯 KILLER" in text]
+            trade_pool = [(p, text) for p, text in module_alerts if "🏹🎯 KILLER" not in text]
         if hourly_cap > 0:
-            selected_alerts = [(0, text) for text in select_trade_alerts(module_alerts, limit=hourly_cap)]
+            selected_alerts = [(0, text) for text in select_trade_alerts(trade_pool, limit=hourly_cap)]
         else:
-            selected_alerts = list(module_alerts)
+            selected_alerts = list(trade_pool)
+        selected_alerts = killer_cards + selected_alerts
         if scan_stats.abort_delivery():
             selected_alerts = []
             mandatory_amd_alerts = []

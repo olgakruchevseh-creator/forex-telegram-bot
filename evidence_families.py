@@ -58,7 +58,6 @@ _TITLE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("entry_location_execution", (
         "PRECISION ENTRY", "IOFED", "CONSEQUENT ENCROACHMENT",
     )),
-    ("session_setup", ("KILLER",)),
 )
 
 # Used only when the title did not name a module. Still exclusive:
