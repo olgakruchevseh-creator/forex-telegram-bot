@@ -556,7 +556,8 @@ LTF_CONFIRM_ALIGN_BONUS = 5
 LTF_CONFIRM_CONFLICT_PENALTY = 5
 
 
-# Balanced Price Range — internal confluence only; no standalone alerts.
+# Balanced Price Range — зона копится молча; карточка только после реакции + OHLC
+# и только через общий контур Master / Navigator, не отдельным входом.
 BPR_ENABLED = True
 BPR_TIMEFRAMES = ("H1", "M15", "M5")
 BPR_LOOKBACK = 80

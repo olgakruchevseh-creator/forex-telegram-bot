@@ -373,7 +373,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Смотрю W1, D1, H4, H1, M15, M5.\n"
         "Пишу подтверждённые события по закрытым свечам; сила валют учитывается как контекст, "
         "включая её устойчивую динамику во времени.\n"
-        "После закрытия каждой часовой свечи присылаю полный брифинг.\n\n"
+        "Полный брифинг — на открытии сессии (Азия / Европа / Америка), не каждый час. "
+        "Новости high-impact идут отдельным потоком.\n\n"
         "/now — сила валют сейчас\n"
         "/pair EUR/USD — стек таймфреймов по паре\n"
         "/briefing — брифинг текущей сессии\n"
@@ -384,7 +385,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Работаю. 7 мажоров × W1/D1/H4/H1/M15/M5.\n"
-        "Полный брифинг — после закрытия каждой H1."
+        "Полный брифинг — на открытии сессии, не после каждой H1."
     )
 
 
@@ -910,12 +911,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                             market=market,
                         )
                     except Exception:
-                        log.exception("DXY часового брифинга")
+                        log.exception("DXY сессионного брифинга")
                         dxy = None
                     try:
                         events = briefing.session_events(newsmod.load_events())
                     except Exception:
-                        log.exception("новости часового брифинга")
+                        log.exception("новости сессионного брифинга")
                         events = []
                     text = briefing.build_briefing_text(market, strength, rank, dxy, events)
                     parts = briefing.prepare_telegram_parts(text)
@@ -937,7 +938,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     sent_ok = True
                     log.info("брифинг отправлен issue=%s parts=%s", iid, len(parts))
                 except Exception:
-                    log.exception("отправка часового брифинга")
+                    log.exception("отправка сессионного брифинга")
                     briefing.release_issue(state, iid)
                 if not sent_ok:
                     briefing.release_issue(state, iid)

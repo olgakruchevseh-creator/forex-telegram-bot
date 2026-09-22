@@ -49,7 +49,7 @@ python bot.py
 
 | Что | Где |
 |---|---|
-| Мало сигналов | `PAIR_STRENGTH_MIN`, `MASTER_STRENGTH_MIN_GAP`, `HTF_MIN_AGREE`, `LTF_MIN_AGREE`, `MASTER_MIN_QUALITY` |
+| Мало сигналов | `MASTER_MIN_QUALITY`, `MAX_MODULE_ALERTS_PER_H1`. Сила и LTF сейчас штраф/контекст, не жёсткий запрет |
 | Много карточек за час | `MAX_MODULE_ALERTS_PER_H1` |
 | Неполная корзина | `MARKET_REQUIRE_COMPLETE`, `MARKET_REQUIRED_TFS` |
 | Слишком строгий abort сканеров | `SCAN_FAIL_ABORT_RATIO` |
@@ -73,14 +73,14 @@ python bot.py
 Тогда постоянно хранятся:
 
 - `/data/state.json` — чат, брифинг, отправленные сигналы
-- `/data/briefing.db` — атомарный замок часового брифинга
+- `/data/briefing.db` — атомарный замок сессионного брифинга
 - `/data/levels_state.json` — уровни
 - `/data/patterns_state.json` — паттерны
 - `/data/poc_state.json` — антиспам POC между рестартами
 
 Важно: путь `/data` без подключённого Volume **не** является постоянным хранилищем.
 
-Обязательно для одного брифинга на одну H1:
+Обязательно для одного брифинга на одну сессию:
 
 - Volume подключён, точка монтирования `/data`
 - переменная `STATE_DIR=/data`
