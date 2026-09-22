@@ -42,7 +42,6 @@ import accumulation_distribution
 import consolidation_zone
 import amd_power_of_three
 import crt_candle_range
-import movement_progress
 import ohlc_movement
 import liquidity_sweep
 import poc_profile

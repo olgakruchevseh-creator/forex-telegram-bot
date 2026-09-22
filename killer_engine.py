@@ -18,6 +18,7 @@ import precision_entry
 import market_maker_model
 import inside_bar_context
 import demand_supply_context
+import evidence_families
 from analysis import analyze_tf, atr, closed_candles
 
 _PENDING: dict[str, dict] = {}
@@ -89,8 +90,7 @@ _FAMILIES={
  "entry_location_execution":("IOFED","OTE","CONSEQUENT ENCROACHMENT","PRECISION ENTRY"),
  "demand_supply_pd_array":("DEMAND ZONE","SUPPLY ZONE"),
 }
-_LABELS={"structure":"Structure/MSS","liquidity":"Liquidity","imbalance":"FVG/BPR/Imbalance","po3_fvg_scenario":"PO3×FVG scenario",
- "blocks":"OB/MB/Breaker","levels":"Levels/PDH-PDL","smc_fib":"Fib/SMC","session_setup":"Session/CRT/AMD","reversal":"Reversal","entry_location_execution":"Entry Location/Execution"}
+_LABELS=dict(evidence_families.LABELS)
 _WEIGHTS={"structure":13,"liquidity":12,"imbalance":10,"po3_fvg_scenario":10,"blocks":9,"levels":9,"smc_fib":8,"session_setup":8,"reversal":7,"entry_location_execution":7,"demand_supply_pd_array":9}
 
 def _pair(t):
@@ -103,7 +103,8 @@ def _quality(t):
  vals=[int(x) for x in re.findall(r"(?:Качество|Уверенность модели|Вероятность):\s*(\d{1,3})",t or "",re.I)]
  return max(vals) if vals else 70
 def _families(t):
- u=(t or "").upper(); return {f for f,marks in _FAMILIES.items() if any(x in u for x in marks)}
+ # One source card is one family. Title beats incidental MSS/FVG/CHOCH words.
+ return evidence_families.families_of(t)
 def _views(by_tf, direction):
  out={}
  for tf,m in _TF_MIN.items():
@@ -128,8 +129,15 @@ def evaluate(pair, side, texts, market, strength):
  if precision_ctx.ready:
   families.add("entry_location_execution")
   fam_best["entry_location_execution"]=max(fam_best.get("entry_location_execution",0),82)
+ demand_supply_ctx=demand_supply_context.analyze_symbol(pair,by_tf,direction)
+ # Demand/Supply and overlapping OB/MB/FVG are one correlated PD-array fact.
+ # Collapse BEFORE the independent-family floor so a merged PD-array cannot
+ # both inflate the count and later drop below the threshold silently.
+ if demand_supply_ctx and demand_supply_ctx.confirmed:
+  families.add("demand_supply_pd_array"); fam_best["demand_supply_pd_array"]=max(fam_best.get("demand_supply_pd_array",0),82)
+  families.discard("blocks"); families.discard("imbalance")
  if len(families)<int(getattr(cfg,"KILLER_MIN_FAMILIES",5)):
-  return {"eligible":False,"reason":"not_enough_independent_families","families":families,"po3_fvg_context":po3_ctx,"precision_entry":precision_ctx}
+  return {"eligible":False,"reason":"not_enough_independent_families","families":families,"po3_fvg_context":po3_ctx,"precision_entry":precision_ctx,"demand_supply_context":demand_supply_ctx}
  h1=closed_candles(by_tf.get("H1") or [],60)
  if len(h1)<25:return {"eligible":False,"reason":"insufficient_h1","families":families}
  views=_views(by_tf,direction); senior=sum(views[x]==direction for x in ("D1","H4","H1")); junior=sum(views[x]==direction for x in ("H1","M15","M5"))
@@ -143,11 +151,6 @@ def evaluate(pair, side, texts, market, strength):
   return {"eligible":False,"reason":"ohlc_contradiction","families":families}
  regime=market_regime.analyze_symbol(pair,by_tf); rname=regime.name if regime else "UNKNOWN"
  price_action_ctx=inside_bar_context.analyze_symbol(pair,by_tf,direction)
- demand_supply_ctx=demand_supply_context.analyze_symbol(pair,by_tf,direction)
- # Demand/Supply and overlapping OB/MB/FVG are one correlated PD-array fact.
- if demand_supply_ctx and demand_supply_ctx.confirmed:
-  families.add("demand_supply_pd_array"); fam_best["demand_supply_pd_array"]=max(fam_best.get("demand_supply_pd_array",0),82)
-  families.discard("blocks"); families.discard("imbalance")
  structure_ctx=structure_context.analyze_symbol(pair,by_tf,direction)
  liquidity_ctx=liquidity_context.analyze_symbol(pair,by_tf,direction,texts)
  mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
@@ -195,7 +198,7 @@ def process_candidates(alerts, market, strength):
   if not meta.get("eligible"):continue
   fams=sorted(meta["families"]); sig="|".join(sorted(hashlib.sha1(t.encode()).hexdigest()[:10] for t in texts))
   event_id=hashlib.sha1(f"{pair}|{side}|{','.join(fams)}|{sig}".encode()).hexdigest()[:20]
-  labels=" · ".join(_LABELS[f] for f in fams)
+  labels=" · ".join(_LABELS.get(f, f) for f in fams)
   def px(v):return f"{v:.3f}" if "JPY" in pair else f"{v:.5f}"
   tr=meta["targets"]
   text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"{structure_context.describe(meta.get('structure_context'))}",f"{po3_fvg_context.describe(meta.get('po3_fvg_context'))}",f"{precision_entry.describe(meta.get('precision_entry'))}",f"{market_maker_model.describe(meta.get('market_maker_model'))}",f"{inside_bar_context.describe(meta.get('inside_bar_context'))}",f"{demand_supply_context.describe(meta.get('demand_supply_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])

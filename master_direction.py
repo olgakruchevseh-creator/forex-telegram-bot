@@ -25,6 +25,7 @@ import imd
 import idm
 import daily_high_low
 import ohlc_movement
+import evidence_families
 from analysis import PairStack, build_stack, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
@@ -115,22 +116,8 @@ def _module_evidence(symbol: str, side: int, alerts: list[str]) -> tuple[list[st
 
 def _evidence_family(text: str) -> str:
     """Collapse correlated confirmations so one market fact is one vote."""
-    upper = (text or "").upper()
-    if any(x in upper for x in ("QUASIMODO", "MSS", "CHOCH", "ZIGZAG", "СТРУКТУР")):
-        return "structure"
-    if any(x in upper for x in ("BALANCED PRICE RANGE", "BPR", "IMBALANCE", "ИМБАЛАНС", "ДИСБАЛАНС", "FVG")):
-        return "imbalance"
-    if any(x in upper for x in ("СНЯТИЕ ЛИКВИДНОСТИ", "SILVER BULLET", "PDH", "PDL", "EQH", "EQL")):
-        return "liquidity"
-    if any(x in upper for x in ("ORDER BLOCK", "BREAKER BLOCK")):
-        return "blocks"
-    if any(x in upper for x in ("CRT", "POWER OF THREE", "AMD")):
-        return "range_manipulation"
-    if any(x in upper for x in ("ПАТТЕРН", "PATTERN")):
-        return "pattern"
-    if any(x in upper for x in ("ПРОБОЙ УРОВНЯ", "ОТБОЙ ОТ", "РЕТТЕСТ", "LEVEL")):
-        return "levels"
-    return _evidence_name(text)
+    family = evidence_families.primary_family(text)
+    return family or _evidence_name(text)
 
 def _aligned_families(symbol: str, side: int, alerts: list[str]) -> set[str]:
     out = set()
@@ -216,7 +203,7 @@ def analyze_symbol(
     evidence_families = _aligned_families(symbol, side, alerts)
     po3_fvg_ctx = po3_fvg_context.analyze(symbol, "LONG" if side > 0 else "SHORT", by_tf, alerts)
     evidence_families = po3_fvg_context.collapse_families(
-        evidence_families, po3_fvg_ctx, "range_manipulation", "imbalance"
+        evidence_families, po3_fvg_ctx, "session_setup", "imbalance"
     )
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
         return None
@@ -250,23 +237,16 @@ def analyze_symbol(
     quality += 7 + min(6, max(0, len(evidence_families) - 1) * 2)
     if usd_expected and dxy_bias == usd_expected:
         quality += 5
-    # IRL + ERL are one liquidity-route family: never double-count them.
+    # IRL + ERL + IDM + PDH/PDL live in one liquidity-route family.
+    # BPR / propulsion alignment is already represented by the imbalance/blocks
+    # evidence family when those cards exist — do not pay a second coin.
     quality += max(0, liquidity_context.score_delta(liquidity_ctx))
     if ltf_ctx and ltf_ctx.alignment > 0:
         quality += int(getattr(cfg, "LTF_CONFIRM_ALIGN_BONUS", 5))
-    if bpr_ctx and bpr_ctx.alignment > 0:
-        quality += int(getattr(cfg, "BPR_ALIGN_BONUS", 4))
-    if propulsion_ctx and propulsion_ctx.alignment > 0:
-        quality += int(getattr(cfg, "PROPULSION_ALIGN_BONUS", 4))
     # MSS/CHOCH are already represented inside the single STRUCTURE adjustment above.
-    # Do not add a second structural vote/bonus here.
     if premium_discount_ctx and premium_discount_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
-    if idm_sweep_ctx and idm_sweep_ctx.alignment > 0:
-        quality += int(getattr(cfg, "IDM_SWEEP_BONUS", 4))
-    if pdh_pdl_ctx and pdh_pdl_ctx.alignment > 0:
-        quality += int(getattr(cfg, "PDH_PDL_SWEEP_BONUS", 4))
     quality += int(ohlc_ctx.get("quality_delta", 0))
     regime_weight = market_regime.quality_adjustment(regime_ctx, side, ohlc_ctx)
     quality += int(regime_weight.get("delta", 0))
@@ -422,7 +402,7 @@ def analyze_local_amd_symbol(
         "senior_n": senior_n,
         "junior_n": junior_n,
         "evidence": aligned,
-        "evidence_families": ["range_manipulation"],
+        "evidence_families": ["session_setup"],
         "dxy_bias": 0,
         "local_early": True,
         "zigzag_h4": "RANGE",
