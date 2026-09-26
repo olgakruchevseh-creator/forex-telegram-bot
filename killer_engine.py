@@ -169,6 +169,18 @@ def evaluate(pair, side, texts, market, strength):
   for f in _families(t):
    families.add(f); fam_best[f]=max(fam_best.get(f,0),_quality(t))
  po3_ctx=po3_fvg_context.analyze(pair,side,by_tf,texts)
+ # HUNTER scans live market context even when no detector emitted a card this tick.
+ # Only already-confirmed shared contexts may become a family; forming/threatened
+ # observations remain score/context only and cannot manufacture convergence.
+ direction=1 if side=="LONG" else -1
+ structure_ctx=structure_context.analyze_symbol(pair,by_tf,direction)
+ liquidity_ctx=liquidity_context.analyze_symbol(pair,by_tf,direction,texts)
+ if structure_ctx and structure_ctx.side==direction and structure_ctx.state in ("CONFIRMED","SHIFT_CONFIRMED"):
+  families.add("structure"); fam_best["structure"]=max(fam_best.get("structure",0),82 if structure_ctx.state=="CONFIRMED" else 88)
+ if liquidity_ctx and liquidity_ctx.sweep_reclaimed:
+  # A reclaimed directional raid is confirmed liquidity evidence. It is still
+  # exactly one Liquidity family, never BSL+SSL+sweep as several votes.
+  families.add("liquidity"); fam_best["liquidity"]=max(fam_best.get("liquidity",0),84)
  raw_families=set(families)
  families=po3_fvg_context.collapse_families(families,po3_ctx,"session_setup","imbalance")
  if "po3_fvg_scenario" in families:
@@ -205,8 +217,6 @@ def evaluate(pair, side, texts, market, strength):
   return {"eligible":False,"reason":"ohlc_contradiction","families":families}
  regime=market_regime.analyze_symbol(pair,by_tf); rname=regime.name if regime else "UNKNOWN"
  price_action_ctx=inside_bar_context.analyze_symbol(pair,by_tf,direction)
- structure_ctx=structure_context.analyze_symbol(pair,by_tf,direction)
- liquidity_ctx=liquidity_context.analyze_symbol(pair,by_tf,direction,texts)
  mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
  # A KILLER entry cannot be exceptional if its external liquidity target is already consumed.
  if liquidity_ctx and liquidity_ctx.residual_state=="EXHAUSTED":
@@ -241,15 +251,29 @@ def evaluate(pair, side, texts, market, strength):
  return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx}
 
 def process_candidates(alerts, market, strength):
+ """Active Hunter + strict Execution gate.
+
+ Hunter evaluates every available pair in both directions on every scan and also
+ keeps fresh event-memory. Execution remains unchanged: >= configured independent
+ families, OHLC, late-entry, residual, TF alignment and score threshold.
+ """
  _PENDING.clear(); grouped=defaultdict(list)
  _remember_alerts(alerts)
- # Only a pair/side touched in the current scan may emit KILLER; memory supplies
- # preceding fresh confirmations but can never emit an event by itself.
  for t in alerts:
   p,s=_pair(t),_side(t)
-  if p and s:grouped[(p,s)].append(t)
+  if p and s: grouped[(p,s)].append(t)
+ # Active search: do not wait for a module alert to touch the pair this cycle.
+ # Both sides are evaluated deliberately; structural/TF contradictions reject the
+ # wrong thesis. This makes diagnostics show where every live candidate stops.
+ keys=set(grouped)
+ keys.update((p,s) for (p,s,_f) in _FACT_MEMORY)
+ if getattr(cfg,"KILLER_HUNTER_ENABLED",True):
+  for pair,by_tf in (market or {}).items():
+   if not isinstance(pair,str) or "/" not in pair or not isinstance(by_tf,dict): continue
+   if len(closed_candles(by_tf.get("H1") or [],60)) < 25: continue
+   keys.add((pair,"LONG")); keys.add((pair,"SHORT"))
  out=[]
- for (pair,side),current_texts in grouped.items():
+ for pair,side in sorted(keys):
   texts=_memory_texts(pair,side)
   meta=evaluate(pair,side,texts,market,strength)
   _diag(pair,side,meta)

@@ -748,6 +748,7 @@ IMBALANCE_REACTION_EQUIVALENT_MOVE_ATR = 0.85
 
 # KILLER meta-selector — rare high-convergence setups only.
 KILLER_ENABLED = True
+KILLER_HUNTER_ENABLED = True  # active scan of all pairs/sides; execution gates remain strict
 KILLER_SCORE_THRESHOLD = 88
 KILLER_MIN_FAMILIES = 5
 KILLER_CHART_IMAGES_ENABLED = True
