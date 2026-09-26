@@ -20,6 +20,8 @@ import precision_entry
 import market_maker_model
 import inside_bar_context
 import demand_supply_context
+import pump_dump_context
+import divergence_context
 import evidence_families
 from analysis import analyze_tf, atr, closed_candles
 
@@ -178,6 +180,8 @@ def evaluate(pair, side, texts, market, strength):
   families.add("entry_location_execution")
   fam_best["entry_location_execution"]=max(fam_best.get("entry_location_execution",0),82)
  demand_supply_ctx=demand_supply_context.analyze_symbol(pair,by_tf,direction)
+ pump_dump_ctx=pump_dump_context.analyze_symbol(pair,by_tf,direction)
+ divergence_ctx=divergence_context.analyze_symbol(pair,market,direction)
  # Demand/Supply and overlapping OB/MB/FVG are one correlated PD-array fact.
  # Collapse BEFORE the independent-family floor so a merged PD-array cannot
  # both inflate the count and later drop below the threshold silently.
@@ -206,7 +210,7 @@ def evaluate(pair, side, texts, market, strength):
  mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
  # A KILLER entry cannot be exceptional if its external liquidity target is already consumed.
  if liquidity_ctx and liquidity_ctx.residual_state=="EXHAUSTED":
-  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx}
+  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx}
  # Hard contradiction only for genuinely poor context; soft disagreements reduce score.
  if senior==0 or junior==0:return {"eligible":False,"reason":"critical_tf_contradiction","families":families}
  family_score=sum(_WEIGHTS[f] for f in families)
@@ -226,12 +230,15 @@ def evaluate(pair, side, texts, market, strength):
  score += structure_context.score_delta(structure_ctx,direction)
  score += precision_entry.score_delta(precision_ctx)
  score += market_maker_model.score_delta(mmm_ctx)
+ # Pump/Dump and Divergence are correlated context only: bounded score adjustment, never families.
+ score += pump_dump_context.score_delta(pump_dump_ctx,direction)
+ score += divergence_context.score_delta(divergence_ctx,direction)
  score=max(0,min(100,int(round(score))))
  threshold=int(getattr(cfg,"KILLER_SCORE_THRESHOLD",88))
  if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families}
  av=atr(h1,14); entry=float(h1[-1].close); mult=(1 if direction>0 else -1)
  targets=[entry+mult*av*x for x in (1.0,1.75,2.5)]
- return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx}
+ return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx}
 
 def process_candidates(alerts, market, strength):
  _PENDING.clear(); grouped=defaultdict(list)

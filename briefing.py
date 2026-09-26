@@ -28,6 +28,9 @@ from analysis import (
     split_pair,
 )
 import news as newsmod
+import session_cycle_context
+import pump_dump_context
+import divergence_context
 
 log = logging.getLogger("fxbot.briefing")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
@@ -950,6 +953,37 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
     return lines
 
 
+def format_session_cycle_block(market: dict) -> list[str]:
+    lines=["", "🔄 SESSION CYCLE / AMD — ФАКТИЧЕСКАЯ ФАЗА", ""]
+    for symbol in getattr(cfg,"PAIRS", list((market or {}).keys())):
+        by_tf=(market or {}).get(symbol) or {}
+        phases=session_cycle_context.analyze_symbol(symbol,by_tf)
+        if not phases: continue
+        parts=session_cycle_context.describe(phases)
+        pd=pump_dump_context.analyze_symbol(symbol,by_tf)
+        extra=f" · {pump_dump_context.describe(pd)}" if pd and pd.confirmed else ""
+        lines.append(f"{symbol}: " + " → ".join(parts) + extra)
+    if len(lines)==3: lines.append("Недостаточно закрытых H1 для классификации")
+    lines.append("Фазы определяются по факту рынка; фиксированной Asia→Europe→America схемы нет.")
+    return lines
+
+def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]:
+    lines=["", "🧭 NEXT SESSION STRENGTH / BIAS", ""]
+    for b in briefs:
+        tech=technical_pair_side(b)
+        if not tech: continue
+        direction=1 if tech=="LONG" else -1
+        directed=b.gap*direction
+        score=52 + min(18,b.agree_n*4) + (7 if directed>0.05 else -7 if directed<-.05 else 0)
+        div=divergence_context.analyze_symbol(b.symbol,market,direction)
+        score += divergence_context.score_delta(div,direction)*2
+        score=max(45,min(82,int(round(score))))
+        note=(f" · {div.kind}" if div and div.confirmed else "")
+        lines.append(f"{b.symbol}: {tech} bias · {score}% · current gap {b.gap:+.2f}{note}")
+    if len(lines)==3: lines.append("Нет подтверждённого прогнозного bias")
+    lines.append("Это вероятностный bias следующей сессии, не гарантированное направление.")
+    return lines
+
 def build_briefing_text(
     market: dict,
     strength: dict[str, float],
@@ -990,6 +1024,11 @@ def build_briefing_text(
         lines.extend(format_until_next_briefing(upcoming_events or [], now_utc))
     except Exception:
         log.exception("блок событий до следующего брифинга")
+    try:
+        lines.extend(format_session_cycle_block(market))
+        lines.extend(format_next_session_bias(briefs, market))
+    except Exception:
+        log.exception("session cycle / next-session bias")
     try:
         lines.extend(format_board(briefs))
     except Exception:

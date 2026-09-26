@@ -15,6 +15,7 @@ import config as cfg
 import ohlc_movement
 import movement_progress
 import market_state
+import market_regime
 import zigzag_scanner
 import structure_context
 import precision_entry
@@ -604,6 +605,19 @@ def _time_horizon_lines(h: dict) -> list[str]:
 
 
 
+def _macro_horizon_lines(side: str, by_tf: dict) -> list[str]:
+    """HTF direction horizon: broad scenario window, not a promise or exit timer."""
+    direction=1 if side=="LONG" else -1
+    aligned=0
+    for tf,mins in (("W1",10080),("D1",1440),("H4",240),("H1",60)):
+        bars=movement_progress.closed_candles((by_tf or {}).get(tf) or [],mins)
+        if len(bars)>=20 and analyze_tf(tf,tf,bars).bias==direction: aligned+=1
+    if aligned>=4: window="3–10 дней"
+    elif aligned==3: window="1–5 дней"
+    elif aligned==2: window="12–48 часов"
+    else: window="локальный сценарий; HTF-горизонт не подтверждён"
+    return [f"🧭 Macro Direction Horizon: {window}",f"• HTF согласование W1/D1/H4/H1: {aligned}/4; пересчитывается при structural shift"]
+
 def _strength_dynamics_context(symbol: str, side: str, by_tf: dict) -> dict:
     """Translate basket-gap dynamics into Navigator context, never a hard veto."""
     h1_series = {}
@@ -802,7 +816,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         if route.get("pivot_inside"):
             lines.append("• 📍 Цена уже находится внутри ожидаемой Pivot-зоны; потенциал текущего движения ограничен")
     horizon = _time_horizon(master["symbol"], side, master.get("by_tf") or {}, route, master)
-    lines.extend(["", *_time_horizon_lines(horizon)])
+    lines.extend(["", *_time_horizon_lines(horizon), *_macro_horizon_lines(side, master.get("by_tf") or {})])
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     final_fact = ("Факт: подтверждённое событие исходного модуля принято Навигатором; таймфреймы, сила валют и ZigZag показаны как контекст сопровождения, а не как повторный запрет."
                   if source_accepted else
@@ -1228,7 +1242,15 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             pullback_bars = 0
             if extreme:
                 pullback_bars = sum(1 for bar in h1_path if bar.dt > extreme.dt)
-            if retrace >= min_retrace and not item.get("pullback_open"):
+            min_pb_bars=int(getattr(cfg,"SIGNAL_PULLBACK_MIN_H1_BARS",3))
+            eq_atr=float(getattr(cfg,"SIGNAL_PULLBACK_EQUIVALENT_MOVE_ATR",0.85))
+            av_pb=movement_progress.atr(h1_path,14) if len(h1_path)>=15 else 0.0
+            counter_move=abs(float(h1_bar.close)-float(h1_best))
+            equivalent=bool(av_pb>0 and counter_move/av_pb>=eq_atr)
+            regime=market_regime.analyze_symbol(symbol, by_tf)
+            regime_name=regime.name if regime else "UNKNOWN"
+            pullback_confirmed=(pullback_bars>=min_pb_bars or equivalent) and regime_name not in ("RANGE","COMPRESSION")
+            if retrace >= min_retrace and pullback_confirmed and not item.get("pullback_open"):
                 item["pullback_open"] = True
                 item["pullback_retrace"] = retrace
                 item["pullback_bars"] = pullback_bars

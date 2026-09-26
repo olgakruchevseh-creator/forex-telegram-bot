@@ -23,6 +23,7 @@ class InsideBarContext:
     confirmed:bool
     reason:str
     family:str="COMPRESSION/PRICE_ACTION"
+    event_dt:str=""
     def as_dict(self): return asdict(self)
 
 def _inside(bar,mother):
@@ -58,7 +59,7 @@ def _scan_tf(bars,tf):
                 state="FALSE_BREAK";direction=1;confirmed=True;reason="sweep Low Mother Bar + возврат закрытием внутрь"
             else:
                 reason="выход не подтверждён закрытием; остаётся compression context"
-        ctx=InsideBarContext(tf,state,direction,mother.high,mother.low,round(ratio,2) if ratio is not None else None,count,count>=2,confirmed,reason)
+        ctx=InsideBarContext(tf,state,direction,mother.high,mother.low,round(ratio,2) if ratio is not None else None,count,count>=2,confirmed,reason,event_dt=(b[j].dt if j<len(b) else b[-1].dt))
         rank=(1 if ctx.confirmed else 0,count,i)
         if best is None or rank>best[0]: best=(rank,ctx)
     return best[1] if best else None
@@ -71,8 +72,10 @@ def analyze_symbol(symbol,by_tf,direction=0):
         if c:found.append(c)
     if not found:return None
     confirmed=[c for c in found if c.confirmed]
-    # TF order above intentionally gives H4/H1 priority for equal state.
-    return (confirmed or found)[0]
+    pool=confirmed or found
+    # Freshness wins. TF is only a tie-breaker, never a reason to return an older event.
+    priority={"H4":5,"H1":4,"M15":3,"M5":2,"D1":1}
+    return max(pool,key=lambda c:(str(c.event_dt or ""),priority.get(c.timeframe,0)))
 
 def score_delta(ctx,direction:int)->int:
     """Tiny bounded context adjustment; never an independent confirmation family."""

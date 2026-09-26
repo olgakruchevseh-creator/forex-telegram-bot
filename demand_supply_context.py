@@ -8,6 +8,8 @@ facts are collapsed into the single DEMAND_SUPPLY/PD_ARRAY family.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import json, os
+from pathlib import Path
 
 import config as cfg
 import cisd
@@ -16,6 +18,24 @@ import zone_reaction_confirmation as zrc
 from analysis import atr, closed_candles
 
 _TF_MIN={"H4":240,"H1":60,"M15":15}
+
+
+def _state_path():
+    root=os.getenv("STATE_DIR","").strip()
+    return (Path(root) if root else Path(__file__).resolve().parent)/"demand_supply_state.json"
+
+def _load_state():
+    try:
+        x=json.loads(_state_path().read_text()); return x if isinstance(x,dict) else {}
+    except (FileNotFoundError,ValueError,OSError): return {}
+
+def _save_state(x):
+    try:
+        d=_state_path(); d.parent.mkdir(parents=True,exist_ok=True); t=d.with_suffix(".tmp")
+        t.write_text(json.dumps(x,ensure_ascii=False)); t.replace(d)
+    except OSError: pass
+
+def _touch_key(symbol,side,tf,created): return f"{symbol}|{side}|{tf}|{created}"
 
 @dataclass(frozen=True)
 class DemandSupplyContext:
@@ -69,11 +89,17 @@ def analyze_symbol(symbol:str,by_tf:dict,side:int)->DemandSupplyContext|None:
         confirm_tf="M15" if (by_tf or {}).get("M15") else tf
         confirm=closed_candles((by_tf or {}).get(confirm_tf) or [],_TF_MIN[confirm_tf])
         if len(confirm)<20:continue
-        zr=zrc.confirm_zone_reaction(confirm,low,high,"LONG" if side>0 else "SHORT",created_dt=created,
+        state=_load_state(); key=_touch_key(symbol,side,tf,created); touch_dt=str((state.get(key) or {}).get("touch_dt") or "")
+        zr=zrc.confirm_zone_reaction(confirm,low,high,"LONG" if side>0 else "SHORT",created_dt=created,touch_dt=touch_dt,
             max_touch_age=int(getattr(cfg,"ZONE_REACTION_MAX_TOUCH_AGE",2)),
             sweep_lookback=int(getattr(cfg,"ZONE_REACTION_SWEEP_LOOKBACK",3)),
             reclaim_buffer_atr=float(getattr(cfg,"ZONE_REACTION_RECLAIM_BUFFER_ATR",.03)),
             recovery_body_fraction=float(getattr(cfg,"ZONE_REACTION_RECOVERY_BODY_FRACTION",.50)))
+        # Persist ZONE_TOUCHED so a following closed candle can confirm recovery.
+        if zr.touch_dt:
+            state[key]={"touch_dt":zr.touch_dt}; _save_state(state)
+        if zr.confirmed and key in state:
+            state.pop(key,None); _save_state(state)
         # Zone existence/touch is context only; never promote without shared reaction.
         if not zr.confirmed:
             return DemandSupplyContext(True,False,side,tf,"DEMAND" if side>0 else "SUPPLY",low,high,created,"",False,disp,reason="zone_touched_or_waiting_reaction")
