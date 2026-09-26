@@ -816,6 +816,31 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
     return lines
 
 
+
+def events_until_next_briefing(events: list[newsmod.NewsEvent], now: Optional[datetime] = None) -> list[newsmod.NewsEvent]:
+    """HIGH-impact events from this briefing until the next configured briefing."""
+    now_local_dt = now or now_local()
+    _, next_start = next_session(now_local_dt)
+    start_utc = now_local_dt.astimezone(timezone.utc)
+    end_utc = next_start.astimezone(timezone.utc)
+    return [e for e in newsmod.events_in_window(events, start_utc, end_utc) if e.impact == "HIGH"]
+
+def format_until_next_briefing(events: list[newsmod.NewsEvent], now_utc: datetime) -> list[str]:
+    lines=["", "⏭ ВАЖНЫЕ СОБЫТИЯ ДО СЛЕДУЮЩЕГО БРИФИНГА", ""]
+    if not events:
+        lines.append("HIGH-impact событий до следующего брифинга нет")
+        return lines
+    for e in events:
+        left=newsmod.minutes_left(e,now_utc)
+        lines.append(f"🔴 {e.local_hm} · {e.currency} · {_impact_ru(e.impact)}")
+        lines.append(newsmod.translate_title(e.title))
+        lines.append(f"Предыдущее: {e.previous} · Прогноз: {e.forecast} · Факт: {e.actual}")
+        lines.append("уже вышла" if left < 0 else f"через {left} мин")
+        touched=newsmod.pairs_touched(e.currency)
+        if touched: lines.append("Затрагивает: " + ", ".join(touched))
+        lines.append("")
+    return lines
+
 def format_board(briefs: list[PairBrief]) -> list[str]:
     lines = ["📊 ДОСКА ПРИОРИТЕТОВ", ""]
     for b in briefs:
@@ -931,6 +956,7 @@ def build_briefing_text(
     rank: list[tuple[str, float]],
     dxy: Optional[IndexView],
     events: list[newsmod.NewsEvent],
+    upcoming_events: list[newsmod.NewsEvent] | None = None,
 ) -> str:
     now = now_local()
     now_utc = datetime.now(timezone.utc)
@@ -960,6 +986,10 @@ def build_briefing_text(
     except Exception:
         log.exception("блок новостей")
         lines.extend(["", "📰 НОВОСТИ ЭТОЙ СЕССИИ", "", "Календарь сейчас недоступен"])
+    try:
+        lines.extend(format_until_next_briefing(upcoming_events or [], now_utc))
+    except Exception:
+        log.exception("блок событий до следующего брифинга")
     try:
         lines.extend(format_board(briefs))
     except Exception:

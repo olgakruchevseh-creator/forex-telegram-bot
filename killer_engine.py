@@ -6,8 +6,9 @@ into families so FVG/BPR/Imbalance or ZigZag/MSS/BOS cannot inflate the score.
 """
 from __future__ import annotations
 import hashlib, io, json, logging, os, re, time
-from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
+from collections import defaultdict
 
 import config as cfg
 import market_regime
@@ -244,6 +245,7 @@ def process_candidates(alerts, market, strength):
  for (pair,side),current_texts in grouped.items():
   texts=_memory_texts(pair,side)
   meta=evaluate(pair,side,texts,market,strength)
+  _diag(pair,side,meta)
   fams=sorted(meta.get("families") or [])
   if not meta.get("eligible"):
    log.info(
@@ -282,3 +284,21 @@ def image_for_alert(text):
  for label,p in [("ENTRY",meta["entry"]),("TR1",meta["targets"][0]),("TR2",meta["targets"][1]),("TR3",meta["targets"][2])]:d.line((L,Y(p),R,Y(p)),fill='#d8dde8',width=2);d.text((R+8,Y(p)-10),label,fill='#f1f5fb',font=small)
  d.text((L,22),f"{pair} · H1 · KILLER {c['side']} · {meta['score']}/100",fill='#f1f5fb',font=font)
  out=io.BytesIO();out.name=f"killer_{pair.replace('/','')}.png";im.save(out,format='PNG',optimize=True);out.seek(0);return out
+
+
+def _diag(pair, side, meta):
+ try:
+  root=os.getenv("STATE_DIR","").strip(); path=(Path(root) if root else Path(__file__).resolve().parent)/"killer_diagnostics.jsonl"
+  reason=str(meta.get("reason") or "eligible")
+  stage={
+   "not_enough_independent_families":"families", "insufficient_h1":"ohlc",
+   "late_entry":"late_entry", "late_impulse":"late_entry", "ohlc_contradiction":"ohlc",
+   "erl_residual_exhausted":"residual", "critical_tf_contradiction":"htf_ltf",
+   "score_below_threshold":"score",
+  }.get(reason,"telegram_ready" if meta.get("eligible") else reason)
+  rec={"utc":datetime.now(timezone.utc).isoformat(timespec="seconds"),"pair":pair,"side":side,
+       "stage":stage,"reason":reason,"eligible":bool(meta.get("eligible")),"score":meta.get("score"),
+       "families":sorted(meta.get("families") or []),"family_count":len(meta.get("families") or [])}
+  path.parent.mkdir(parents=True,exist_ok=True)
+  with path.open("a",encoding="utf-8") as f:f.write(json.dumps(rec,ensure_ascii=False,separators=(",",":"))+"\n")
+ except Exception: log.exception("KILLER_DIAGNOSTIC_WRITE_FAILED")

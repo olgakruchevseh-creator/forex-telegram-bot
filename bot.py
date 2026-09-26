@@ -450,13 +450,15 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         except Exception:
             log.exception("DXY для /briefing")
-        events = []
+        events = []; upcoming_events = []
         try:
-            events = briefing.session_events(newsmod.load_events())
+            all_events = newsmod.load_events()
+            events = briefing.session_events(all_events)
+            upcoming_events = briefing.events_until_next_briefing(all_events)
         except Exception:
             log.exception("Новости для /briefing")
         try:
-            text = briefing.build_briefing_text(market, strength, rank, dxy, events)
+            text = briefing.build_briefing_text(market, strength, rank, dxy, events, upcoming_events)
         except Exception:
             log.exception("Сборка текста /briefing")
             text = format_strength(rank, last_closed_h1_dt(h1_series(market)))
@@ -925,11 +927,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         log.exception("DXY сессионного брифинга")
                         dxy = None
                     try:
-                        events = briefing.session_events(newsmod.load_events())
+                        all_events = newsmod.load_events()
+                        events = briefing.session_events(all_events)
+                        upcoming_events = briefing.events_until_next_briefing(all_events)
                     except Exception:
                         log.exception("новости сессионного брифинга")
-                        events = []
-                    text = briefing.build_briefing_text(market, strength, rank, dxy, events)
+                        events = []; upcoming_events = []
+                    text = briefing.build_briefing_text(market, strength, rank, dxy, events, upcoming_events)
                     parts = briefing.prepare_telegram_parts(text)
                     already = set(briefing.delivered_parts(state, iid))
                     for idx, part in enumerate(parts, 1):

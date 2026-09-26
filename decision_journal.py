@@ -35,9 +35,17 @@ def _price(text, labels):
    try:return float(m.group(1))
    except ValueError:pass
  return None
-def _targets(text):
+def _targets(text, ctx=None):
  out={}
  for n,p in re.findall(r'\b(TR[123])\b[^\d]*(\d+\.\d+)',text or '',re.I): out[n.upper()]=float(p)
+ # Source cards do not always print all Navigator targets. Preserve the route
+ # that Signal Context already calculated so replay can measure TR1/TR2/TR3.
+ route=(ctx or {}).get('route') or {}
+ for item in route.get('targets') or []:
+  name=str(item.get('name') or '').upper()
+  if name in ('TR1','TR2','TR3'):
+   try: out.setdefault(name,float(item.get('price')))
+   except (TypeError,ValueError): pass
  return out
 
 def _tf(text):
@@ -89,7 +97,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
   'entry_timing':('late' if str(reason).startswith('late_') else 'early' if (ctx or {}).get('progress') is not None and float((ctx or {}).get('progress') or 0)<=15 else 'timely'),
   'residual_potential_pct':(round(max(0.0,100.0-float((ctx or {}).get('progress'))),1) if (ctx or {}).get('progress') is not None else None),
   'confirmation_price':_price(text,['Подтверждение','Закрытие','close']),
-  'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text),
+  'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text,ctx),
   'tf_snapshot':_freshness(by_tf),'context_gate':ctx or {},'market_state':snap,
   'strength_snapshot':{k:strength.get(k) for k in pair.split('/') if k in (strength or {})} if pair else {}}
 def record_decision(text,market,strength,status,reason='',allies=None,ctx=None):

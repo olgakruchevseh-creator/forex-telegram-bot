@@ -96,13 +96,19 @@ def combine(timeframes: list[tuple[str, list]], side: int) -> dict:
         return {"available": False, "weak_reversal": False, "range_like": False, "score": 50.0, "details": {}}
     total = sum(w for _,_,w in items)
     score = sum(x.score*w for _,x,w in items)/total
-    # H1 is decisive for false-reversal veto; M15 can reinforce but not invent it.
+    # A local H1 weak counter-move is diagnostic evidence, not by itself a hard veto.
     h1 = next((x for tf,x,_ in items if tf == "H1"), None)
     m15 = next((x for tf,x,_ in items if tf == "M15"), None)
-    weak = bool(h1 and h1.weak_reversal and (not m15 or m15.score < 62))
+    local_weak = bool(h1 and h1.weak_reversal and (not m15 or m15.score < 62))
+    # Hard weak_reversal requires confirmation beyond the local H1 tail: H4 must
+    # also be materially hostile to the requested side. This prevents one weak
+    # local reversal from blocking an otherwise valid structural setup.
+    h4 = next((x for tf,x,_ in items if tf == "H4"), None)
+    weak = bool(local_weak and h4 and h4.score <= 42 and h4.net_atr < 0)
     ranges = sum(1 for _,x,_ in items if x.range_like)
     return {"available": True, "score": round(score,1), "weak_reversal": weak,
-            "range_like": ranges >= 2, "details": {tf:x.as_dict() for tf,x,_ in items}}
+            "local_weak_reversal": local_weak, "range_like": ranges >= 2,
+            "details": {tf:x.as_dict() for tf,x,_ in items}}
 
 
 def market_context(by_tf: dict, side: int, tfs=("D1","H4","H1","M15","M5")) -> dict:
@@ -202,7 +208,8 @@ def early_entry_check(by_tf: dict, side) -> dict:
 def guard_event(by_tf: dict, side, quality: int | float | None = None) -> dict:
     """Canonical final OHLC gate for an event produced by another module.
 
-    It never creates direction. A weak 1–2 candle counter-move is vetoed;
+    It never creates direction. A local weak 1–2 candle counter-move is context;
+    hard veto requires confirming H4 contradiction.
     range/noise and movement quality only make a small bounded quality change.
     """
     if isinstance(side, str):

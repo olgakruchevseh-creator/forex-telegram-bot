@@ -144,15 +144,15 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
         bars = _bars(by_tf, tf)
         if len(bars) >= 20 and _bias(tf, bars) == wanted:
             confirmations += 1
-    if confirmations < int(getattr(cfg, "DAILY_LEVEL_MIN_CONFIRMATIONS", 2)):
-        return None
-    if not _strength_ok(symbol, side, strength):
-        return None
-
+    # The closed-H1 cross/reclaim is the event fact. Lower-TF bias and currency
+    # strength are context and may adjust quality, but must not erase a real
+    # PDH/PDL event from Telegram. A mere wick still never qualifies above.
+    strength_ok = _strength_ok(symbol, side, strength)
     body_atr = abs(current.close - current.open) / av
-    quality = min(94, 72 + confirmations * 5 + min(7, int(body_atr * 7)))
+    quality = min(94, 70 + confirmations * 5 + min(7, int(body_atr * 7)) + (3 if strength_ok else -3))
     og = ohlc_movement.guard_event(by_tf, side, quality)
-    if not og.get("allow", True): return None
+    if og.get("weak_reversal"):
+        return None
     quality = og.get("quality", quality)
     confidence = min(91, quality - 4)
     # TR1 for the PDH/PDL card: nearest meaningful senior extremum in the
@@ -185,6 +185,7 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
         "day_high": reference.high,
         "day_low": reference.low,
         "confirmations": confirmations,
+        "strength_ok": strength_ok,
         "quality": quality,
         "confidence": confidence,
         "current_price": current_price,
@@ -212,7 +213,7 @@ def format_message(event: dict) -> str:
         f"Цена подтверждения: {_price(event['symbol'], event['confirm_close'])}",
         f"Текущая цена: {_price(event['symbol'], event['current_price'])}",
         f"TR1: {_price(event['symbol'], event['tr1'])}",
-        f"Подтверждение: H1 и младшие ТФ — {event['confirmations']}/3",
+        f"Контекст младших ТФ: {event['confirmations']}/3 · Currency Strength: {'поддерживает' if event.get('strength_ok') else 'не подтверждает'}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
         f"Факт: {action} Реакция подтверждена закрытой H1-свечой.",
     ])

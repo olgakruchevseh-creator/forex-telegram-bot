@@ -16,6 +16,7 @@ import re
 import config as cfg
 import movement_progress
 import ohlc_movement
+import market_regime
 import zigzag_scanner
 import decision_journal
 from analysis import analyze_tf
@@ -138,12 +139,19 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
             direction,
         )
     against_h4 = bool(h4_zz and h4_zz != direction)
-    if against_h4:
+    regime = market_regime.analyze_symbol(symbol, by_tf)
+    regime_name = regime.name if regime else "UNKNOWN"
+    # A prolonged counter-move inside an objectively non-directional market is
+    # RANGE/COMPRESSION, not an endlessly extending pullback.
+    if regime_name in ("RANGE", "COMPRESSION"):
+        mode = regime_name
+    elif against_h4:
         mode = "PULLBACK"
     return {
         "symbol": symbol,
         "side": side,
         "mode": mode,
+        "regime": regime_name,
         "gap": gap,
         "directed_gap": directed_gap,
         "h4_zz": h4_zz,
@@ -190,6 +198,11 @@ def verdict(ctx: dict) -> tuple[bool, str]:
 
 def _mode_line(ctx: dict, reason: str) -> str:
     zz = {1: "LONG", -1: "SHORT"}.get(int(ctx.get("h4_zz") or 0), "RANGE")
+    if ctx["mode"] in ("RANGE", "COMPRESSION"):
+        label = "БОКОВИК / RANGE" if ctx["mode"] == "RANGE" else "СЖАТИЕ / COMPRESSION"
+        return (f"↔ Режим: {label}\n"
+                f"H4 ZigZag: {zz} · младшие ТФ за {ctx['side']}: {ctx['junior_n']}/3\n"
+                "Направленный откат не объявляем: рынок сейчас классифицирован как ненаправленный.")
     if reason == "pullback" or ctx["mode"] == "PULLBACK":
         return (
             "📉 Режим: ОТКАТ, не новый импульс\n"
