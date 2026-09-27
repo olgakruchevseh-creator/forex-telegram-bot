@@ -186,6 +186,7 @@ def analyze_symbol(
     bpr_ctx = bpr.analyze_symbol(symbol, by_tf, side)
     propulsion_ctx = propulsion_block.analyze_symbol(symbol, by_tf, side)
     choch_ctx = choch.analyze_symbol(symbol, by_tf, side)
+    shift_lifecycle = choch.analyze_lifecycle(symbol, by_tf, side)
     mss_ctx = mss.analyze_symbol(symbol, by_tf, side)
     structure_ctx = structure_context.analyze_symbol(symbol, by_tf, side)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
@@ -334,6 +335,9 @@ def analyze_symbol(
         "propulsion_block_alignment": propulsion_ctx.alignment if propulsion_ctx else 0,
         "choch": choch.describe(choch_ctx),
         "choch_alignment": choch_ctx.alignment if choch_ctx else 0,
+        "structural_shift_lifecycle": choch.describe_lifecycle(shift_lifecycle),
+        "structural_shift_state": shift_lifecycle.state if shift_lifecycle else "NONE",
+        "reversal_confirmed": bool(shift_lifecycle and shift_lifecycle.bos_confirmed),
         "mss": mss.describe(mss_ctx),
         "mss_alignment": mss_ctx.alignment if mss_ctx else 0,
         "erl": erl.describe(erl_ctx), "erl_alignment": erl_ctx.alignment if erl_ctx else 0,

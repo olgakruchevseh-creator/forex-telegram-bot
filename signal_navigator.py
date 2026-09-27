@@ -689,6 +689,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         master["quality"] = max(0, min(100, int(master.get("quality") or 0) + adjustment))
         master["confidence"] = max(0, min(100, int(master.get("confidence") or 0) + adjustment))
     navigator_status = ""
+    pending_reversal = bool(master.get("pending_reversal"))
     assessment = f"{icon} направление {side} подтверждено по закрытой H1-свече."
     display_mode = mode_names.get(route["mode"], route["mode"])
     # H4 ZigZag is the structural parent of a source event.  If it points in
@@ -742,6 +743,10 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
             assessment = f"🟡 сигнал {side} принят на сопровождение; часть таймфреймов пока нейтральна."
             if int(master.get("junior_n") or 0) < 2:
                 display_mode = "РАННЯЯ СТАДИЯ ИМПУЛЬСА"
+    if pending_reversal:
+        navigator_status = "⚠️ CHoCH / СТРУКТУРНАЯ СМЕНА · НОВЫЙ BOS ЕЩЁ НЕ ПОДТВЕРЖДЁН"
+        assessment = f"⚠️ ранняя смена структуры в {side} есть, но полноценный разворот будет подтверждён только после BOS нового направления."
+        display_mode = "ПОТЕНЦИАЛЬНАЯ СМЕНА / РАЗВОРОТ НЕ ПОДТВЕРЖДЁН"
     title = ("🧭 НАВИГАТОР СОПРОВОЖДАЕТ СИГНАЛ" if source_accepted else
              ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
               ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР")))
@@ -881,7 +886,14 @@ def build_confirmed(master_results: list[dict], market: dict, strength: dict, al
             result = dict(result)
             result["next_pivot"] = pivot
         previous = active.get(symbol) or {}
-        reversal = bool(previous and previous.get("side") != side)
+        side_changed = bool(previous and previous.get("side") != side)
+        # A side change is not automatically a confirmed reversal. CHoCH is an
+        # early shift; Navigator promotes it only after the lifecycle reaches
+        # a CLOSED BOS in the new direction.
+        reversal = bool(side_changed and result.get("reversal_confirmed"))
+        if side_changed and not reversal:
+            result = dict(result)
+            result["pending_reversal"] = True
         result = dict(result)
         result["by_tf"] = pair_market
         result["market"] = market
