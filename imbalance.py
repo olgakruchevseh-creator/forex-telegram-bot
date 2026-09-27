@@ -47,6 +47,9 @@ class FvgZone:
     reaction_path: str = ""
     reaction_dt: str = ""
     fvg_class: str = ""  # BISI = bullish FVG, SIBI = bearish FVG
+    structural_fvg: bool = False
+    structural_shift: str = ""
+    structural_level: float = 0.0
 
 
 def _path() -> Path:
@@ -83,6 +86,34 @@ def _bias(tf: str, bars: list[Candle]) -> int:
     return view.bias if view else 0
 
 
+def _structural_shift_before_fvg(bars: list[Candle], impulse_index: int, side: str, av: float) -> tuple[bool, str, float]:
+    """Classify an FVG born from a real structural shift, without creating a new family.
+
+    The FVG impulse must itself close through the protected edge of the immediately
+    preceding opposite market character. This keeps ordinary continuation gaps valid,
+    but gives extra context weight only to CHOCH/MSS-like displacement FVGs.
+    """
+    swing_n = int(getattr(cfg, "IMBALANCE_STRUCTURAL_SWING_BARS", 4))
+    if impulse_index < swing_n * 2:
+        return False, "", 0.0
+    pre = bars[:impulse_index]
+    recent = pre[-swing_n:]
+    previous = pre[-2 * swing_n:-swing_n]
+    if len(recent) < swing_n or len(previous) < swing_n:
+        return False, "", 0.0
+    impulse = bars[impulse_index]
+    recent_high, recent_low = max(x.high for x in recent), min(x.low for x in recent)
+    prev_high, prev_low = max(x.high for x in previous), min(x.low for x in previous)
+    prior_bearish = recent_high <= prev_high and recent_low < prev_low
+    prior_bullish = recent_high > prev_high and recent_low >= prev_low
+    buffer = av * float(getattr(cfg, "IMBALANCE_STRUCTURAL_CLOSE_BUFFER_ATR", .05))
+    if side == "LONG" and prior_bearish and impulse.close > recent_high + buffer:
+        return True, "CHOCH/MSS-like bullish shift + displacement", float(recent_high)
+    if side == "SHORT" and prior_bullish and impulse.close < recent_low - buffer:
+        return True, "CHOCH/MSS-like bearish shift + displacement", float(recent_low)
+    return False, "", 0.0
+
+
 def newest_fvg(symbol: str, tf: str, bars: list[Candle]) -> FvgZone | None:
     """Only a FVG completed by the newest closed candle can be new."""
     if len(bars) < 25:
@@ -112,12 +143,18 @@ def newest_fvg(symbol: str, tf: str, bars: list[Candle]) -> FvgZone | None:
     size_pts = min(18, int(gap_atr * 24))
     impulse_pts = min(14, int(body / av * 8))
     body_pts = min(10, int(max(0, body_ratio - .5) * 25))
-    quality = min(96, 48 + size_pts + impulse_pts + body_pts)
+    structural_fvg, structural_shift, structural_level = _structural_shift_before_fvg(
+        bars, len(bars)-2, side, av
+    )
+    structural_bonus = int(getattr(cfg, "IMBALANCE_STRUCTURAL_FVG_BONUS", 7)) if structural_fvg else 0
+    quality = min(96, 48 + size_pts + impulse_pts + body_pts + structural_bonus)
     return FvgZone(
         _zone_id(symbol, tf, side, c.dt), symbol, tf, side, low, high, c.dt,
         quality, max(70, min(92, quality - 4)), [], 0.0, last_seen_dt=c.dt,
         gap_atr=gap_atr, impulse_atr=impulse_atr,
         fvg_class=("BISI" if side == "LONG" else "SIBI"),
+        structural_fvg=structural_fvg, structural_shift=structural_shift,
+        structural_level=structural_level,
     )
 
 
@@ -182,7 +219,8 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "", f"Пара: {zone.symbol}",
         f"Таймфрейм: {zone.tf}", f"Направление: {zone.side}",
-        f"Классификация FVG: {_fvg_class(zone)}",
+        f"Классификация FVG: {_fvg_class(zone)}" + (" · STRUCTURAL FVG" if zone.structural_fvg else ""),
+        f"Structural shift: {zone.structural_shift or 'обычный FVG без повышенного structural-веса'}",
         f"Зона FVG: {_price(zone.symbol, zone.low)}–{_price(zone.symbol, zone.high)}",
         f"Состояние: {zone.status}", f"Согласованные ТФ: {' · '.join(zone.aligned)}",
         f"Разница силы валют: {zone.strength_gap:+.2f}",

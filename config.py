@@ -292,6 +292,11 @@ IMBALANCE_MIN_QUALITY = 74
 # FVG должен быть создан реальным displacement, а не случайным микрогэпом.
 IMBALANCE_MIN_IMPULSE_ATR = 0.80
 IMBALANCE_MIN_BODY_RATIO = 0.60
+# Structural FVG: повышенный вес только если FVG рождается после реальной смены структуры + displacement.
+# Это НЕ отдельное семейство/голос и не делает обычный FVG недействительным.
+IMBALANCE_STRUCTURAL_SWING_BARS = 4
+IMBALANCE_STRUCTURAL_CLOSE_BUFFER_ATR = 0.05
+IMBALANCE_STRUCTURAL_FVG_BONUS = 7
 # Ретест считается подтверждённым только после заметного входа в FVG и свечи-отказа.
 IMBALANCE_RETEST_MIN_PENETRATION = 0.20
 IMBALANCE_RETEST_MIN_BODY_RATIO = 0.45
