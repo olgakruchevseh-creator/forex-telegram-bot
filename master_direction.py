@@ -16,6 +16,7 @@ import choch
 import mss
 import erl
 import liquidity_context
+import continuation_liquidity_context
 import po3_fvg_context
 import structure_context
 import premium_discount
@@ -189,6 +190,7 @@ def analyze_symbol(
     structure_ctx = structure_context.analyze_symbol(symbol, by_tf, side)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
     liquidity_ctx = liquidity_context.analyze_symbol(symbol, by_tf, side, alerts)
+    continuation_liq_ctx = continuation_liquidity_context.analyze_symbol(symbol, by_tf, side, alerts)
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
     state_ctx = market_state.build(symbol, by_tf, side, events or [], now_utc) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
@@ -241,6 +243,8 @@ def analyze_symbol(
     # BPR / propulsion alignment is already represented by the imbalance/blocks
     # evidence family when those cards exist — do not pay a second coin.
     quality += max(0, liquidity_context.score_delta(liquidity_ctx))
+    # Continuation lifecycle is context inside existing structure/liquidity/PD-array facts; never a new family.
+    quality += continuation_liquidity_context.score_delta(continuation_liq_ctx, side)
     if ltf_ctx and ltf_ctx.alignment > 0:
         quality += int(getattr(cfg, "LTF_CONFIRM_ALIGN_BONUS", 5))
     # MSS/CHOCH are already represented inside the single STRUCTURE adjustment above.
@@ -317,6 +321,8 @@ def analyze_symbol(
         "htf_irl": htf_irl.describe(irl),
         "htf_irl_alignment": irl.alignment if irl else 0,
         "liquidity_context": liquidity_context.describe(liquidity_ctx),
+        "continuation_liquidity_context": continuation_liquidity_context.describe(continuation_liq_ctx),
+        "continuation_liquidity_ready": bool(continuation_liq_ctx and continuation_liq_ctx.ready),
         "po3_fvg_context": po3_fvg_context.describe(po3_fvg_ctx),
         "po3_fvg_confirmed": bool(po3_fvg_ctx.confirmed),
         "liquidity_residual_state": liquidity_ctx.residual_state if liquidity_ctx else "UNKNOWN",
