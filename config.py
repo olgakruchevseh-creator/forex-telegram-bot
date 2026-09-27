@@ -815,3 +815,9 @@ CONTINUATION_LIQUIDITY_READY_BONUS = 4
 # CHOCH lifecycle: CHOCH is an early shift, never an automatic full reversal.
 CHOCH_LIFECYCLE_LOOKBACK = 90
 CHOCH_LIFECYCLE_EVENT_BARS = 18
+
+# Context package 86+: no standalone signals/families; bounded quality adjustments only.
+AUCTION_CONTEXT_ENABLED = True
+MULTI_TF_NARRATIVE_ENABLED = True
+SETUP_MEMORY_ENABLED = True
+SETUP_MEMORY_MIN_SAMPLES = 5

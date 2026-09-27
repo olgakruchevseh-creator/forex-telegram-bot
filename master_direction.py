@@ -23,6 +23,9 @@ import premium_discount
 import market_regime
 import market_state
 import imd
+import auction_context
+import multi_tf_narrative
+import setup_memory
 import idm
 import daily_high_low
 import ohlc_movement
@@ -196,6 +199,9 @@ def analyze_symbol(
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
     state_ctx = market_state.build(symbol, by_tf, side, events or [], now_utc) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
+    auction_ctx = auction_context.analyze_symbol(symbol, by_tf, side)
+    narrative_ctx = multi_tf_narrative.analyze_symbol(symbol, by_tf, side)
+    setup_ctx = setup_memory.analyze(symbol, side, regime_ctx.name if regime_ctx else "")
     idm_sweep_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
     ohlc_ctx = ohlc_movement.setup_adjustment(by_tf, side) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
@@ -253,6 +259,9 @@ def analyze_symbol(
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     quality += int(ohlc_ctx.get("quality_delta", 0))
+    quality += auction_context.score_delta(auction_ctx, side)
+    quality += multi_tf_narrative.score_delta(narrative_ctx, side)
+    quality += setup_memory.score_delta(setup_ctx)
     regime_weight = market_regime.quality_adjustment(regime_ctx, side, ohlc_ctx)
     quality += int(regime_weight.get("delta", 0))
     if state_ctx and state_ctx.liquidity and state_ctx.liquidity.confidence >= 60:
@@ -352,6 +361,9 @@ def analyze_symbol(
         "pdh_pdl": daily_high_low.describe_pdh_pdl(pdh_pdl_ctx),
         "pdh_pdl_alignment": pdh_pdl_ctx.alignment if pdh_pdl_ctx else 0,
         "ohlc": ohlc_ctx,
+        "auction_context": auction_context.describe(auction_ctx),
+        "multi_tf_narrative": multi_tf_narrative.describe(narrative_ctx),
+        "setup_memory": setup_memory.describe(setup_ctx),
         "market_state": state_ctx.as_dict() if state_ctx else None,
     }
 
