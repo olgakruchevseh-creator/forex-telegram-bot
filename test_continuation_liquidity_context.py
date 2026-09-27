@@ -22,3 +22,11 @@ def test_lifecycle_requires_every_confirmation():
     c=clc.ContinuationLiquidityContext(1,"H1",True,True,("RANGE",),1.2,True,False,True,True,False,"PD_ARRAY_REACTION")
     assert not c.ready
     assert "PD_ARRAY" in c.stage
+
+
+def test_ltf_structure_family_can_record_choch_without_new_family():
+    c=clc.ContinuationLiquidityContext(1,"H1",True,True,("RANGE",),1.2,True,True,True,True,True,"READY",("CHoCH",),"DEMAND")
+    assert c.ready
+    assert c.ltf_confirmations == ("CHoCH",)
+    assert "CHoCH" in clc.describe(c)
+    assert clc.score_delta(c,1) <= 4

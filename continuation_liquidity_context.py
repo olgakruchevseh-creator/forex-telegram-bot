@@ -17,6 +17,7 @@ import liquidity_map
 import liquidity_context
 import demand_supply_context
 import cisd
+import choch
 import mss
 import ltf_confirmation
 from analysis import atr, closed_candles, analyze_tf
@@ -29,6 +30,8 @@ class ContinuationLiquidityContext:
     formations:tuple[str,...]; liquidity_draw:float|None
     sweep_reclaimed:bool; pd_array_reaction:bool; ltf_shift:bool
     displacement:bool; ready:bool; stage:str
+    ltf_confirmations:tuple[str,...]=()
+    pd_array_type:str=""
 
 
 def _bars(by_tf,tf):
@@ -101,16 +104,18 @@ def analyze_symbol(symbol,by_tf,side,events=None):
     pd=demand_supply_context.analyze_symbol(symbol,by_tf,side)
     pd_ok=bool(pd and pd.confirmed)
     ci=cisd.analyze_symbol(symbol,by_tf,side)
+    ch=choch.analyze_symbol(symbol,by_tf,side)
     ms=mss.analyze_symbol(symbol,by_tf,side)
     lt=ltf_confirmation.analyze_symbol(symbol,by_tf,side)
-    shift=bool((ci and ci.side==side) or (ms and ms.side==side and ms.alignment>0) or (lt and lt.alignment>0 and lt.bos))
+    confirmations=tuple(name for name,ok in (("CISD", bool(ci and ci.side==side)), ("CHoCH", bool(ch and getattr(ch,"alignment",0)>0)), ("MSS", bool(ms and ms.side==side and ms.alignment>0)), ("BOS", bool(lt and lt.alignment>0 and lt.bos))) if ok)
+    shift=bool(confirmations)
     disp=bool((ms and ms.side==side and ms.alignment>0 and ms.displacement_atr>=float(getattr(cfg,"MSS_DISPLACEMENT_ATR",.85))) or
               (lt and lt.alignment>0 and lt.displacement))
     ready=bool(htf and bos and forms and sweep and pd_ok and shift and disp)
     checks=(htf,bos,bool(forms),sweep,pd_ok,shift,disp)
     names=("HTF","BOS","FORMATION","SWEEP_RECLAIM","PD_ARRAY_REACTION","LTF_SHIFT","DISPLACEMENT")
     stage="READY" if ready else next((n for n,ok in zip(names,checks) if not ok),"FORMING")
-    return ContinuationLiquidityContext(side,tf,htf,bos,tuple(dict.fromkeys(forms)),draw,sweep,pd_ok,shift,disp,ready,stage)
+    return ContinuationLiquidityContext(side,tf,htf,bos,tuple(dict.fromkeys(forms)),draw,sweep,pd_ok,shift,disp,ready,stage,confirmations,getattr(pd,"zone_type","") if pd else "")
 
 
 def score_delta(ctx,side):
@@ -125,4 +130,6 @@ def describe(ctx):
     forms={"RANGE":"диапазон","IDM":"inducement/IDM","EQUAL_HIGHS_LOWS":"равные High/Low","TRENDLINE_STRUCTURE":"трендовая/структурная ликвидность"}
     f=", ".join(forms.get(x,x) for x in ctx.formations) or "ещё не сформирована"
     state="готово" if ctx.ready else f"формируется · следующий этап: {ctx.stage}"
-    return f"Continuation Liquidity {ctx.timeframe}: {state} · внутренняя ликвидность: {f} · sweep/reclaim: {'да' if ctx.sweep_reclaimed else 'нет'} · PD Array: {'реакция подтверждена' if ctx.pd_array_reaction else 'нет подтверждения'} · LTF shift/displacement: {'да' if ctx.ltf_shift and ctx.displacement else 'нет'}"
+    ltf="/".join(ctx.ltf_confirmations) if ctx.ltf_confirmations else "нет"
+    pd_name=ctx.pd_array_type or "PD Array"
+    return f"Continuation Liquidity {ctx.timeframe}: {state} · внутренняя ликвидность: {f} · sweep/reclaim: {'да' if ctx.sweep_reclaimed else 'нет'} · {pd_name}: {'реакция подтверждена' if ctx.pd_array_reaction else 'нет подтверждения'} · LTF shift: {ltf} · displacement: {'да' if ctx.displacement else 'нет'}"
