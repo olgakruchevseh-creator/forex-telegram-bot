@@ -11,6 +11,10 @@ from pathlib import Path
 import config as cfg
 import ohlc_movement
 import mitigation_block
+import zone_reaction_confirmation as zrc
+import choch
+import cisd
+import mss
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.order_block")
@@ -152,21 +156,46 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
             block.invalid = True
             block.invalidation_reason = "price_break"
             return None
-        touched = current.low <= block.high and current.high >= block.low
-        held = current.close > block.high and current.close > current.open
         wanted = 1
     else:
         if current.close > block.high+invalid_buffer:
             block.invalid = True
             block.invalidation_reason = "price_break"
             return None
-        touched = current.high >= block.low and current.low <= block.high
-        held = current.close < block.low and current.close < current.open
         wanted = -1
-    body = abs(current.close-current.open)
-    if not touched or not held or body < av * float(getattr(cfg, "ORDER_BLOCK_REACTION_BODY_ATR", .30)):
+
+    # A raw touch is never enough.  Reuse the shared zone-reaction engine so
+    # an OB retest must show either sweep+reclaim or a recovery closure.
+    reaction = zrc.confirm_zone_reaction(
+        m15, block.low, block.high, block.side, created_dt=block.created_dt,
+        max_touch_age=int(getattr(cfg, "ORDER_BLOCK_REACTION_MAX_TOUCH_AGE", 3)),
+        sweep_lookback=int(getattr(cfg, "ZONE_REACTION_SWEEP_LOOKBACK", 3)),
+        reclaim_buffer_atr=float(getattr(cfg, "ZONE_REACTION_RECLAIM_BUFFER_ATR", .03)),
+        recovery_body_fraction=float(getattr(cfg, "ZONE_REACTION_RECOVERY_BODY_FRACTION", .50)),
+    )
+    if not reaction.confirmed:
         return None
+
+    body = abs(current.close-current.open)
+    if body < av * float(getattr(cfg, "ORDER_BLOCK_REACTION_BODY_ATR", .30)):
+        return None
+    # Preserve HTF structure: a local reaction cannot validate an OB while H4
+    # has already turned against the original BOS direction.
     if _bias("M15", m15) != wanted or _bias("H4", h4) == -wanted:
+        return None
+
+    # LTF delivery/structure confirmation after the zone reaction. CHOCH, CISD
+    # and MSS are one correlated structure family: any one may confirm, but they
+    # are never counted as three independent votes.
+    by_tf_local = {"H4": h4, "H1": h1, "M15": m15}
+    choch_ctx = choch.analyze_symbol(block.symbol, by_tf_local, wanted)
+    cisd_ctx = cisd.analyze_symbol(block.symbol, by_tf_local, wanted)
+    mss_ctx = mss.analyze_symbol(block.symbol, by_tf_local, wanted)
+    structural = [
+        name for name, ctx in (("CHOCH", choch_ctx), ("CISD", cisd_ctx), ("MSS", mss_ctx))
+        if ctx is not None and getattr(ctx, "alignment", 0) > 0
+    ]
+    if getattr(cfg, "ORDER_BLOCK_REQUIRE_LTF_STRUCTURE", True) and not structural:
         return None
     strength_ok, gap = _strength(block, strength)
     if not strength_ok:
@@ -178,6 +207,7 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
         "low": block.low, "high": block.high, "bos_level": block.bos_level,
         "close": current.close, "fvg": block.fvg, "gap": gap,
         "quality": quality, "confidence": min(91, quality-4), "confirm_tf": confirm_tf,
+        "reaction_path": reaction.path, "structure_confirmations": structural,
     }
 
 
@@ -194,11 +224,14 @@ def format_message(event: dict) -> str:
         f"Зона Order Block: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"Пробитый уровень BOS: {_price(event['symbol'], event['bos_level'])}",
         f"Цена закрытия {event.get('confirm_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
-        f"Сопутствующий FVG: {fvg}", f"Подтверждение реакции: закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
+        f"Сопутствующий FVG: {fvg}",
+        f"Реакция зоны: {event.get('reaction_path', 'подтверждена')}",
+        f"LTF структура: {' / '.join(event.get('structure_confirmations') or [])}",
+        f"Подтверждение реакции: закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%",
         *( [f"Mitigation Block: подтверждённый контекст · {event['mitigation_block']['tf']} · {event['mitigation_block']['reaction_path']} (то же семейство OB/MB, не отдельный голос)"] if event.get('mitigation_block') else [] ), "",
-        f"✅ Факт: после импульсного BOS цена вернулась в Order Block, удержала зону и закрытой {event.get('confirm_tf', 'H1')}-свечой подтвердила {event['side']}.",
+        f"✅ Факт: после импульсного BOS цена вернулась в Order Block; подтверждены реакция зоны и LTF structural shift ({' / '.join(event.get('structure_confirmations') or [])}) в сторону {event['side']}.",
     ])
 
 
