@@ -30,6 +30,7 @@ import idm
 import daily_high_low
 import ohlc_movement
 import candle_context
+import trading_intelligence_context
 import evidence_families
 from analysis import PairStack, build_stack, split_pair
 
@@ -262,6 +263,8 @@ def analyze_symbol(
     quality += int(ohlc_ctx.get("quality_delta", 0))
     candle_ctx = candle_context.analyze_symbol(symbol, by_tf, side, "H1")
     quality += candle_context.score_delta(candle_ctx, side)
+    trading_ctx = trading_intelligence_context.analyze_symbol(symbol, by_tf, side, "H1")
+    quality += trading_intelligence_context.score_delta(trading_ctx, side)
     quality += auction_context.score_delta(auction_ctx, side)
     quality += multi_tf_narrative.score_delta(narrative_ctx, side)
     quality += setup_memory.score_delta(setup_ctx)
@@ -366,6 +369,8 @@ def analyze_symbol(
         "ohlc": ohlc_ctx,
         "candle_context": candle_context.describe(candle_ctx),
         "candle_context_score": candle_ctx.score,
+        "trading_intelligence_context": trading_intelligence_context.describe(trading_ctx),
+        "trading_intelligence_score": trading_ctx.score,
         "auction_context": auction_context.describe(auction_ctx),
         "multi_tf_narrative": multi_tf_narrative.describe(narrative_ctx),
         "setup_memory": setup_memory.describe(setup_ctx),
