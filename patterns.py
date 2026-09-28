@@ -13,6 +13,7 @@ from pathlib import Path
 import config as cfg
 import news as newsmod
 import ohlc_movement
+import candle_context
 from analysis import Candle, analyze_tf, atr, closed_candles
 
 log = logging.getLogger("fxbot.patterns")
@@ -722,9 +723,13 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 gate = ohlc_movement.setup_adjustment(by_tf, side_i) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
                 if not gate.get("allow", True):
                     continue
-                d = int(gate.get("quality_delta", 0))
+                candle_ctx = candle_context.analyze_symbol(symbol, by_tf, side_i, p.tf)
+                d = int(gate.get("quality_delta", 0)) + candle_context.score_delta(candle_ctx, side_i)
+                fact = p.fact
+                if p.name in CANDLE_PATTERN_NAMES:
+                    fact += " " + candle_context.describe(candle_ctx) + "."
                 adjusted.append(Pattern(p.name, p.side, p.tf, max(1,min(96,p.quality+d)),
-                                        max(1,min(94,p.confidence+d)), p.fact, p.level, p.dt))
+                                        max(1,min(94,p.confidence+d)), fact, p.level, p.dt))
             candidates = sorted(adjusted, key=lambda p: (p.quality, p.confidence), reverse=True)
 
             # Внутренний журнал наблюдения: бот знает, какую свежую геометрию видел,
