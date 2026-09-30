@@ -770,7 +770,9 @@ IMBALANCE_REACTION_EQUIVALENT_MOVE_ATR = 0.85
 # KILLER meta-selector — rare high-convergence setups only.
 KILLER_ENABLED = True
 KILLER_HUNTER_ENABLED = True  # active scan of all pairs/sides; execution gates remain strict
-KILLER_SCORE_THRESHOLD = 88
+# 84 вместо 88: тот же класс сетапа, чуть больше проходов по баллу.
+# Пол независимости не трогаем — по-прежнему 5 разных семейств.
+KILLER_SCORE_THRESHOLD = 84
 KILLER_MIN_FAMILIES = 5
 KILLER_CHART_IMAGES_ENABLED = True
 # Memory of confirmed families survives Railway restarts when STATE_DIR is set.
