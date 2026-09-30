@@ -67,6 +67,17 @@ BRIEFING_CONTEXT_MARKERS = (
     "ecb", "boe", "snb", "rba", "rbnz", "boc", "boj", "fomc",
 )
 
+# Числовые MEDIUM-релизы, которые могут быть значимыми для внутридневного FX.
+# Источник календаря не всегда одинаково маркирует предварительные инфляционные
+# и другие ключевые макро-релизы, поэтому нельзя полагаться только на HIGH.
+BRIEFING_MACRO_WATCH_MARKERS = (
+    "inflation", "cpi", "consumer price", "pce", "price index",
+    "gdp", "gross domestic product",
+    "employment", "payroll", "unemployment", "jobless claims",
+    "retail sales", "pmi", "ism", "ppi", "producer price",
+    "interest rate", "cash rate", "bank rate",
+)
+
 TITLE_RU = (
     # Более специфичные названия должны идти раньше общих подстрок.
     ("core pce price index", "Базовый индекс цен расходов на личное потребление (Core PCE)"),
@@ -88,6 +99,9 @@ TITLE_RU = (
     ("fomc statement", "Заявление FOMC"),
     ("fomc minutes", "Протокол FOMC"),
     ("fomc press conference", "Пресс-конференция FOMC"),
+    ("inflation rate yoy prel", "Предварительный годовой уровень инфляции"),
+    ("inflation rate yoy", "Годовой уровень инфляции"),
+    ("inflation rate", "Уровень инфляции"),
     ("cpi", "Индекс потребительских цен (CPI)"),
     ("consumer price index", "Индекс потребительских цен (CPI)"),
     ("ppi", "Индекс цен производителей (PPI)"),
@@ -345,9 +359,21 @@ def is_briefing_context_event(event: NewsEvent) -> bool:
     return any(marker in title for marker in BRIEFING_CONTEXT_MARKERS)
 
 
+def is_briefing_macro_watch(event: NewsEvent) -> bool:
+    """Значимый числовой MEDIUM-релиз, который нельзя терять из pre-news."""
+    if (event.impact or "").upper() != "MEDIUM":
+        return False
+    title = (event.title or "").lower()
+    return any(marker in title for marker in BRIEFING_MACRO_WATCH_MARKERS)
+
+
 def needs_advance_warning(event: NewsEvent) -> bool:
     """События, для которых нужен отдельный ~60-минутный анонс."""
-    return (event.impact or "").upper() == "HIGH" or is_briefing_context_event(event)
+    return (
+        (event.impact or "").upper() == "HIGH"
+        or is_briefing_context_event(event)
+        or is_briefing_macro_watch(event)
+    )
 
 
 def _parse_dt(value) -> Optional[datetime]:

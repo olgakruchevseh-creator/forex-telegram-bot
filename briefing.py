@@ -861,7 +861,12 @@ def events_until_next_briefing(events: list[newsmod.NewsEvent], now: Optional[da
     start_utc = now_local_dt.astimezone(timezone.utc)
     end_utc = next_start.astimezone(timezone.utc)
     window = newsmod.events_in_window(events, start_utc, end_utc)
-    return [e for e in window if e.impact == "HIGH" or newsmod.is_briefing_context_event(e)]
+    return [
+        e for e in window
+        if e.impact == "HIGH"
+        or newsmod.is_briefing_context_event(e)
+        or newsmod.is_briefing_macro_watch(e)
+    ]
 
 def format_until_next_briefing(events: list[newsmod.NewsEvent], now_utc: datetime) -> list[str]:
     lines=["", "⏭ ВАЖНЫЕ СОБЫТИЯ ДО СЛЕДУЮЩЕГО БРИФИНГА", ""]
