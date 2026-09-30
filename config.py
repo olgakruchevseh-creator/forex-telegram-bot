@@ -243,6 +243,10 @@ BRIEFING_SESSION_ONLY = True
 BRIEFING_SESSION_CATCH_UP = True
 NEWS_WARN_MINUTES = 60
 NEWS_CACHE_MAX_AGE_HOURS = 168
+# Forex Factory updates the weekly file about hourly and rate-limits
+# more than ~2 downloads / 5 minutes / IP. Scan+briefing used to hit it
+# every minute and then saw HTML 429 as "calendar does not exist".
+NEWS_FETCH_MIN_MINUTES = 45
 # CPI — отдельный строгий фундаментальный слой.
 # Сюрприз измеряется в процентных пунктах (например 3.2 vs 3.1 = +0.1 п.п.).
 CPI_MIN_SURPRISE_PP = 0.05

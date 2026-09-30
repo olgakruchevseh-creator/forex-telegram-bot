@@ -871,7 +871,10 @@ def events_until_next_briefing(events: list[newsmod.NewsEvent], now: Optional[da
 def format_until_next_briefing(events: list[newsmod.NewsEvent], now_utc: datetime) -> list[str]:
     lines=["", "⏭ ВАЖНЫЕ СОБЫТИЯ ДО СЛЕДУЮЩЕГО БРИФИНГА", ""]
     if not events:
-        lines.append("Событий высокой важности до следующего брифинга нет")
+        if newsmod.calendar_status() == "unavailable":
+            lines.append("Календарь недоступен — список событий до следующего брифинга подтвердить нельзя")
+        else:
+            lines.append("Событий высокой важности до следующего брифинга нет")
         return lines
     for e in events:
         left=newsmod.minutes_left(e,now_utc)
@@ -988,9 +991,21 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
         lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")
         lines.append("НЕТ")
         return lines
-    lines.append(
-        ", ".join(f"{b.symbol} {_ru_display(b.side)} — оценка уверенности {b.confidence}%" for b in ready)
-    )
+    first = ready[0]
+    lines.append(f"{first.symbol} {_ru_display(first.side)} — оценка уверенности {first.confidence}%")
+    if len(ready) > 1:
+        second = ready[1]
+        ea = _currency_exposure(first.symbol, first.side)
+        eb = _currency_exposure(second.symbol, second.side)
+        usd_opposite = ea.get("USD") and eb.get("USD") and ea["USD"] != eb["USD"]
+        if usd_opposite:
+            lines.append(
+                f"Альтернатива, не второй лидер: {second.symbol} {_ru_display(second.side)} — {second.confidence}% · противоположная ставка на USD"
+            )
+        else:
+            lines.append(
+                f"Второй план: {second.symbol} {_ru_display(second.side)} — оценка уверенности {second.confidence}%"
+            )
     lines.append("")
     lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")
     top = next((b for b in ready if not b.news_near), None)
@@ -1020,7 +1035,11 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
     lines=["", "🧭 ПРОГНОЗ НА СЛЕДУЮЩУЮ СЕССИЮ", ""]
     for b in briefs:
         tech=technical_pair_side(b)
-        if not tech: continue
+        if not tech:
+            lines.append(
+                f"{b.symbol}: нет направленного прогноза · согласие {b.agree} · состояние {b.state}"
+            )
+            continue
         direction=1 if tech=="LONG" else -1
         directed=b.gap*direction
         score=52 + min(18,b.agree_n*4) + (7 if directed>0.05 else -7 if directed<-.05 else 0)

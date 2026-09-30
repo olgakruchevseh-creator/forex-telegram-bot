@@ -25,7 +25,17 @@ log = logging.getLogger("fxbot.news")
 LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 
 FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+FF_URL_NEXT = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
 _CALENDAR_STATUS = "unavailable"  # live / cache / unavailable
+_MEM_EVENTS: list = []
+_MEM_TS = 0.0
+_MEM_STATUS = "unavailable"
+_FF_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; FXBriefing/1.0; +https://forexfactory.com/calendar)",
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.8",
+    "Referer": "https://www.forexfactory.com/calendar",
+}
 
 COUNTRY_TO_CCY = {
     "US": "USD", "USA": "USD", "UNITED STATES": "USD", "USD": "USD",
@@ -429,10 +439,7 @@ def pairs_touched(currency: str) -> list[str]:
     return out
 
 
-def fetch_ff() -> list[NewsEvent]:
-    r = requests.get(FF_URL, timeout=25)
-    r.raise_for_status()
-    data = r.json()
+def _parse_ff_rows(data) -> list[NewsEvent]:
     events: list[NewsEvent] = []
     if not isinstance(data, list):
         return events
@@ -464,23 +471,66 @@ def fetch_ff() -> list[NewsEvent]:
     return events
 
 
+def _dedupe_events(events: list[NewsEvent]) -> list[NewsEvent]:
+    seen: set[str] = set()
+    out: list[NewsEvent] = []
+    for event in events:
+        if event.event_id in seen:
+            continue
+        seen.add(event.event_id)
+        out.append(event)
+    out.sort(key=lambda item: item.dt_utc)
+    return out
+
+
+def _get_ff_json(url: str):
+    r = requests.get(url, timeout=25, headers=_FF_HEADERS)
+    if r.status_code == 429:
+        raise RuntimeError("календарь Forex Factory ограничил частоту запросов (429)")
+    r.raise_for_status()
+    ctype = (r.headers.get("content-type") or "").lower()
+    body = r.text.lstrip()
+    if "html" in ctype or body.startswith("<!"):
+        raise RuntimeError("календарь вернул HTML вместо JSON")
+    data = r.json()
+    if not isinstance(data, list):
+        raise RuntimeError("календарь вернул неожиданный формат")
+    return data
+
+
+def fetch_ff() -> list[NewsEvent]:
+    # Один URL за цикл: Forex Factory режет чаще двух выгрузок за 5 минут с IP.
+    return _dedupe_events(_parse_ff_rows(_get_ff_json(FF_URL)))
+
+
 def load_events() -> list[NewsEvent]:
-    global _CALENDAR_STATUS
+    global _CALENDAR_STATUS, _MEM_EVENTS, _MEM_TS, _MEM_STATUS
+    min_min = max(5.0, float(getattr(cfg, "NEWS_FETCH_MIN_MINUTES", 45)))
+    if _MEM_EVENTS and (time.time() - _MEM_TS) < min_min * 60:
+        _CALENDAR_STATUS = _MEM_STATUS
+        return list(_MEM_EVENTS)
     try:
         events = fetch_ff()
         if events:
             _save_cache(events)
+            _MEM_EVENTS = list(events)
+            _MEM_TS = time.time()
+            _MEM_STATUS = "live"
             _CALENDAR_STATUS = "live"
             return events
         raise RuntimeError("источник вернул пустой календарь")
     except Exception as e:
         log.warning("Forex Factory календарь: %s", e)
-        cached = _load_cache()
+        cached = _load_cache() or list(_MEM_EVENTS)
         if cached:
+            _MEM_EVENTS = list(cached)
+            _MEM_TS = time.time()
+            _MEM_STATUS = "cache"
             _CALENDAR_STATUS = "cache"
             log.info("Использован сохранённый экономический календарь: %s событий", len(cached))
             return cached
         _CALENDAR_STATUS = "unavailable"
+        _MEM_STATUS = "unavailable"
         return []
 
 

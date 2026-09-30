@@ -44,6 +44,14 @@ def _news_context(symbol: str, events: list[newsmod.NewsEvent], confidence: int 
         end_utc = now_utc + timedelta(hours=max(1, hours))
         relevant = [e for e in relevant if now_utc <= e.dt_utc <= end_utc]
     if not relevant:
+        if newsmod.calendar_status() == "unavailable" and not events:
+            return {
+                "confidence": confidence,
+                "headline": "📰 Календарь временно недоступен — новости по паре не подтверждены.",
+                "lines": [],
+                "status": "Технический сценарий без проверки новостного окна.",
+                "risk": "UNKNOWN", "events": [],
+            }
         return {
             "confidence": confidence,
             "headline": "📰 До следующей сессии значимых новостей по паре нет.",
@@ -147,7 +155,7 @@ def _minimal_echo_ray(symbol: str, by_tf: dict, side: str) -> io.BytesIO:
 
 def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
                  current_name: str, next_name: str, strength: dict | None = None,
-                 dxy_bias: int = 0) -> dict:
+                 dxy_bias: int = 0, session_side: str | None = None) -> dict:
     checkpoints = sorted(set((
         max(1, int(round(hours * 0.25))),
         max(1, int(round(hours * 0.50))),
@@ -203,6 +211,13 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
                 "Внутрисессионный путь не интерполируется: показано только контекстное направление.",
                 "Исторических аналогов недостаточно для формы пути.",
             ])
+        if session_side and side and session_side != side:
+            scenario.append(
+                f"Сверка с брифингом: тезис сессии {session_side}; Эхо смотрит {side}. "
+                "Это оценка к границе следующей сессии, не смена рабочего тезиса."
+            )
+        elif session_side and side == session_side:
+            scenario.append(f"Сверка с брифингом: совпадает с тезисом сессии {session_side}.")
         chart_result = dict(result)
         chart_result["confidence"] = direction_probability
         chart_result["weak"] = not trajectory_available
@@ -220,6 +235,11 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
     else:
         scenario = ["Направление: НЕЙТРАЛЬНО 🟡",
                     "Вероятность: недостаточно надёжных исторических совпадений"]
+        if session_side:
+            scenario.append(
+                f"Сверка с брифингом: тезис сессии {session_side} сохраняется; "
+                "нейтральное Эхо не спорит с ним и не даёт второго голоса."
+            )
         image = _neutral_image(symbol, "ЭХО", by_tf, "Недостаточно данных для надёжного сценария")
     text = "\n".join([
         "━━━━━━━━━━━━━━━━━━", "🔭 ЭХО — ПРОГНОЗ ДО СЛЕДУЮЩЕЙ СЕССИИ", "━━━━━━━━━━━━━━━━━━", "",
@@ -231,7 +251,7 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
 
 def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
                   current_name: str, next_name: str, strength: dict | None = None,
-                  dxy_bias: int = 0) -> dict:
+                  dxy_bias: int = 0, session_side: str | None = None) -> dict:
     result = next_pivot_projection.analyze_session_symbol(symbol, by_tf, hours, strength=strength or {})
     news = _news_context(symbol, events, result["probability"] if result else None, hours, confidence_floor=30)
     if result:
@@ -261,20 +281,35 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
         echo = echo_projection.analyze(
             symbol, by_tf, sorted(set((max(1, hours//2), hours))),
             strength=strength or {}, dxy_bias=int(dxy_bias or 0))
-        if echo:
-            echo_side = echo.get("side")
-            if echo_side == side:
-                link = f"Echo {echo_side} → первичное движение к Pivot {side} → после зоны возможна реакция {reaction}"
-            else:
-                link = (f"Echo {echo_side} задаёт общий сессионный фон; Pivot ожидает первичное движение {side} "
-                        f"к зоне, затем возможна реакция {reaction}. Это разные этапы сценария.")
+        echo_side = echo.get("side") if echo else None
+        thesis = session_side or echo_side
+        against_thesis = bool(thesis and side and thesis != side)
+        muted = bool(weak or result.get("zigzag_conflict") or (not echo_side and against_thesis))
+        if muted:
+            icon = "🟡"
+        if not echo_side and muted:
+            link = (f"Эхо нейтрально; слабый Pivot {side} не читается как направление сессии"
+                    + (f" и не спорит с тезисом {thesis}" if thesis else "")
+                    + f". Зона — только магнит, затем возможна реакция {reaction}.")
+        elif against_thesis:
+            link = (f"Тезис сессии / Эхо {thesis}. Pivot описывает локальный крюк {side} к зоне, "
+                    f"затем возможна реакция {reaction}. Это не второй торговый голос и не смена тезиса.")
+        elif echo_side == side:
+            link = f"Echo {echo_side} → первичное движение к Pivot {side} → после зоны возможна реакция {reaction}"
+        elif echo_side:
+            link = (f"Echo {echo_side} задаёт общий сессионный фон; Pivot ожидает первичное движение {side} "
+                    f"к зоне, затем возможна реакция {reaction}. Это разные этапы сценария.")
         else:
             link = f"Первичное движение {side} к Pivot → после зоны возможна реакция {reaction}"
 
+        primary = f"Первичное движение к Pivot: {side} {icon}"
+        if muted and against_thesis:
+            primary += f" · локальный крюк к зоне, не смена тезиса сессии ({thesis})"
+
         scenario = [
             f"Режим расчёта: {mode}",
-            f"Первичное движение к Pivot: {side} {icon}",
-            *((["Статус: 🟡 СЛАБАЯ PIVOT-ГИПОТЕЗА · не отображается как полноценный LONG/SHORT-сигнал"] if weak else [])),
+            primary,
+            *((["Статус: 🟡 СЛАБАЯ PIVOT-ГИПОТЕЗА · не отображается как полноценный LONG/SHORT-сигнал"] if (weak or muted) else [])),
             f"Ожидаемая зона {kind}: {result['zone_low']:.{decimals}f}–{result['zone_high']:.{decimals}f}",
             window_line,
             f"Сверка с ZigZag D1/H4/H1: {result.get('zigzag_check', 'нет данных')}{conflict}",
@@ -323,6 +358,15 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
         usd = float((strength or {}).get("USD") or 0)
         gap = float(getattr(cfg, "ECHO_STRENGTH_MIN_GAP", 0.04))
         dxy_bias = 1 if usd >= gap else (-1 if usd <= -gap else 0)
+    session_sides: dict[str, str] = {}
+    try:
+        briefs = briefing.build_pair_briefs(market, strength or {}, events, datetime.now(timezone.utc))
+        for brief in briefs:
+            side = brief.side or briefing.technical_pair_side(brief)
+            if side:
+                session_sides[brief.symbol] = side
+    except Exception:
+        log.exception("SESSION_THESIS_CONTEXT_FAILED; Echo/Pivot без сверки с брифингом")
     reports = []
     modules = []
     if getattr(cfg, "ECHO_ENABLED", True):
@@ -335,10 +379,11 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
             if delivered.get(key):
                 continue
             by_tf = market.get(symbol) or {}
+            thesis = session_sides.get(symbol)
             try:
-                report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias)
+                report = (_echo_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias, thesis)
                           if module == "echo" else
-                          _pivot_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias))
+                          _pivot_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias, thesis))
                 report["key"] = key
                 reports.append(report)
             except Exception:

@@ -48,3 +48,33 @@ def test_pivot_report_uses_primary_move_wording_and_weak_status(monkeypatch):
     assert "Направление до следующей сессии" not in text
     assert "Ожидаемая реакция после зоны: SHORT" in text
     assert "Связка Echo → Pivot" in text
+
+
+def test_weak_opposite_pivot_does_not_fight_session_thesis(monkeypatch):
+    pivot = {
+        "side": "LONG", "probability": 31, "kind": "high", "zone_low": 157.1, "zone_high": 157.7,
+        "bars_low": 0, "bars_high": 5, "zigzag_check": "0/3", "zigzag_conflict": True,
+        "smc_confirmations": [], "smc_cautions": [], "reaction_score": 34,
+        "estimated": False, "pivot_active": False, "outside_session": False,
+    }
+    monkeypatch.setattr(reports.next_pivot_projection, "analyze_session_symbol", lambda *a, **k: pivot)
+    monkeypatch.setattr(reports.next_pivot_projection, "render_chart", lambda *a, **k: object())
+    monkeypatch.setattr(reports.echo_projection, "analyze", lambda *a, **k: None)
+    text = reports._pivot_report(
+        "USD/JPY", {}, [], 9, "АМЕРИКА", "АЗИЯ", {}, session_side="SHORT",
+    )["text"]
+    assert "не смена тезиса сессии (SHORT)" in text
+    assert "не читается как направление сессии" in text
+    assert "СЛАБАЯ PIVOT-ГИПОТЕЗА" in text
+
+
+def test_echo_notes_session_alignment(monkeypatch):
+    fake = {"side": "SHORT", "direction_probability": 62, "confidence": 62, "data_quality": 34,
+            "estimated": True, "trajectory_available": False, "sample": 0,
+            "expected_by_horizon": {}, "horizons": {}, "current": 1.1, "atr": .001}
+    monkeypatch.setattr(reports.echo_projection, "analyze", lambda *a, **k: fake)
+    monkeypatch.setattr(reports, "_minimal_echo_ray", lambda *a, **k: object())
+    text = reports._echo_report(
+        "EUR/USD", {}, [], 9, "АМЕРИКА", "АЗИЯ", {}, session_side="SHORT",
+    )["text"]
+    assert "совпадает с тезисом сессии SHORT" in text
