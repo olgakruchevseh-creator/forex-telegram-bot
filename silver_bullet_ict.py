@@ -172,10 +172,26 @@ def process_market(market,strength,events=None,now_utc=None):
         if not og.get('allow',True): continue
         if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90),max(0,e['quality']-3))
         key=f"{symbol}|{e['side']}|{e['window']}|{e['trigger_dt']}"
-        if key in sent: continue
-        text=format_message(e); out.append(text); sent[key]=datetime.now(timezone.utc).isoformat(); _PENDING_CARDS[text]=(dict(e),freeze_by_tf(market.get(symbol) or {}))
+        pending=st.setdefault('pending',{})
+        if key in sent or key in pending: continue
+        text=format_message(e); out.append(text)
+        pending[key]=True
+        _PENDING_CARDS[text]=(dict(e),freeze_by_tf(market.get(symbol) or {}),key)
     if len(sent)>500: st['sent']=dict(list(sent.items())[-350:])
     _save(st); return out
+
+
+def mark_delivered(text: str) -> bool:
+    card=_PENDING_CARDS.get(text or "")
+    key=card[2] if card and len(card) > 2 else None
+    if not key:
+        return False
+    st=_load(); pending=st.setdefault('pending',{}); sent=st.setdefault('sent',{})
+    pending.pop(key, None)
+    sent[key]=datetime.now(timezone.utc).isoformat()
+    if len(sent)>500: st['sent']=dict(list(sent.items())[-350:])
+    _save(st)
+    return True
 
 def render_chart(e,by_tf):
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt

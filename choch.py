@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import config as cfg
-from analysis import atr, closed_candles
+from analysis import atr, closed_candles, swing_character
 
 _MINUTES = {"H1": 60, "M15": 15, "M5": 5}
 
@@ -45,24 +45,29 @@ def _confirmed_choch(by_tf: dict, tf: str, candidate_side: int) -> ChochContext 
     body = abs(last.close - last.open)
     disp = body / av
 
-    # Establish the character BEFORE the breaking candle using two recent
-    # non-overlapping structure windows. This avoids calling every BOS a CHOCH.
+    # Character comes from confirmed ZigZag swings (same engine as the scanner).
+    # Window highs/lows remain a fallback when ZigZag has not locked 4 swings yet.
     pre = bars[:-1]
-    recent = pre[-swing_n:]
-    previous = pre[-2*swing_n:-swing_n]
-    if len(recent) < swing_n or len(previous) < swing_n:
-        return None
-
-    recent_high, recent_low = max(c.high for c in recent), min(c.low for c in recent)
-    prev_high, prev_low = max(c.high for c in previous), min(c.low for c in previous)
-
-    prior_bearish = recent_high <= prev_high and recent_low < prev_low
-    prior_bullish = recent_high > prev_high and recent_low >= prev_low
+    zz = swing_character(pre, tf)
+    if zz:
+        prior_bearish = bool(zz["prior_bearish"])
+        prior_bullish = bool(zz["prior_bullish"])
+        bull_level = float(zz["last_high"])
+        bear_level = float(zz["last_low"])
+    else:
+        recent = pre[-swing_n:]
+        previous = pre[-2*swing_n:-swing_n]
+        if len(recent) < swing_n or len(previous) < swing_n:
+            return None
+        recent_high, recent_low = max(c.high for c in recent), min(c.low for c in recent)
+        prev_high, prev_low = max(c.high for c in previous), min(c.low for c in previous)
+        prior_bearish = recent_high <= prev_high and recent_low < prev_low
+        prior_bullish = recent_high > prev_high and recent_low >= prev_low
+        bull_level = recent_high
+        bear_level = recent_low
 
     # Bullish CHOCH: bearish character existed, then a strong close above the
     # latest meaningful swing high. Bearish is the mirror image.
-    bull_level = recent_high
-    bear_level = recent_low
     bull = (prior_bearish and last.close > bull_level + close_buf
             and last.close > last.open and disp >= min_disp)
     bear = (prior_bullish and last.close < bear_level - close_buf

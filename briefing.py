@@ -1017,6 +1017,8 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
 
 
 def format_session_cycle_block(market: dict, now: Optional[datetime] = None) -> list[str]:
+    if not getattr(cfg, "SESSION_CYCLE_CONTEXT_ENABLED", True):
+        return []
     now = now or now_local()
     lines=["", "🔄 ЦИКЛ СЕССИЙ / AMD — ФАКТИЧЕСКАЯ ФАЗА ТЕКУЩЕГО ДНЯ", ""]
     for symbol in getattr(cfg,"PAIRS", list((market or {}).keys())):

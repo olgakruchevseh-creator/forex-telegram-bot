@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import config as cfg
-from analysis import atr, closed_candles
+from analysis import atr, closed_candles, swing_character
 
 _MINUTES = {"H1": 60, "M15": 15, "M5": 5}
 
@@ -39,15 +39,21 @@ def _confirmed_mss(by_tf: dict, tf: str, candidate_side: int) -> MSSContext | No
 
     last = bars[-1]
     pre = bars[:-1]
-    recent = pre[-swing_n:]
-    previous = pre[-2 * swing_n:-swing_n]
-    if len(recent) < swing_n or len(previous) < swing_n:
-        return None
-
-    recent_high, recent_low = max(c.high for c in recent), min(c.low for c in recent)
-    prev_high, prev_low = max(c.high for c in previous), min(c.low for c in previous)
-    prior_bearish = recent_high <= prev_high and recent_low < prev_low
-    prior_bullish = recent_high > prev_high and recent_low >= prev_low
+    zz = swing_character(pre, tf)
+    if zz:
+        prior_bearish = bool(zz["prior_bearish"])
+        prior_bullish = bool(zz["prior_bullish"])
+        recent_high = float(zz["last_high"])
+        recent_low = float(zz["last_low"])
+    else:
+        recent = pre[-swing_n:]
+        previous = pre[-2 * swing_n:-swing_n]
+        if len(recent) < swing_n or len(previous) < swing_n:
+            return None
+        recent_high, recent_low = max(c.high for c in recent), min(c.low for c in recent)
+        prev_high, prev_low = max(c.high for c in previous), min(c.low for c in previous)
+        prior_bearish = recent_high <= prev_high and recent_low < prev_low
+        prior_bullish = recent_high > prev_high and recent_low >= prev_low
 
     body = abs(last.close - last.open)
     rng = max(last.high - last.low, 1e-12)

@@ -131,6 +131,28 @@ def adx(candles: list[Candle], period: int = 14) -> float:
     return adx_vals[-1] / period
 
 
+def swing_character(candles: list[Candle], tf: str) -> dict | None:
+    """HH/HL vs LH/LL по тем же ZigZag-свингам, что использует сканер."""
+    import config as _cfg
+    if len(candles) < 20:
+        return None
+    pct = float((_cfg.ZIGZAG_PCT or {}).get(tf, 0.18))
+    min_bars = int(getattr(_cfg, "ZIGZAG_MIN_BARS", 3))
+    swings = zigzag(candles, pct, min_bars)
+    highs = [s for s in swings if s.kind == "high"]
+    lows = [s for s in swings if s.kind == "low"]
+    if len(highs) < 2 or len(lows) < 2:
+        return None
+    last_high, prev_high = highs[-1].price, highs[-2].price
+    last_low, prev_low = lows[-1].price, lows[-2].price
+    return {
+        "prior_bearish": last_high <= prev_high and last_low < prev_low,
+        "prior_bullish": last_high > prev_high and last_low >= prev_low,
+        "last_high": float(last_high),
+        "last_low": float(last_low),
+    }
+
+
 def zigzag(candles: list[Candle], pct: float, min_bars: int) -> list[Swing]:
     """Подтверждённые экстремумы без использования незакрытых будущих свечей.
 

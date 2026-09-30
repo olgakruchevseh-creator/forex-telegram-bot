@@ -237,6 +237,23 @@ def bars(score: float) -> str:
     return "█" * n + "░" * (10 - n)
 
 
+def closed_bar_utc(dt_str: str | None) -> datetime | None:
+    """Время последней закрытой H1 как UTC. Не часы хоста."""
+    raw = str(dt_str or "")[:19]
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+
 def last_closed_h1_dt(h1: dict[str, list[Candle]]) -> str:
     dts = []
     for candles in h1.values():
@@ -1088,7 +1105,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Новости для ICT Silver Bullet")
                     silver_events = []
                 for text in silver_bullet_ict.process_market(
-                    market, strength, silver_events, datetime.now(timezone.utc)
+                    market, strength, silver_events, closed_bar_utc(closed_dt)
                 ):
                     module_alerts.append((0, text))
             except Exception:
@@ -1143,7 +1160,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Новости для Fib+SMC")
                     fib_smc_events = []
                 for text in fib_smc.process_market(
-                    market, strength, fib_smc_events, datetime.now(timezone.utc)
+                    market, strength, fib_smc_events, closed_bar_utc(closed_dt)
                 ):
                     module_alerts.append((0, text))
             except Exception:
@@ -1231,7 +1248,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     candidate_alerts,
                     dxy_bias=master_dxy_bias,
                     events=master_events,
-                    now_utc=datetime.now(timezone.utc),
+                    now_utc=closed_bar_utc(closed_dt) or datetime.now(timezone.utc),
                     priority_keys=mandatory_keys,
                 )
             except Exception:
@@ -1453,6 +1470,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         fibonacci_grid.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Fibonacci")
+                if "ICT SILVER BULLET" in source_text:
+                    try:
+                        silver_bullet_ict.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Silver Bullet")
                 if "🧬 FIB + SMC —" in source_text:
                     try:
                         fib_smc.mark_delivered(source_text)

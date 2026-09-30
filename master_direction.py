@@ -208,9 +208,9 @@ def analyze_symbol(
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
     state_ctx = market_state.build(symbol, by_tf, side, events or [], now_utc) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
-    auction_ctx = auction_context.analyze_symbol(symbol, by_tf, side)
-    narrative_ctx = multi_tf_narrative.analyze_symbol(symbol, by_tf, side)
-    setup_ctx = setup_memory.analyze(symbol, side, regime_ctx.name if regime_ctx else "")
+    auction_ctx = auction_context.analyze_symbol(symbol, by_tf, side) if getattr(cfg, "AUCTION_CONTEXT_ENABLED", True) else None
+    narrative_ctx = multi_tf_narrative.analyze_symbol(symbol, by_tf, side) if getattr(cfg, "MULTI_TF_NARRATIVE_ENABLED", True) else None
+    setup_ctx = setup_memory.analyze(symbol, side, regime_ctx.name if regime_ctx else "") if getattr(cfg, "SETUP_MEMORY_ENABLED", True) else None
     idm_sweep_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
     ohlc_ctx = ohlc_movement.setup_adjustment(by_tf, side) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
@@ -267,18 +267,25 @@ def analyze_symbol(
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     quality += int(ohlc_ctx.get("quality_delta", 0))
     candle_ctx = candle_context.analyze_symbol(symbol, by_tf, side, "H1")
-    quality += candle_context.score_delta(candle_ctx, side)
     trading_ctx = trading_intelligence_context.analyze_symbol(symbol, by_tf, side, "H1")
-    quality += trading_intelligence_context.score_delta(trading_ctx, side)
     path_ctx = path_quality_context.analyze_symbol(symbol, by_tf, side, alerts)
-    quality += path_quality_context.score_delta(path_ctx, side)
     decision_quality_ctx = decision_quality_context.analyze_symbol(symbol, by_tf, side)
-    quality += decision_quality_context.score_delta(decision_quality_ctx, side)
     turtle_ctx = turtle_breakout_context.analyze_symbol(symbol, by_tf, side)
-    quality += turtle_breakout_context.score_delta(turtle_ctx, side)
-    quality += auction_context.score_delta(auction_ctx, side)
-    quality += multi_tf_narrative.score_delta(narrative_ctx, side)
-    quality += setup_memory.score_delta(setup_ctx)
+    # KILLER already applied the same book-context stack to become eligible.
+    # Do not pay those coins again on the same pair/side.
+    killer_already = any(
+        "🏹🎯 KILLER" in (text or "") and _pair(text) == symbol and _side(text) == side
+        for text in (alerts or [])
+    )
+    if not killer_already:
+        quality += candle_context.score_delta(candle_ctx, side)
+        quality += trading_intelligence_context.score_delta(trading_ctx, side)
+        quality += path_quality_context.score_delta(path_ctx, side)
+        quality += decision_quality_context.score_delta(decision_quality_ctx, side)
+        quality += turtle_breakout_context.score_delta(turtle_ctx, side)
+        quality += auction_context.score_delta(auction_ctx, side)
+        quality += multi_tf_narrative.score_delta(narrative_ctx, side)
+        quality += setup_memory.score_delta(setup_ctx)
     regime_weight = market_regime.quality_adjustment(regime_ctx, side, ohlc_ctx)
     quality += int(regime_weight.get("delta", 0))
     if state_ctx and state_ctx.liquidity and state_ctx.liquidity.confidence >= 60:
