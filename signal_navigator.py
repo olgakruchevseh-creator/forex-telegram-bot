@@ -24,6 +24,8 @@ import demand_supply_context
 import decision_quality_context
 import turtle_breakout_context
 import next_pivot_projection
+import trade_lifecycle
+import news as newsmod
 from chart_snapshot import freeze_by_tf
 from analysis import analyze_tf, currency_strength_dynamics
 
@@ -468,7 +470,7 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         eligible, reason = False, "small_range_candles"
     else:
         eligible, reason = True, "significant"
-    return {
+    result = {
         "eligible": eligible, "reason": reason, "remaining_h1": remaining_h1,
         "route_atr": round(route_atr, 3), "final_route_atr": round(final_route_atr, 3),
         "source_displacement_atr": source_disp, "median_body_atr": round(median_body_atr, 3),
@@ -476,6 +478,29 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         "early_ohlc": early_ohlc, "source_tf": source_tf, "source_age_min": source_age_min,
         "early_entry": early,
     }
+    if getattr(cfg, "TRADE_LIFECYCLE_ENABLED", True):
+        try:
+            events = newsmod.load_events()
+        except Exception:
+            events = []
+        try:
+            active = (_load().get("active") or {}) if getattr(cfg, "TRADE_LIFECYCLE_CORRELATED_USD", True) else {}
+        except Exception:
+            active = {}
+        try:
+            life = trade_lifecycle.evaluate(
+                symbol, direction, by_tf, events, significance=result,
+                active_routes=active,
+            )
+            result["trade_lifecycle"] = life.describe()
+            result["trade_lifecycle_status"] = life.status
+            result["trade_lifecycle_reason"] = life.reason
+            if not life.allow_new_entry:
+                result["eligible"] = False
+                result["reason"] = life.reason
+        except Exception:
+            log.exception("TRADE_LIFECYCLE_GATE %s", symbol)
+    return result
 
 def build_source_companion(source_text: str, market: dict, strength: dict) -> tuple[str, list[str]] | None:
     """Немедленно принимает доставляемый модульный сигнал на сопровождение."""

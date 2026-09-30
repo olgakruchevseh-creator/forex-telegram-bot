@@ -35,6 +35,7 @@ import path_quality_context
 import decision_quality_context
 import turtle_breakout_context
 import evidence_families
+import trade_lifecycle
 from analysis import PairStack, build_stack, split_pair
 
 log = logging.getLogger("fxbot.master_direction")
@@ -144,17 +145,19 @@ def _usd_expected(symbol: str, side: int) -> int:
     return 0
 
 
-def _news_blocked(symbol: str, events: list[newsmod.NewsEvent], now_utc: datetime) -> bool:
-    base, quote = split_pair(symbol)
-    before = int(getattr(cfg, "MASTER_NEWS_BLOCK_BEFORE_MINUTES", 60))
-    after = int(getattr(cfg, "MASTER_NEWS_BLOCK_AFTER_MINUTES", 30))
-    for event in newsmod.high_events(events):
-        if event.currency not in (base, quote):
-            continue
-        left = newsmod.minutes_left(event, now_utc)
-        if -after <= left <= before:
-            return True
-    return False
+def _news_blocked(symbol: str, events: list[newsmod.NewsEvent], now_utc: datetime, side: int = 1) -> bool:
+    if not getattr(cfg, "TRADE_LIFECYCLE_USE_NEWS_REGIME", True):
+        base, quote = split_pair(symbol)
+        before = int(getattr(cfg, "MASTER_NEWS_BLOCK_BEFORE_MINUTES", 60))
+        after = int(getattr(cfg, "MASTER_NEWS_BLOCK_AFTER_MINUTES", 30))
+        for event in newsmod.high_events(events):
+            if event.currency not in (base, quote):
+                continue
+            left = newsmod.minutes_left(event, now_utc)
+            if -after <= left <= before:
+                return True
+        return False
+    return trade_lifecycle.news_blocks_new_entry(symbol, events, now_utc, side=side)
 
 
 def analyze_symbol(
@@ -222,7 +225,7 @@ def analyze_symbol(
     if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
         return None
     now_utc = now_utc or datetime.now(timezone.utc)
-    if _news_blocked(symbol, events or [], now_utc):
+    if _news_blocked(symbol, events or [], now_utc, side=side):
         return None
 
     usd_expected = _usd_expected(symbol, side)
@@ -324,6 +327,19 @@ def analyze_symbol(
     if quality < int(getattr(cfg, "MASTER_MIN_QUALITY", 82)):
         return None
 
+    life = None
+    if getattr(cfg, "TRADE_LIFECYCLE_ENABLED", True):
+        try:
+            life = trade_lifecycle.evaluate(
+                symbol, side, by_tf, events or [], now_utc,
+                regime_name=getattr(regime_ctx, "name", "") if regime_ctx else "",
+            )
+        except Exception:
+            log.exception("TRADE_LIFECYCLE_MASTER %s", symbol)
+            life = None
+        if life and not life.allow_new_entry:
+            return None
+
     confidence = min(91, quality - 4)
     return {
         "symbol": symbol,
@@ -390,6 +406,9 @@ def analyze_symbol(
         "multi_tf_narrative": multi_tf_narrative.describe(narrative_ctx),
         "setup_memory": setup_memory.describe(setup_ctx),
         "market_state": state_ctx.as_dict() if state_ctx else None,
+        "trade_lifecycle": life.describe() if life else "",
+        "trade_lifecycle_status": life.status if life else "",
+        "trade_lifecycle_reason": life.reason if life else "",
     }
 
 
@@ -435,7 +454,7 @@ def analyze_local_amd_symbol(
     # Для ранней ветки источником является только завершённая AMD-модель.
     aligned = ["подтверждена модель AMD / Power of Three"]
     now_utc = now_utc or datetime.now(timezone.utc)
-    if _news_blocked(symbol, events or [], now_utc):
+    if _news_blocked(symbol, events or [], now_utc, side=side):
         return None
     senior_n = sum(stack.views[k].bias == side for k in ("D1", "H4", "H1") if k in stack.views)
     junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
@@ -509,6 +528,10 @@ def format_message(result: dict) -> str:
     lines.extend([
         "",
         "✅ Факт: ключевые фильтры согласованы по закрытой H1-свече.",
+    ])
+    if result.get("trade_lifecycle"):
+        lines.extend(["", f"• {result['trade_lifecycle']}"])
+    lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━",
     ])

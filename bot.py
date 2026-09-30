@@ -1322,9 +1322,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     significant_alerts.append(source_text)
                 else:
                     log.info(
-                        "SIGNAL_INTERNAL_ONLY pair=%s side=%s reason=%s h1=%s route_atr=%s body_atr=%s eff=%s",
+                        "SIGNAL_INTERNAL_ONLY pair=%s side=%s reason=%s status=%s h1=%s route_atr=%s body_atr=%s eff=%s",
                         _alert_pair(source_text), _direct_signal_side(source_text),
-                        significance.get("reason"), significance.get("remaining_h1"),
+                        significance.get("reason"),
+                        significance.get("trade_lifecycle_status"),
+                        significance.get("remaining_h1"),
                         significance.get("route_atr"), significance.get("median_body_atr"),
                         significance.get("efficiency"),
                     )
