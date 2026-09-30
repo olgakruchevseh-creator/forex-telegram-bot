@@ -31,6 +31,7 @@ import news as newsmod
 import session_cycle_context
 import pump_dump_context
 import divergence_context
+import market_regime
 
 log = logging.getLogger("fxbot.briefing")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
@@ -429,7 +430,7 @@ def leader_confidence(brief: PairBrief) -> int:
     return max(62, min(92, int(round(conf))))
 
 
-def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0) -> str:
+def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0, by_tf: Optional[dict] = None) -> str:
     """Старший маршрут против текущего движения; ZigZag защищает от ложного ярлыка отката."""
     if not stack:
         return "НЕТ ДАННЫХ"
@@ -445,6 +446,14 @@ def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0) -> str
 
     primary = consensus(("W1", "D1", "H4"))
     local = consensus(("H1", "M15", "M5"))
+    # Do not call every opposite M15/M5 majority a pullback. In a confirmed
+    # H1 range/compression it is a sideways market with a directional tilt.
+    regime = None
+    try:
+        regime = market_regime.analyze_symbol("", by_tf or {}) if by_tf else None
+    except Exception:
+        regime = None
+    flat_like = bool(regime and regime.name in ("RANGE", "COMPRESSION"))
     # Когда H4, H1 и сам ZigZag H4 уже синхронно идут против W1/D1,
     # это не просто неопределённый переход, а наблюдаемый локальный импульс.
     if (primary and _tf_bias(stack, "H4") == -primary
@@ -456,6 +465,8 @@ def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0) -> str
     if primary and local == primary:
         return f"ОСНОВНОЙ ИМПУЛЬС {_dir_word(primary)}"
     if primary and local == -primary:
+        if flat_like:
+            return f"БОКОВИК С УКЛОНОМ {_dir_word(local)} ВНУТРИ {_dir_word(primary)}"
         return f"ОТКАТ {_dir_word(local)} ВНУТРИ {_dir_word(primary)}"
     if primary and not local and _tf_bias(stack, "H1") == -primary:
         return (f"НАЧАЛО ОТКАТА {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)}"
@@ -665,7 +676,7 @@ def build_pair_briefs(
             zigzag_h4_mixed=zigzag_h4_mixed,
             w1=_tf_label(stack, "W1"),
             m5=_tf_label(stack, "M5"),
-            position=current_position(stack, zigzag_h4_side),
+            position=current_position(stack, zigzag_h4_side, market.get(symbol) or {}),
             amd=amd_status,
         )
         technical_side = technical_pair_side(brief)
@@ -704,6 +715,20 @@ def build_pair_briefs(
     return out
 
 
+
+def _currency_exposure(symbol: str, side: str) -> dict[str, int]:
+    """Signed currency exposure for correlation-aware leader selection."""
+    try: base, quote = split_pair(symbol)
+    except Exception: return {}
+    d = 1 if side == "LONG" else -1
+    return {base:d, quote:-d}
+
+def _same_currency_bet(a: PairBrief, b: PairBrief) -> bool:
+    if not a.side or not b.side:return False
+    ea, eb = _currency_exposure(a.symbol,a.side), _currency_exposure(b.symbol,b.side)
+    # USD dominates this seven-pair universe; also catch another shared currency.
+    return any(cur in eb and eb[cur]==sgn for cur,sgn in ea.items())
+
 def pick_leaders(briefs: list[PairBrief]) -> list[PairBrief]:
     ranked = sorted(briefs, key=lambda b: b.score, reverse=True)
     chosen: list[PairBrief] = []
@@ -719,6 +744,10 @@ def pick_leaders(briefs: list[PairBrief]) -> list[PairBrief]:
         if "RANGE" in b.state:
             continue
         if b.state in ("СМЕШАННО", "КОНФЛИКТ СТРУКТУРЫ H4"):
+            continue
+        # Two pairs can be the same underlying currency bet (e.g. both short USD).
+        # Keep the stronger representative instead of presenting duplicates as diversification.
+        if any(_same_currency_bet(b, old) for old in chosen):
             continue
         chosen.append(b)
         if len(chosen) >= 2:
@@ -751,9 +780,9 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
         return lines
     lines.append(f"Цена: {dxy.price:.2f}")
     lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
-    lines.append(f"Направление: {_dir_word(effective_dxy_bias(dxy))} · структурное")
+    lines.append(f"Направление: {_ru_display(_dir_word(effective_dxy_bias(dxy)))} · структурное")
     impulse = "LONG" if dxy.change_pct > 0 else ("SHORT" if dxy.change_pct < 0 else "НЕЙТРАЛЬНО")
-    lines.append(f"Текущий импульс закрытой H1: {impulse}")
+    lines.append(f"Текущий импульс закрытой H1: {_ru_display(impulse)}")
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
     lines.append(f"ADX: {dxy.adx:.0f}")
@@ -831,7 +860,7 @@ def events_until_next_briefing(events: list[newsmod.NewsEvent], now: Optional[da
 def format_until_next_briefing(events: list[newsmod.NewsEvent], now_utc: datetime) -> list[str]:
     lines=["", "⏭ ВАЖНЫЕ СОБЫТИЯ ДО СЛЕДУЮЩЕГО БРИФИНГА", ""]
     if not events:
-        lines.append("HIGH-impact событий до следующего брифинга нет")
+        lines.append("Событий высокой важности до следующего брифинга нет")
         return lines
     for e in events:
         left=newsmod.minutes_left(e,now_utc)
@@ -844,6 +873,13 @@ def format_until_next_briefing(events: list[newsmod.NewsEvent], now_utc: datetim
         lines.append("")
     return lines
 
+def _ru_display(value: str) -> str:
+    """Russian-only presentation; internal enum/side values stay unchanged."""
+    out=str(value or "")
+    for a,b in (("DISTRIBUTION/BALANCE","БАЛАНС / РАСПРЕДЕЛЕНИЕ"),("EXPANSION","РАСШИРЕНИЕ"),("TRANSITION","ПЕРЕХОД"),("ACCUMULATION","НАКОПЛЕНИЕ"),("RANGE","БОКОВИК"),("LONG","ЛОНГ"),("SHORT","ШОРТ")):
+        out=out.replace(a,b)
+    return out
+
 def format_board(briefs: list[PairBrief]) -> list[str]:
     lines = ["📊 ДОСКА ПРИОРИТЕТОВ", ""]
     for b in briefs:
@@ -855,7 +891,7 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         else:
             force = f"сила почти равная ({b.gap:+.2f})"
         lines.append(b.symbol)
-        lines.append(f"W1 {b.w1} · D1 {b.d1} · H4 {b.h4} · H1 {b.h1} · M15 {b.m15} · M5 {b.m5}")
+        lines.append(f"W1 {_ru_display(b.w1)} · D1 {_ru_display(b.d1)} · H4 {_ru_display(b.h4)} · H1 {_ru_display(b.h1)} · M15 {_ru_display(b.m15)} · M5 {_ru_display(b.m5)}")
         zz_icon = "🟢" if b.zigzag_h4_side > 0 else ("🔴" if b.zigzag_h4_side < 0 else "🟡")
         position_upper = (b.position or "").upper()
         if "SHORT" in position_upper:
@@ -880,19 +916,19 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             amd_icon = "⚡"
         else:
             amd_icon = "⚪"
-        lines.append(f"ZigZag: {zz_icon} {b.zigzag}")
-        lines.append(f"Текущее положение: {position_icon} {b.position}")
+        lines.append(f"Зигзаг: {zz_icon} {_ru_display(b.zigzag)}")
+        lines.append(f"Текущее положение: {position_icon} {_ru_display(b.position)}")
         lines.append(f"AMD: {amd_icon} {amd_text}")
         technical_side = technical_pair_side(b)
-        agree_label = f"{b.agree} {technical_side}" if technical_side else b.agree
+        agree_label = f"{b.agree} {_ru_display(technical_side)}" if technical_side else b.agree
         if technical_side and b.zigzag_h4_side and b.zigzag_h4_side != _side_int(technical_side):
-            agree_label += " · ⚠️ ZigZag H4 против"
+            agree_label += " · ⚠️ Зигзаг H4 против"
         lines.append(f"Согласие D1/H4/H1: {agree_label}")
         relation = b.strength_relation or _strength_relation(b.gap, technical_pair_side(b))
         lines.append(f"Сила: {force} · {relation}")
         if b.context_support or b.context_against:
             lines.append(f"Внутренний контекст: +{b.context_support} / -{b.context_against} групп подтверждения")
-        lines.append(f"Состояние: {b.state}")
+        lines.append(f"Состояние: {_ru_display(b.state)}")
         lines.append("")
     return lines
 
@@ -935,13 +971,13 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
             if candidate.zigzag_h4_side and _side_int(tech) != candidate.zigzag_h4_side: reasons.append("ZigZag H4 против")
             if candidate.context_against: reasons.append(f"SMC-контекст против: {candidate.context_against}")
             why = " · ".join(reasons) if reasons else "не хватает полного подтверждения"
-            lines.append(f"Лучший технический кандидат: {candidate.symbol} {tech} · {why}")
+            lines.append(f"Лучший технический кандидат: {candidate.symbol} {_ru_display(tech)} · {why}")
         lines.append("")
         lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")
         lines.append("НЕТ")
         return lines
     lines.append(
-        ", ".join(f"{b.symbol} {b.side} — оценка уверенности {b.confidence}%" for b in ready)
+        ", ".join(f"{b.symbol} {_ru_display(b.side)} — оценка уверенности {b.confidence}%" for b in ready)
     )
     lines.append("")
     lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")
@@ -949,26 +985,27 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
     if not top:
         lines.append("НЕТ")
     else:
-        lines.append(f"{top.symbol} {top.side} — {top.confidence}%")
+        lines.append(f"{top.symbol} {_ru_display(top.side)} — {top.confidence}%")
     return lines
 
 
-def format_session_cycle_block(market: dict) -> list[str]:
-    lines=["", "🔄 SESSION CYCLE / AMD — ФАКТИЧЕСКАЯ ФАЗА", ""]
+def format_session_cycle_block(market: dict, now: Optional[datetime] = None) -> list[str]:
+    now = now or now_local()
+    lines=["", "🔄 ЦИКЛ СЕССИЙ / AMD — ФАКТИЧЕСКАЯ ФАЗА ТЕКУЩЕГО ДНЯ", ""]
     for symbol in getattr(cfg,"PAIRS", list((market or {}).keys())):
         by_tf=(market or {}).get(symbol) or {}
-        phases=session_cycle_context.analyze_symbol(symbol,by_tf)
+        phases=session_cycle_context.analyze_symbol(symbol,by_tf,now)
         if not phases: continue
         parts=session_cycle_context.describe(phases)
         pd=pump_dump_context.analyze_symbol(symbol,by_tf)
         extra=f" · {pump_dump_context.describe(pd)}" if pd and pd.confirmed else ""
         lines.append(f"{symbol}: " + " → ".join(parts) + extra)
     if len(lines)==3: lines.append("Недостаточно закрытых H1 для классификации")
-    lines.append("Фазы определяются по факту рынка; фиксированной Asia→Europe→America схемы нет.")
+    lines.append("Будущие сессии не заполняются данными предыдущего дня; фазы показываются только по уже закрытым H1 текущего дня.")
     return lines
 
 def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]:
-    lines=["", "🧭 NEXT SESSION STRENGTH / BIAS", ""]
+    lines=["", "🧭 ПРОГНОЗ НА СЛЕДУЮЩУЮ СЕССИЮ", ""]
     for b in briefs:
         tech=technical_pair_side(b)
         if not tech: continue
@@ -979,9 +1016,9 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
         score += divergence_context.score_delta(div,direction)*2
         score=max(45,min(82,int(round(score))))
         note=(f" · {div.kind}" if div and div.confirmed else "")
-        lines.append(f"{b.symbol}: {tech} bias · {score}% · current gap {b.gap:+.2f}{note}")
-    if len(lines)==3: lines.append("Нет подтверждённого прогнозного bias")
-    lines.append("Это вероятностный bias следующей сессии, не гарантированное направление.")
+        lines.append(f"{b.symbol}: вероятное направление {_ru_display(tech)} · {score}% · текущая разница силы {b.gap:+.2f}{note}")
+    if len(lines)==3: lines.append("Нет подтверждённого прогнозного направления")
+    lines.append("Это вероятностная оценка следующей сессии, а не гарантированное направление.")
     return lines
 
 def build_briefing_text(
@@ -1025,7 +1062,7 @@ def build_briefing_text(
     except Exception:
         log.exception("блок событий до следующего брифинга")
     try:
-        lines.extend(format_session_cycle_block(market))
+        lines.extend(format_session_cycle_block(market, now))
         lines.extend(format_next_session_bias(briefs, market))
     except Exception:
         log.exception("session cycle / next-session bias")

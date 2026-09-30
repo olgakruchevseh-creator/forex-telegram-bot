@@ -61,6 +61,9 @@ BRIEFING_LOW_WATCH_MARKERS = ("trade balance", "balance of trade")
 
 TITLE_RU = (
     # Более специфичные названия должны идти раньше общих подстрок.
+    ("core pce price index", "Базовый индекс цен расходов на личное потребление (Core PCE)"),
+    ("core pce", "Базовый индекс цен расходов на личное потребление (Core PCE)"),
+    ("pce price index", "Индекс цен расходов на личное потребление (PCE)"),
     ("core cpi", "Базовый CPI"),
     ("core consumer price", "Базовый CPI"),
     ("nonfarm payrolls", "Занятость вне сельского хозяйства (NFP)"),

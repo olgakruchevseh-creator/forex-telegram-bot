@@ -21,6 +21,8 @@ import structure_context
 import precision_entry
 import market_maker_model
 import demand_supply_context
+import decision_quality_context
+import turtle_breakout_context
 import next_pivot_projection
 from chart_snapshot import freeze_by_tf
 from analysis import analyze_tf, currency_strength_dynamics
@@ -339,6 +341,11 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
     if not route:
         # Нет маршрута — новый вход в чат не выпускаем. Событие остаётся внутренним.
         return {"eligible": False, "reason": "insufficient_data"}
+    # Entry quality must be evaluated on the SAME final route Navigator will show.
+    # Previously the significance gate saw a synthetic ATR TR1, then Next Pivot
+    # could replace it with a target only a few pips away after the gate passed.
+    pivot = _safe_next_pivot(symbol, by_tf)
+    route = _route_with_next_pivot(route, pivot)
 
     direction = 1 if side == "LONG" else -1
     views = {}
@@ -371,6 +378,14 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
     anchor = float(route.get("anchor") or 0)
     tr1 = float(route.get("target") or anchor)
     route_atr = abs(tr1 - anchor) / av
+    final_targets = route.get("targets") or []
+    final_price = float(final_targets[-1].get("price")) if final_targets else tr1
+    final_route_atr = abs(final_price-anchor)/av
+    source_disp = None
+    m_disp = re.search(r"Размер тела:\s*([0-9]+(?:[.,][0-9]+)?)\s*ATR", source_text or "", re.I)
+    if m_disp:
+        try: source_disp=float(m_disp.group(1).replace(",","."))
+        except ValueError: source_disp=None
 
     recent = h1[-8:]
     body_ratios = sorted(abs(float(b.close) - float(b.open)) / av for b in recent) if recent else []
@@ -428,10 +443,23 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
                       not ohlc.get("weak_reversal") and not ohlc.get("range_like"))
 
     early = ohlc_movement.early_entry_check(by_tf, direction)
-    if ohlc.get("weak_reversal") and route_atr < strong_route:
-        eligible, reason = False, "weak_reversal_ohlc"
+    min_final_tr1 = float(getattr(cfg, "SIGNAL_MIN_FINAL_TR1_ATR", .60))
+    min_final_route = float(getattr(cfg, "SIGNAL_MIN_FINAL_ROUTE_ATR", 1.35))
+    max_source_disp = float(getattr(cfg, "SIGNAL_MAX_SOURCE_DISPLACEMENT_ATR", 1.80))
+    # weak_reversal is contextual unless a real structural reversal is confirmed.
+    # A weak local tail may reduce quality, but must not be an automatic veto.
+    structural_opposite = bool(structure_ctx and structure_context.alignment(structure_ctx, direction) < 0 and
+                               getattr(structure_ctx, "state", "") in ("CONFIRMED", "SHIFT_CONFIRMED"))
+    if structural_opposite and ohlc.get("weak_reversal"):
+        eligible, reason = False, "confirmed_structural_reversal"
     elif not early.get("allow", True):
         eligible, reason = False, early.get("reason") or "late_after_impulse"
+    elif route_atr < min_final_tr1:
+        eligible, reason = False, "insufficient_room_to_tr1"
+    elif final_route_atr < min_final_route:
+        eligible, reason = False, "insufficient_room_to_route"
+    elif source_disp is not None and source_disp > max_source_disp and route_atr < strong_route:
+        eligible, reason = False, "displacement_already_consumed"
     elif remaining_h1 < min_h1 and not early_ohlc:
         eligible, reason = False, "short_horizon"
     elif route_atr < min_route:
@@ -442,7 +470,8 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
         eligible, reason = True, "significant"
     return {
         "eligible": eligible, "reason": reason, "remaining_h1": remaining_h1,
-        "route_atr": round(route_atr, 3), "median_body_atr": round(median_body_atr, 3),
+        "route_atr": round(route_atr, 3), "final_route_atr": round(final_route_atr, 3),
+        "source_displacement_atr": source_disp, "median_body_atr": round(median_body_atr, 3),
         "efficiency": round(efficiency, 3), "ohlc": ohlc,
         "early_ohlc": early_ohlc, "source_tf": source_tf, "source_age_min": source_age_min,
         "early_entry": early,
@@ -605,18 +634,65 @@ def _time_horizon_lines(h: dict) -> list[str]:
 
 
 
-def _macro_horizon_lines(side: str, by_tf: dict) -> list[str]:
-    """HTF direction horizon: broad scenario window, not a promise or exit timer."""
-    direction=1 if side=="LONG" else -1
-    aligned=0
-    for tf,mins in (("W1",10080),("D1",1440),("H4",240),("H1",60)):
-        bars=movement_progress.closed_candles((by_tf or {}).get(tf) or [],mins)
-        if len(bars)>=20 and analyze_tf(tf,tf,bars).bias==direction: aligned+=1
-    if aligned>=4: window="3–10 дней"
-    elif aligned==3: window="1–5 дней"
-    elif aligned==2: window="12–48 часов"
-    else: window="локальный сценарий; HTF-горизонт не подтверждён"
-    return [f"🧭 Macro Direction Horizon: {window}",f"• HTF согласование W1/D1/H4/H1: {aligned}/4; пересчитывается при structural shift"]
+def _macro_horizon_lines(side: str, by_tf: dict, symbol: str = "") -> list[str]:
+    """Dynamic HTF direction horizon, enriched by book-derived persistence context.
+
+    This is deliberately a *range*, never a promised expiry date.  HTF alignment
+    sets the base window; Kaufman-style movement efficiency/trend maturity and
+    Turtle acceptance/failure context then widen or compress it.
+    """
+    direction = 1 if side == "LONG" else -1
+    aligned = 0
+    for tf, mins in (("W1",10080),("D1",1440),("H4",240),("H1",60)):
+        bars = movement_progress.closed_candles((by_tf or {}).get(tf) or [], mins)
+        if len(bars) >= 20 and analyze_tf(tf, tf, bars).bias == direction:
+            aligned += 1
+
+    # Base ranges in hours.  They are intentionally broad because this is a
+    # macro scenario horizon, not a trade timer.
+    ranges = {4:(72,240), 3:(24,120), 2:(12,48)}
+    if aligned < 2:
+        return ["🧭 Горизонт основного направления: локальный сценарий; старший горизонт не подтверждён",
+                f"• Согласование W1/D1/H4/H1: {aligned}/4 · пересчёт после каждой закрытой H1 и при структурной смене"]
+    low, high = ranges[aligned]
+    notes = []
+
+    dq = decision_quality_context.analyze_symbol(symbol, by_tf, direction) if symbol else None
+    if dq:
+        if dq.state == "РАЗВИВАЮЩИЙСЯ ТРЕНД" and dq.efficiency >= .36:
+            high = int(round(high * 1.20)); notes.append("тренд развивается, движение сохраняет эффективность")
+        elif "РАСТЯНУТЫЙ" in dq.state:
+            low = max(6, int(round(low * .55))); high = max(low, int(round(high * .55)))
+            notes.append("тренд зрелый/растянутый — горизонт сокращён")
+        elif dq.state == "ЗРЕЛЫЙ ТРЕНД":
+            high = max(low, int(round(high * .75))); notes.append("тренд уже зрелый")
+        elif dq.efficiency <= .18:
+            low = max(6, int(round(low * .60))); high = max(low, int(round(high * .65)))
+            notes.append("низкая эффективность движения — повышен риск боковика")
+
+    tc = turtle_breakout_context.analyze_symbol(symbol, by_tf, direction) if symbol else None
+    if tc:
+        if tc.invalidated or tc.alignment < 0:
+            low = max(4, int(round(low * .50))); high = max(low, int(round(high * .55)))
+            notes.append("пробой/принятие цены против сценария сокращает горизонт")
+        elif tc.alignment > 0:
+            high = int(round(high * 1.10)); notes.append("breakout/reclaim-контекст поддерживает направление")
+
+    # Keep estimates useful and bounded for an intraday FX system.
+    low, high = max(4, min(low, 168)), max(low, min(high, 336))
+    def human(hours:int) -> str:
+        if hours < 24: return f"{hours} ч"
+        days = hours / 24
+        return f"{int(days)} дн." if days.is_integer() else f"{days:.1f} дн."
+    stage = dq.state if dq else ("СИЛЬНОЕ HTF-СОГЛАСОВАНИЕ" if aligned >= 3 else "ПЕРЕХОДНЫЙ HTF-КОНТЕКСТ")
+    lines = [f"🧭 Горизонт основного направления {side}: ориентировочно {human(low)}–{human(high)}",
+             f"• Стадия: {stage} · согласование W1/D1/H4/H1: {aligned}/4"]
+    if dq:
+        lines.append(f"• Эффективность движения: {dq.efficiency:.2f} · зрелость: {dq.trend_age_atr:.2f} ATR")
+    if notes:
+        lines.append("• Корректировка горизонта: " + "; ".join(notes[:2]))
+    lines.append("• Это вероятностный диапазон, не обещание срока; пересчитывается после каждой закрытой H1 и при structural shift")
+    return lines
 
 def _strength_dynamics_context(symbol: str, side: str, by_tf: dict) -> dict:
     """Translate basket-gap dynamics into Navigator context, never a hard veto."""
@@ -821,7 +897,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         if route.get("pivot_inside"):
             lines.append("• 📍 Цена уже находится внутри ожидаемой Pivot-зоны; потенциал текущего движения ограничен")
     horizon = _time_horizon(master["symbol"], side, master.get("by_tf") or {}, route, master)
-    lines.extend(["", *_time_horizon_lines(horizon), *_macro_horizon_lines(side, master.get("by_tf") or {})])
+    lines.extend(["", *_time_horizon_lines(horizon), *_macro_horizon_lines(side, master.get("by_tf") or {}, master.get("symbol") or "")])
     targets = route.get("targets") or [{"price": route["target"], "tf": route["target_tf"]}]
     final_fact = ("Факт: подтверждённое событие исходного модуля принято Навигатором; таймфреймы, сила валют и ZigZag показаны как контекст сопровождения, а не как повторный запрет."
                   if source_accepted else

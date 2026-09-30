@@ -91,11 +91,19 @@ def _evaluate(rec,h1):
         horizons[str(n)]={'mfe':round(max(0,favorable),7),'mae':round(max(0,adverse),7),
                           'mfe_atr':round(max(0,favorable)/a,3),'mae_atr':round(max(0,adverse)/a,3)}
     sample=future[:max(HORIZONS)]
-    targets=rec.get('targets') or {}; hit={}
+    targets=rec.get('targets') or {}; hit={}; hit_time={}; hit_minutes={}
     for name,val in targets.items():
         try:t=float(val)
         except (TypeError,ValueError):continue
-        hit[name]=any((b.high>=t if direction==1 else b.low<=t) for b in sample)
+        first_hit=None
+        for b in sample:
+            if (b.high>=t if direction==1 else b.low<=t):
+                first_hit=b; break
+        hit[name]=bool(first_hit)
+        if first_hit:
+            d=_dt(first_hit.dt)
+            hit_time[name]=d.isoformat(timespec='seconds') if d else str(first_hit.dt)
+            hit_minutes[name]=round(max(0,(d-start).total_seconds()/60),1) if d and start else None
     h3=horizons['3']; efficiency=h3['mfe_atr']/(h3['mfe_atr']+h3['mae_atr']) if h3['mfe_atr']+h3['mae_atr'] else .5
     timing='timely'
     if h3['mfe_atr']<0.35: timing='weak_or_no_followthrough'
@@ -103,7 +111,7 @@ def _evaluate(rec,h1):
     return {'schema':1,'decision_id':rec.get('event_id'),'evaluated_utc':datetime.now(timezone.utc).isoformat(timespec='seconds'),
       'pair':rec.get('pair'),'side':side,'source':rec.get('source'),'status':rec.get('status'),'reason':rec.get('reason',''),
       'quality':rec.get('quality'),'probability':rec.get('probability'),'regime':_regime(rec),'entry':entry,'atr_h1':round(a,7),
-      'horizons_h1':horizons,'targets_hit_8h':hit,'efficiency_3h':round(efficiency,3),'timing_class':timing}
+      'horizons_h1':horizons,'targets_hit_8h':hit,'target_hit_time':hit_time,'target_hit_minutes':hit_minutes,'efficiency_3h':round(efficiency,3),'timing_class':timing}
 
 def _build_calibration(outcomes):
     groups=defaultdict(lambda:{'n':0,'mfe':0.0,'mae':0.0,'eff':0.0,'tr1':0,'tr1_known':0,'weak':0})

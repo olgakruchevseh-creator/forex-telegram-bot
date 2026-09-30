@@ -16,6 +16,8 @@ import ohlc_movement
 import candle_context
 import trading_intelligence_context
 import path_quality_context
+import decision_quality_context
+import turtle_breakout_context
 import liquidity_context
 import continuation_liquidity_context
 import po3_fvg_context
@@ -206,6 +208,8 @@ def evaluate(pair, side, texts, market, strength):
  candle_ctx=candle_context.analyze_symbol(pair,by_tf,direction,"H1")
  trading_ctx=trading_intelligence_context.analyze_symbol(pair,by_tf,direction,"H1")
  path_ctx=path_quality_context.analyze_symbol(pair,by_tf,direction,texts)
+ decision_quality_ctx=decision_quality_context.analyze_symbol(pair,by_tf,direction)
+ turtle_ctx=turtle_breakout_context.analyze_symbol(pair,by_tf,direction)
  narrative_ctx=multi_tf_narrative.analyze_symbol(pair,by_tf,direction)
  setup_ctx=setup_memory.analyze(pair,direction)
  # Demand/Supply and overlapping OB/MB/FVG are one correlated PD-array fact.
@@ -227,19 +231,25 @@ def evaluate(pair, side, texts, market, strength):
  guard=ohlc_movement.guard_event(by_tf,direction,82)
  early=ohlc_movement.early_entry_check(by_tf,direction)
  if not early.get("allow",True):return {"eligible":False,"reason":early.get("reason","late_entry"),"families":families}
- if guard.get("weak_reversal") or (not guard.get("allow",True)):
+ structural_opposite = bool(structure_ctx and structure_context.alignment(structure_ctx,direction)<0 and structure_ctx.state in ("CONFIRMED","SHIFT_CONFIRMED"))
+ if (not guard.get("allow",True)) or (guard.get("weak_reversal") and structural_opposite):
   return {"eligible":False,"reason":"ohlc_contradiction","families":families}
  regime=market_regime.analyze_symbol(pair,by_tf); rname=regime.name if regime else "UNKNOWN"
  price_action_ctx=inside_bar_context.analyze_symbol(pair,by_tf,direction)
  mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
  # A KILLER entry cannot be exceptional if its external liquidity target is already consumed.
  if liquidity_ctx and liquidity_ctx.residual_state=="EXHAUSTED":
-  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
+  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
  # Hard contradiction only for genuinely poor context; soft disagreements reduce score.
  if senior==0 or junior==0:return {"eligible":False,"reason":"critical_tf_contradiction","families":families}
  family_score=sum(_WEIGHTS[f] for f in families)
  quality=sum(fam_best.values())/max(1,len(fam_best))
  ohlc_score=float(guard.get("score",50) or 50)
+ if guard.get("weak_reversal") and not structural_opposite:
+  ohlc_score=max(0.0,ohlc_score-8.0)
+ # Mature/noisy movement is context, but KILLER also requires useful remaining path.
+ if decision_quality_ctx and decision_quality_ctx.trend_age_atr >= float(getattr(cfg,"SIGNAL_MAX_TREND_MATURITY_ATR",3.2)) and path_ctx and path_ctx.score < 70:
+  return {"eligible":False,"reason":"late_mature_trend","families":families,"decision_quality_context":decision_quality_ctx,"path_quality_context":path_ctx}
  score=family_score + min(14,senior*3+junior*1.5) + max(-4,min(6,(quality-70)*.18)) + max(-4,min(5,(ohlc_score-55)*.16)) + max(-3,min(4,gap*18))
  if rname in ("TREND","EXPANSION"):score+=3
  elif rname == "RANGE":score-=3
@@ -262,6 +272,8 @@ def evaluate(pair, side, texts, market, strength):
  score += candle_context.score_delta(candle_ctx,direction)
  score += trading_intelligence_context.score_delta(trading_ctx,direction)
  score += path_quality_context.score_delta(path_ctx,direction)
+ score += decision_quality_context.score_delta(decision_quality_ctx,direction)
+ score += turtle_breakout_context.score_delta(turtle_ctx,direction)
  score += multi_tf_narrative.score_delta(narrative_ctx,direction)
  setup_ctx=setup_memory.analyze(pair,direction,rname)
  score += setup_memory.score_delta(setup_ctx)
@@ -270,7 +282,7 @@ def evaluate(pair, side, texts, market, strength):
  if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families}
  av=atr(h1,14); entry=float(h1[-1].close); mult=(1 if direction>0 else -1)
  targets=[entry+mult*av*x for x in (1.0,1.75,2.5)]
- return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
+ return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
 
 def process_candidates(alerts, market, strength):
  """Active Hunter + strict Execution gate.
@@ -314,7 +326,7 @@ def process_candidates(alerts, market, strength):
   labels=" · ".join(_LABELS.get(f, f) for f in fams)
   def px(v):return f"{v:.3f}" if "JPY" in pair else f"{v:.5f}"
   tr=meta["targets"]
-  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Качество: {meta['score']}",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"{path_quality_context.describe(meta.get('path_quality_context'))}",f"{continuation_liquidity_context.describe(meta.get('continuation_liquidity_context'))}",f"{structure_context.describe(meta.get('structure_context'))}",f"{po3_fvg_context.describe(meta.get('po3_fvg_context'))}",f"{precision_entry.describe(meta.get('precision_entry'))}",f"{market_maker_model.describe(meta.get('market_maker_model'))}",f"{inside_bar_context.describe(meta.get('inside_bar_context'))}",f"{demand_supply_context.describe(meta.get('demand_supply_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
+  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Качество: {meta['score']}",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"{path_quality_context.describe(meta.get('path_quality_context'))}",f"{decision_quality_context.describe(meta.get('decision_quality_context'))}",f"{turtle_breakout_context.describe(meta.get('turtle_breakout_context'))}",f"{continuation_liquidity_context.describe(meta.get('continuation_liquidity_context'))}",f"{structure_context.describe(meta.get('structure_context'))}",f"{po3_fvg_context.describe(meta.get('po3_fvg_context'))}",f"{precision_entry.describe(meta.get('precision_entry'))}",f"{market_maker_model.describe(meta.get('market_maker_model'))}",f"{inside_bar_context.describe(meta.get('inside_bar_context'))}",f"{demand_supply_context.describe(meta.get('demand_supply_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
   out.append(text);_PENDING[text]={"pair":pair,"side":side,"meta":meta,"event_id":event_id,"by_tf":by_tf if (by_tf:=market.get(pair)) else {}}
  return out
 

@@ -64,6 +64,7 @@ import replay_calibration
 import daily_calibration_report
 import signal_context
 import session_projection_reports
+from telegram_locale import localize_telegram
 try:
     import patterns
 except ImportError:
@@ -426,7 +427,7 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Повтори команду через минуту."
         )
         return
-    await update.message.reply_text(format_pair_now(stack))
+    await update.message.reply_text(localize_telegram(format_pair_now(stack)))
 
 
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -473,6 +474,9 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def _send_parts(app: Application, chat_id: int, text: str) -> None:
+    # Переводим только готовый пользовательский вывод: внутренняя логика и парсеры
+    # продолжают работать с исходными LONG/SHORT/enum.
+    text = localize_telegram(text)
     for part in briefing.split_telegram(text):
         await send(app, chat_id, part)
 
@@ -574,17 +578,18 @@ def _source_image_for(text: str, source_text: str):
 
 async def _deliver_trade_card(app: Application, chat_id: int, text: str, image=None) -> None:
     """Единственный выход торговой карточки в Telegram."""
+    display_text = localize_telegram(text)
     if image is not None:
-        if len(text) <= 1000:
-            await app.bot.send_photo(chat_id=int(chat_id), photo=image, caption=text)
+        if len(display_text) <= 1000:
+            await app.bot.send_photo(chat_id=int(chat_id), photo=image, caption=display_text)
         else:
             await app.bot.send_photo(
                 chat_id=int(chat_id), photo=image,
                 caption="📊 Сценарий подтверждён · полный разбор следующим сообщением",
             )
-            await _send_parts(app, int(chat_id), text)
+            await _send_parts(app, int(chat_id), display_text)
         return
-    await _send_parts(app, int(chat_id), text)
+    await _send_parts(app, int(chat_id), display_text)
 
 
 def _source_event_id(text: str) -> str:
@@ -960,6 +965,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 save_state(state)
 
         module_alerts: list[tuple[int, str]] = []
+        mandatory_pdh_pdl: list[str] = []
         scan_stats = ScanStats()
         enabled_flags = (
             "DISBALANCE_ENABLED", "IMBALANCE_ENABLED", "BPR_ENABLED", "QUASIMODO_ENABLED", "CONSOLIDATION_ZONE_ENABLED",
@@ -1088,7 +1094,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
                 for text in daily_high_low.process_market(market, strength):
-                    module_alerts.append((1, text))
+                    # A confirmed closed-H1 PDH/PDL break/reclaim is an event the
+                    # user explicitly wants to see. It bypasses the hourly ranking
+                    # cap, but still passes the global entry/significance safety gate.
+                    if "📅 ПРОБОЙ PDH" in text or "📅 ПРОБОЙ PDL" in text or "📅 СНЯТИЕ PDH" in text or "📅 СНЯТИЕ PDL" in text:
+                        mandatory_pdh_pdl.append(text)
+                    else:
+                        module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("daily_high_low"); log.exception("Ошибка модуля дневного максимума/минимума")
 
@@ -1172,7 +1184,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Все торговые события сначала становятся внутренними кандидатами.
         # В чат уходит карточка источника только после Master Direction
         # по той же паре и стороне. Navigator идёт отдельным сопровождением TR.
-        source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts + mandatory_level_breakouts]
+        source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts + mandatory_level_breakouts + mandatory_pdh_pdl]
         raw_alerts = [text for _priority, text in source_alerts]
         # KILLER is a meta-selector over confirmed module facts; it never invents a setup.
         if getattr(cfg, "KILLER_ENABLED", True):
@@ -1255,6 +1267,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             selected_alerts = []
             mandatory_amd_alerts = []
             mandatory_level_breakouts = []
+            mandatory_pdh_pdl = []
             log.error("SCAN_TRADE_CARDS_SUPPRESSED reason=too_many_scanner_failures")
         # Повторяем карточки, чья предыдущая отправка временно не удалась.
         # Они не расходуют лимит новых исходных сигналов.
@@ -1267,7 +1280,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Обновление журнала сигналов")
         # ZIP 31: направленный факт модуля остаётся внутренним, пока его
         # не подтвердит Master. Navigator снова только сопровождает вход.
-        proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + [
+        proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + mandatory_pdh_pdl + [
             text for _priority, text in selected_alerts
         ]
         delivery_alerts = list(dict.fromkeys(proposed_delivery))
@@ -1511,7 +1524,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 for alert in session_projection_reports.pending_reports(
                         market, session_events, state):
                     try:
-                        caption = alert["text"]
+                        caption = localize_telegram(alert["text"])
                         long_caption = len(caption) > 1000
                         if long_caption:
                             # У Telegram подпись к фото короче обычного сообщения.

@@ -1,0 +1,113 @@
+"""Turtle / Turtle Soup breakout-quality context.
+
+Context-only synthesis of the book-derived ideas we agreed to keep:
+- level maturity and repeated tests;
+- breakout -> acceptance vs failure/reclaim;
+- delayed failure (Turtle Soup Plus One adaptation);
+- trapped-breakout context;
+- fast invalidation when price is accepted beyond the level;
+- confirmed re-entry only after a fresh reclaim + displacement.
+
+It never creates a Telegram signal and never counts as an independent KILLER family.
+All decisions use CLOSED candles only.
+"""
+from __future__ import annotations
+from dataclasses import dataclass, asdict
+from analysis import atr, closed_candles
+import config as cfg
+import liquidity_map
+
+@dataclass(frozen=True)
+class TurtleBreakoutContext:
+    available: bool=False
+    direction: int=0
+    state: str="NONE"
+    level: float=0.0
+    source: str=""
+    timeframe: str=""
+    maturity_bars: int=0
+    attempts: int=0
+    reclaims: int=0
+    plus_one: bool=False
+    trapped: bool=False
+    invalidated: bool=False
+    reentry_ready: bool=False
+    alignment: int=0
+    score: int=50
+    reason: str=""
+    family: str="TURTLE_BREAKOUT_CONTEXT"
+    def as_dict(self): return asdict(self)
+
+def _side(direction):
+    return 1 if direction in (1,"LONG") else -1 if direction in (-1,"SHORT") else 0
+
+def analyze_symbol(symbol, by_tf, direction):
+    if not getattr(cfg,"TURTLE_BREAKOUT_CONTEXT_ENABLED",True): return None
+    d=_side(direction)
+    m15=closed_candles((by_tf or {}).get("M15") or [],15)
+    h1=closed_candles((by_tf or {}).get("H1") or [],60)
+    bars=m15 if len(m15)>=20 else h1
+    if not d or len(bars)<12:return None
+    av=atr(h1,14) if len(h1)>=15 else atr(bars,14)
+    if not av:return None
+    # For a reversal LONG we care about failed downside breaks (SSL); for SHORT, BSL.
+    wanted="SSL" if d>0 else "BSL"
+    pools=[p for p in liquidity_map.build_map(symbol,by_tf) if p.side==wanted]
+    if not pools:return TurtleBreakoutContext(True,d,reason="нет значимого уровня для проверки")
+    # Prefer mature/significant pools, then proximity. Rank prevents a tiny local pivot
+    # from outranking PDH/PDL/HTF liquidity merely because it is a few ticks nearer.
+    p=max(pools,key=lambda x:(x.rank,-x.distance_atr))
+    level=float(p.level); tol=av*float(getattr(cfg,"TURTLE_LEVEL_TOLERANCE_ATR",.10))
+    look=bars[-int(getattr(cfg,"TURTLE_MEMORY_LOOKBACK_BARS",32)):]
+    natural=1 if wanted=="SSL" else -1
+    def beyond(c): return c.close < level-tol if wanted=="SSL" else c.close > level+tol
+    def reclaim(c): return (c.low<level and c.close>level+tol) if wanted=="SSL" else (c.high>level and c.close<level-tol)
+    def test(c): return c.low<=level+tol if wanted=="SSL" else c.high>=level-tol
+    attempts=sum(1 for c in look if test(c))
+    reclaims=sum(1 for c in look if reclaim(c))
+    first_touch=next((i for i,c in enumerate(look) if test(c)),len(look)-1)
+    maturity=max(0,len(look)-1-first_touch)
+    last=look[-1]; prev=look[-2]; prev2=look[-3]
+    plus_one=bool(beyond(prev) and reclaim(last))
+    immediate_failure=bool(reclaim(last))
+    trapped=bool((plus_one or immediate_failure) and attempts>=2)
+    accepted=bool(beyond(last) and beyond(prev))
+    # Fast invalidation of a reversal thesis: two closed candles accepted beyond level.
+    invalidated=accepted
+    body=abs(last.close-last.open)
+    displacement=body>=av*float(getattr(cfg,"TURTLE_REENTRY_MIN_BODY_ATR",.45))
+    reentry_ready=bool(reclaims>=2 and reclaim(last) and displacement and not invalidated)
+    mature=maturity>=int(getattr(cfg,"TURTLE_LEVEL_MATURITY_BARS",8)) or p.rank>=4
+
+    if invalidated:
+        state="ПРИНЯТИЕ ЦЕНЫ ЗА УРОВНЕМ"; align=-1 if d==natural else 1; score=28
+        reason="два закрытия подтверждают acceptance; reversal-гипотеза отменена"
+    elif reentry_ready:
+        state="ПОВТОРНЫЙ RECLAIM ПОДТВЕРЖДЁН"; align=1 if d==natural else -1; score=88
+        reason="повторный reclaim + свежий displacement разрешают повторную оценку"
+    elif plus_one:
+        state="TURTLE SOUP PLUS ONE"; align=1 if d==natural else -1; score=84 if mature else 76
+        reason="после закрытия за уровнем следующая закрытая свеча вернулась обратно"
+    elif trapped:
+        state="ЛОВУШКА ПРОБОЯ"; align=1 if d==natural else -1; score=82 if mature else 74
+        reason="повторный тест завершился reclaim; участники пробоя потенциально заперты"
+    elif immediate_failure:
+        state="ЛОЖНЫЙ ПРОБОЙ / RECLAIM"; align=1 if d==natural else -1; score=80 if mature else 72
+        reason="уровень проколот, но закрытие вернулось обратно"
+    elif beyond(last):
+        state="ПРОБОЙ — ОЖИДАНИЕ ACCEPTANCE/FAILURE"; align=0; score=55
+        reason="одного закрытия за уровнем недостаточно для вывода"
+    else:
+        state="ЗРЕЛЫЙ УРОВЕНЬ / ОЖИДАНИЕ" if mature else "УРОВЕНЬ / ОЖИДАНИЕ"; align=0; score=58 if mature else 52
+        reason="контекст уровня сохранён; подтверждённого breakout lifecycle пока нет"
+    return TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,align,score,reason)
+
+def score_delta(ctx,direction):
+    if not ctx:return 0
+    return 3 if ctx.alignment>0 else -4 if ctx.alignment<0 else 0
+
+def describe(ctx):
+    if not ctx:return "Пробой/ложный пробой: данных недостаточно"
+    if not ctx.level:return f"Пробой/ложный пробой: {ctx.reason}"
+    return (f"Пробой/ложный пробой: {ctx.state} · {ctx.source} {ctx.timeframe} · "
+            f"тестов {ctx.attempts} · возвратов {ctx.reclaims} · зрелость {ctx.maturity_bars} бар.")

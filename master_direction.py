@@ -32,6 +32,8 @@ import ohlc_movement
 import candle_context
 import trading_intelligence_context
 import path_quality_context
+import decision_quality_context
+import turtle_breakout_context
 import evidence_families
 from analysis import PairStack, build_stack, split_pair
 
@@ -268,6 +270,10 @@ def analyze_symbol(
     quality += trading_intelligence_context.score_delta(trading_ctx, side)
     path_ctx = path_quality_context.analyze_symbol(symbol, by_tf, side, alerts)
     quality += path_quality_context.score_delta(path_ctx, side)
+    decision_quality_ctx = decision_quality_context.analyze_symbol(symbol, by_tf, side)
+    quality += decision_quality_context.score_delta(decision_quality_ctx, side)
+    turtle_ctx = turtle_breakout_context.analyze_symbol(symbol, by_tf, side)
+    quality += turtle_breakout_context.score_delta(turtle_ctx, side)
     quality += auction_context.score_delta(auction_ctx, side)
     quality += multi_tf_narrative.score_delta(narrative_ctx, side)
     quality += setup_memory.score_delta(setup_ctx)
@@ -376,6 +382,10 @@ def analyze_symbol(
         "trading_intelligence_score": trading_ctx.score,
         "path_quality_context": path_quality_context.describe(path_ctx),
         "path_quality_score": path_ctx.score if path_ctx else None,
+        "decision_quality_context": decision_quality_context.describe(decision_quality_ctx),
+        "decision_quality_score": decision_quality_ctx.score if decision_quality_ctx else None,
+        "turtle_breakout_context": turtle_breakout_context.describe(turtle_ctx),
+        "turtle_breakout_score": turtle_ctx.score if turtle_ctx else None,
         "auction_context": auction_context.describe(auction_ctx),
         "multi_tf_narrative": multi_tf_narrative.describe(narrative_ctx),
         "setup_memory": setup_memory.describe(setup_ctx),
