@@ -327,6 +327,18 @@ class SignalNavigatorTests(unittest.TestCase):
             self.assertEqual("2026-09-09 10:10:00", active["last_target_dt"])
 
 
+    def test_range_regime_never_relabels_opposite_htf_as_pullback(self):
+        weak = {**master(), "side": "SHORT", "senior_n": 0, "junior_n": 0,
+                "gap": -.44, "source_accepted": True, "regime": "RANGE",
+                "tf_biases": {"D1": 1, "H4": 1, "H1": 0, "M15": 0, "M5": 0},
+                "zigzag_h4": "LONG"}
+        text = signal_navigator.format_confirmed(weak, route("SHORT"), [source("SHORT")])
+        self.assertIn("Режим: БОКОВИК · ЛОКАЛЬНЫЙ УКЛОН ВНИЗ", text)
+        self.assertIn("локальный уклон внутри боковика, не направленный откат", text)
+        self.assertIn("Направленный откат не объявляется", text)
+        self.assertNotIn("ОТКАТ / ЛОКАЛЬНАЯ РЕАКЦИЯ ПРОТИВ HTF", text)
+        self.assertNotIn("текущее SHORT является откатом", text)
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -540,6 +540,11 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         structure_text = structure_context.describe(structure_ctx)
     except Exception:
         structure_text = ""
+    try:
+        source_regime = market_regime.analyze_symbol(symbol, by_tf)
+        source_regime_name = source_regime.name if source_regime else "UNKNOWN"
+    except Exception:
+        source_regime_name = "UNKNOWN"
     master = {
         "symbol": symbol, "side": side,
         "quality": _source_number(source_text, "💪 Качество", _source_number(source_text, "Качество", 75)),
@@ -551,6 +556,7 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
         "zigzag_h4": zz_text, "evidence": [f"{_source_name(source_text)} подтвердил событие"],
         "source_accepted": True, "tf_biases": views,
         "next_pivot": pivot, "by_tf": by_tf, "market": market,
+        "regime": source_regime_name,
     }
     if same_active:
         previous_names = [part.strip() for part in str(active.get("sources") or "").split("·") if part.strip()]
@@ -579,6 +585,8 @@ def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict
     except Exception:
         pass
     mode = route.get("mode") or "LOCAL"
+    if str(master.get("regime") or "").upper() in ("RANGE", "COMPRESSION"):
+        mode = "LOCAL"
     if mode == "PULLBACK":
         high = min(high, int(getattr(cfg, "NAVIGATOR_TIME_PULLBACK_MAX_H1", 4)))
     elif mode == "LOCAL":
@@ -767,11 +775,17 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     navigator_status = ""
     pending_reversal = bool(master.get("pending_reversal"))
     assessment = f"{icon} направление {side} подтверждено по закрытой H1-свече."
+    regime_name = str(master.get("regime") or "UNKNOWN").upper()
+    nondirectional_regime = regime_name in ("RANGE", "COMPRESSION")
     display_mode = mode_names.get(route["mode"], route["mode"])
+    if nondirectional_regime:
+        regime_label = "БОКОВИК" if regime_name == "RANGE" else "СЖАТИЕ / БОКОВИК"
+        bias_label = "ВНИЗ" if side == "SHORT" else "ВВЕРХ"
+        display_mode = f"{regime_label} · ЛОКАЛЬНЫЙ УКЛОН {bias_label}"
     # H4 ZigZag is the structural parent of a source event.  If it points in
     # the opposite direction, the current move is a pullback regardless of a
     # generic route classifier. Never label such a move "main impulse".
-    if source_accepted and zz_opposite:
+    if source_accepted and zz_opposite and not nondirectional_regime:
         display_mode = "ОТКАТ ПРОТИВ ОСНОВНОГО " + str(zz_value)
     if source_accepted:
         # HTF hierarchy: D1/H4 are structural parents. An opposite LTF event is
@@ -791,9 +805,14 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
             navigator_status = "✅ ПОЛНОСТЬЮ ПОДТВЕРЖДЁН"
             assessment = f"✅ направление {side} подтверждено закрытыми таймфреймами и принято на сопровождение."
         elif htf_opposite:
-            navigator_status = "⚠️ ЛОКАЛЬНОЕ ДВИЖЕНИЕ ПРОТИВ HTF · РАЗВОРОТ НЕ ПОДТВЕРЖДЁН"
-            assessment = f"⚠️ локальное {side} принято на сопровождение, но D1/H4 имеют приоритет; смена старшего маршрута не подтверждена."
-            display_mode = "ОТКАТ / ЛОКАЛЬНАЯ РЕАКЦИЯ ПРОТИВ HTF"
+            if nondirectional_regime:
+                navigator_status = f"↔ {('БОКОВИК' if regime_name == 'RANGE' else 'СЖАТИЕ / БОКОВИК')} · ЛОКАЛЬНАЯ РЕАКЦИЯ {side} · РАЗВОРОТ НЕ ПОДТВЕРЖДЁН"
+                assessment = (f"↔ рынок остаётся ненаправленным; локальная реакция {side} принята на сопровождение, "
+                              "а D1/H4 и ZigZag показаны только как старший контекст. Направленный откат не объявляется.")
+            else:
+                navigator_status = "⚠️ ЛОКАЛЬНОЕ ДВИЖЕНИЕ ПРОТИВ HTF · РАЗВОРОТ НЕ ПОДТВЕРЖДЁН"
+                assessment = f"⚠️ локальное {side} принято на сопровождение, но D1/H4 имеют приоритет; смена старшего маршрута не подтверждена."
+                display_mode = "ОТКАТ / ЛОКАЛЬНАЯ РЕАКЦИЯ ПРОТИВ HTF"
         elif no_tf_confirmation:
             navigator_status = "🔴 ЛОКАЛЬНАЯ РЕАКЦИЯ · ОСНОВНОЙ МАРШРУТ НЕ ПОДТВЕРЖДЁН"
             assessment = (f"🔴 зафиксирована локальная реакция {side}, но закрытые "
@@ -829,8 +848,10 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     zz_h4 = master.get("zigzag_h4", side)
     zz_line = ("• Старший тренд ещё не подтверждён полностью" if local_early else
                ("• ZigZag H4: нейтрален" if zz_h4 == "RANGE" else
-                (f"• ZigZag H4: {side}" if zz_h4 == side
-                 else f"• ZigZag H4: {zz_h4} · текущее {side} является откатом")))
+                (f"• ZigZag H4: {side}" if zz_h4 == side else
+                 (f"• ZigZag H4: {zz_h4} · текущее {side} — локальный уклон внутри боковика, не направленный откат"
+                  if nondirectional_regime else
+                  f"• ZigZag H4: {zz_h4} · текущее {side} является откатом"))))
     lines = [
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {master['symbol']}", f"Направление: {side} {icon}",
