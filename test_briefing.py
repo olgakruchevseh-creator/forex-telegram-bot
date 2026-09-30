@@ -130,7 +130,7 @@ class BriefingFixes(unittest.TestCase):
             amd="МАНИПУЛЯЦИЯ: СНЯТА ВЕРХНЯЯ ГРАНИЦА · СЦЕНАРИЙ SHORT ЕЩЁ НЕ ПОДТВЕРЖДЁН",
         )
         text = "\n".join(briefing.format_board([b]))
-        self.assertIn("ZigZag: 🔴", text)
+        self.assertIn("Зигзаг: 🔴", text)
         self.assertIn("Текущее положение: 🔴", text)
         self.assertIn("AMD: 🧹", text)
         self.assertIn("Сила: JPY сильнее USD на 0.10", text)
