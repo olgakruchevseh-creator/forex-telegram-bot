@@ -173,15 +173,44 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
         impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
         clearance = min(6, int((lows[-1][1]-c.close) / max(av, 1e-12) * 12))
         _add(out, "BOS вниз", "SHORT", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Предыдущая свеча была над минимумом структуры, а новая впервые закрылась ниже него.", lows[-1][1], c)
-    # Head & shoulders / inverse H&S with closed neckline break.
-    if len(highs) >= 3 and highs[-2][1] > highs[-3][1] and highs[-2][1] > highs[-1][1] and abs(highs[-3][1]-highs[-1][1]) <= av*.65:
-        necks = [p for i,p in lows if highs[-3][0] < i < highs[-1][0]]
-        if necks and prev.close >= min(necks) and c.close < min(necks):
-            _add(out, "Голова и плечи", "SHORT", tf, 91, 86, "Правое плечо завершено; первая подтверждающая свеча закрылась ниже линии шеи.", min(necks), c)
-    if len(lows) >= 3 and lows[-2][1] < lows[-3][1] and lows[-2][1] < lows[-1][1] and abs(lows[-3][1]-lows[-1][1]) <= av*.65:
-        necks = [p for i,p in highs if lows[-3][0] < i < lows[-1][0]]
-        if necks and prev.close <= max(necks) and c.close > max(necks):
-            _add(out, "Перевёрнутая голова и плечи", "LONG", tf, 91, 86, "Правое плечо завершено; первая подтверждающая свеча закрылась выше линии шеи.", max(necks), c)
+    # Head & Shoulders: require the actual H-L-H-L-H (or inverse) geometry.
+    # The neckline is a line through the two intervening pivots, not min/max of
+    # every trough/peak.  Confirmation is ONLY the first closed candle beyond
+    # that line.  This is especially important on W1/D1 where a sloping
+    # neckline can otherwise be missed or confirmed too early.
+    alt = _alternating_pivots(piv)
+    if len(alt) >= 5:
+        a, b, head, d, shoulder = alt[-5:]
+        shoulder_tol = av * float(getattr(cfg, "PATTERN_HS_SHOULDER_TOL_ATR", .75))
+        head_min = av * float(getattr(cfg, "PATTERN_HS_HEAD_MIN_ATR", .35))
+        max_time_ratio = float(getattr(cfg, "PATTERN_HS_MAX_TIME_RATIO", 3.0))
+        left_span = max(1, head[0] - a[0])
+        right_span = max(1, shoulder[0] - head[0])
+        time_ratio = max(left_span, right_span) / min(left_span, right_span)
+
+        if (a[2], b[2], head[2], d[2], shoulder[2]) == ("H", "L", "H", "L", "H"):
+            shoulders_ok = abs(a[1] - shoulder[1]) <= shoulder_tol
+            head_ok = head[1] >= max(a[1], shoulder[1]) + head_min
+            neck_prev = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-2)
+            neck_now = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-1)
+            if shoulders_ok and head_ok and time_ratio <= max_time_ratio and neck_prev and neck_now:
+                first_break = prev.close >= neck_prev[0] and c.close < neck_now[0] and _bear(c)
+                if first_break:
+                    symmetry = max(0, 5-int(abs(a[1]-shoulder[1]) / max(shoulder_tol, 1e-12)*5))
+                    _add(out, "Голова и плечи", "SHORT", tf, 88+symmetry, 83+symmetry,
+                         "Левое плечо, голова и правое плечо подтверждены; первая закрытая свеча пробила расчётную линию шеи вниз.", neck_now[0], c)
+
+        if (a[2], b[2], head[2], d[2], shoulder[2]) == ("L", "H", "L", "H", "L"):
+            shoulders_ok = abs(a[1] - shoulder[1]) <= shoulder_tol
+            head_ok = head[1] <= min(a[1], shoulder[1]) - head_min
+            neck_prev = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-2)
+            neck_now = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-1)
+            if shoulders_ok and head_ok and time_ratio <= max_time_ratio and neck_prev and neck_now:
+                first_break = prev.close <= neck_prev[0] and c.close > neck_now[0] and _bull(c)
+                if first_break:
+                    symmetry = max(0, 5-int(abs(a[1]-shoulder[1]) / max(shoulder_tol, 1e-12)*5))
+                    _add(out, "Перевёрнутая голова и плечи", "LONG", tf, 88+symmetry, 83+symmetry,
+                         "Левое плечо, голова и правое плечо подтверждены; первая закрытая свеча пробила расчётную линию шеи вверх.", neck_now[0], c)
     return out
 
 

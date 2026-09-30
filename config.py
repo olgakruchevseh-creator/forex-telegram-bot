@@ -476,6 +476,10 @@ PATTERN_NEWS_AFTER_MINUTES = 30
 PATTERN_LATE_MIN_REMAINING_ATR = 0.45
 PATTERN_LATE_MIN_REMAINING_RATIO = 0.35
 PATTERN_LATE_MAX_REALIZED_RATIO = 0.65
+# Head & Shoulders geometry. ATR-normalized so the same rules work on W1/D1/H4/H1.
+PATTERN_HS_SHOULDER_TOL_ATR = 0.75
+PATTERN_HS_HEAD_MIN_ATR = 0.35
+PATTERN_HS_MAX_TIME_RATIO = 3.0
 # Гармоническая геометрия сама по себе не является торговым сигналом.
 # Для отправки требуется подтвержденный импульс H1 и слом структуры M15,
 # поддержанные относительной силой валют.
