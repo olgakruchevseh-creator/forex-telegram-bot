@@ -814,7 +814,9 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         dxy = briefing.collect_extras(api_key, market=market)
         all_events = newsmod.load_events()
         now_utc = datetime.now(timezone.utc)
-        for event in newsmod.high_events(all_events):
+        for event in all_events:
+            if not newsmod.needs_advance_warning(event):
+                continue
             left = newsmod.minutes_left(event, now_utc)
             if 50 <= left <= cfg.NEWS_WARN_MINUTES + 8:
                 if event.event_id in state["news_warned"]:

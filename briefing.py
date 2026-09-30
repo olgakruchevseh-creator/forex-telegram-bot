@@ -850,12 +850,18 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
 
 
 def events_until_next_briefing(events: list[newsmod.NewsEvent], now: Optional[datetime] = None) -> list[newsmod.NewsEvent]:
-    """HIGH-impact events from this briefing until the next configured briefing."""
+    """Значимые события от текущего брифинга до следующего.
+
+    Помимо HIGH сохраняем MEDIUM заседания/выступления/решения ЦБ: календарь
+    нередко маркирует их оранжевым, хотя для внутридневного FX-контекста их
+    пропуск в 09:00 брифинге недопустим.
+    """
     now_local_dt = now or now_local()
     _, next_start = next_session(now_local_dt)
     start_utc = now_local_dt.astimezone(timezone.utc)
     end_utc = next_start.astimezone(timezone.utc)
-    return [e for e in newsmod.events_in_window(events, start_utc, end_utc) if e.impact == "HIGH"]
+    window = newsmod.events_in_window(events, start_utc, end_utc)
+    return [e for e in window if e.impact == "HIGH" or newsmod.is_briefing_context_event(e)]
 
 def format_until_next_briefing(events: list[newsmod.NewsEvent], now_utc: datetime) -> list[str]:
     lines=["", "⏭ ВАЖНЫЕ СОБЫТИЯ ДО СЛЕДУЮЩЕГО БРИФИНГА", ""]
@@ -864,7 +870,8 @@ def format_until_next_briefing(events: list[newsmod.NewsEvent], now_utc: datetim
         return lines
     for e in events:
         left=newsmod.minutes_left(e,now_utc)
-        lines.append(f"🔴 {e.local_hm} · {e.currency} · {_impact_ru(e.impact)}")
+        icon = "🔴" if e.impact == "HIGH" else "🟠"
+        lines.append(f"{icon} {e.local_hm} · {e.currency} · {_impact_ru(e.impact)}")
         lines.append(newsmod.translate_title(e.title))
         lines.append(f"Предыдущее: {e.previous} · Прогноз: {e.forecast} · Факт: {e.actual}")
         lines.append("уже вышла" if left < 0 else f"через {left} мин")

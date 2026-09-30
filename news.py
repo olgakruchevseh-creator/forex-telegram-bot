@@ -58,6 +58,14 @@ CONTEXT_DEPENDENT = (
 )
 SPEECH_MARKERS = ("speech", "speaks", "testimony", "press conference")
 BRIEFING_LOW_WATCH_MARKERS = ("trade balance", "balance of trade")
+# Нечисловые/институциональные события могут иметь MEDIUM в календаре, но
+# для сессионного брифинга их нельзя терять: они способны менять ожидания
+# по валюте даже без публикации Actual.
+BRIEFING_CONTEXT_MARKERS = (
+    "speech", "speaks", "testimony", "press conference",
+    "minutes", "statement", "decision", "meeting", "hearing",
+    "ecb", "boe", "snb", "rba", "rbnz", "boc", "boj", "fomc",
+)
 
 TITLE_RU = (
     # Более специфичные названия должны идти раньше общих подстрок.
@@ -327,6 +335,19 @@ def is_briefing_low_watch(event: NewsEvent) -> bool:
     """LOW-события, которые полезно видеть в брифинге без торговой блокировки."""
     title = (event.title or "").lower()
     return event.impact == "LOW" and any(marker in title for marker in BRIEFING_LOW_WATCH_MARKERS)
+
+
+def is_briefing_context_event(event: NewsEvent) -> bool:
+    """MEDIUM институциональные события, которые нельзя терять между брифингами."""
+    if (event.impact or "").upper() != "MEDIUM":
+        return False
+    title = (event.title or "").lower()
+    return any(marker in title for marker in BRIEFING_CONTEXT_MARKERS)
+
+
+def needs_advance_warning(event: NewsEvent) -> bool:
+    """События, для которых нужен отдельный ~60-минутный анонс."""
+    return (event.impact or "").upper() == "HIGH" or is_briefing_context_event(event)
 
 
 def _parse_dt(value) -> Optional[datetime]:
