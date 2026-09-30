@@ -7,12 +7,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import config as cfg
 import news as newsmod
 import market_regime
 import session_cycle_context
 from analysis import split_pair
+
+_LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
+
+
+def _as_local(now_local: datetime | None = None) -> datetime:
+    """Session clock is always Europe/Amsterdam, never the host machine TZ."""
+    now = now_local or datetime.now(_LOCAL_TZ)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=_LOCAL_TZ)
+    return now.astimezone(_LOCAL_TZ)
 
 NEW_ENTRY = "NEW_ENTRY"
 MANAGE = "MANAGE"
@@ -137,7 +148,7 @@ def classify_news(symbol: str, side: int, events: list, now_utc: datetime | None
 
 
 def current_session_key(now_local: datetime | None = None) -> str:
-    hour = (now_local or datetime.now()).hour
+    hour = _as_local(now_local).hour
     if hour >= 15:
         return "AMERICA"
     if hour >= 9:
@@ -146,6 +157,7 @@ def current_session_key(now_local: datetime | None = None) -> str:
 
 
 def session_character(symbol: str, by_tf: dict, now_local: datetime | None = None) -> dict:
+    now_local = _as_local(now_local)
     phases = session_cycle_context.analyze_symbol(symbol, by_tf, now_local)
     key = current_session_key(now_local)
     current = next((p for p in phases if p.session == key), None)

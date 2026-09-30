@@ -21,8 +21,8 @@ TIMEFRAMES = [
     {"key": "W1", "api": "1week", "label": "Неделя", "candles": 100, "ttl_min": 30},
     {"key": "D1", "api": "1day", "label": "День", "candles": 200, "ttl_min": 15},
     {"key": "H4", "api": "4h", "label": "4 часа", "candles": 250, "ttl_min": 5},
-    {"key": "H1", "api": "1h", "label": "Час", "candles": 250, "ttl_min": 3},
-    {"key": "M15", "api": "15min", "label": "15 минут", "candles": 250, "ttl_min": 2},
+    {"key": "H1", "api": "1h", "label": "Час", "candles": 250, "ttl_min": 1},
+    {"key": "M15", "api": "15min", "label": "15 минут", "candles": 250, "ttl_min": 1},
     {"key": "M5", "api": "5min", "label": "5 минут", "candles": 250, "ttl_min": 1},
 ]
 

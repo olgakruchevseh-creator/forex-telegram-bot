@@ -43,13 +43,22 @@ class SignalContextParseTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "pullback_strength_crush")
 
-    def test_verdict_blocks_weak_reversal(self):
+    def test_verdict_weak_reversal_alone_is_not_hard_veto(self):
         ctx = {
             "mode": "IMPULSE", "against_h4": False, "junior_n": 3,
             "directed_gap": 0.2, "progress": 10, "weak_reversal": True,
         }
         ok, reason = sc.verdict(ctx)
+        self.assertTrue(ok)
+
+    def test_verdict_blocks_weak_reversal_with_hostile_h4(self):
+        ctx = {
+            "mode": "IMPULSE", "against_h4": True, "junior_n": 3,
+            "directed_gap": 0.2, "progress": 10, "weak_reversal": True,
+        }
+        ok, reason = sc.verdict(ctx)
         self.assertFalse(ok)
+        self.assertEqual(reason, "weak_reversal")
 
     def test_prepare_merges_same_idea(self):
         a = "💱 Пара: EUR/USD\nНаправление: LONG\nКачество: 80\n⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН"

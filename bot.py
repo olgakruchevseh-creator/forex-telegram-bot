@@ -615,7 +615,7 @@ def _source_event_id(text: str) -> str:
                 return event_id
         except Exception:
             log.exception("KILLER_EVENT_ID_FAILED")
-    return hashlib.sha256((text or "").encode()).hexdigest()[:24]
+    return signal_context.event_fingerprint(text)
 
 
 def _event_already_delivered(state: dict, event_id: str) -> bool:
@@ -657,7 +657,8 @@ async def _flush_source_outbox(app: Application, chat_id: int, state: dict) -> N
         if not text:
             outbox.pop(0); continue
         try:
-            await _send_parts(app, chat_id, text)
+            image = _source_image_for(text, text)
+            await _deliver_trade_card(app, chat_id, text, image)
             outbox.pop(0); save_state(state)
         except Exception:
             log.exception("Повторная доставка исходной торговой карточки")
@@ -1218,6 +1219,12 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Новости для Master Direction")
                 master_events = []
             try:
+                mandatory_keys = {
+                    (pair, side)
+                    for text in (mandatory_amd_alerts + mandatory_level_breakouts + mandatory_pdh_pdl)
+                    for pair, side in ((_alert_pair(text), _direct_signal_side(text)),)
+                    if pair and side
+                }
                 master_results = master_direction.analyze_market(
                     market,
                     strength,
@@ -1225,6 +1232,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     dxy_bias=master_dxy_bias,
                     events=master_events,
                     now_utc=datetime.now(timezone.utc),
+                    priority_keys=mandatory_keys,
                 )
             except Exception:
                 log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=master_direction")

@@ -142,7 +142,11 @@ def setup_adjustment(by_tf: dict, side: int) -> dict:
     elif score <= 35: delta=-4
     elif score <= 44: delta=-2
     if ctx.get("range_like"): delta=min(delta, -2)
-    return {**ctx, "allow": not bool(ctx.get("weak_reversal")), "quality_delta": delta}
+    # weak_reversal is a bounded quality penalty here. A hard veto belongs
+    # only to confirmed structural reversal / late-entry gates, not a local tail.
+    if ctx.get("weak_reversal"):
+        delta = min(delta, -4)
+    return {**ctx, "allow": True, "quality_delta": delta}
 
 
 def early_entry_check(by_tf: dict, side) -> dict:

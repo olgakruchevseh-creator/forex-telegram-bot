@@ -133,6 +133,20 @@ def remember_candidates(alerts: list[str], h1_dt: str = "") -> list[str]:
     return [item["text"] for item in candidates.values()]
 
 
+def candidate_age_minutes(text: str) -> float | None:
+    """Age of a remembered candidate when the source card has no close-time."""
+    if not text:
+        return None
+    digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+    item = (_load().get("candidates") or {}).get(digest)
+    if not item:
+        return None
+    try:
+        return max(0.0, (time.time() - float(item.get("saved_at") or 0)) / 60.0)
+    except (TypeError, ValueError):
+        return None
+
+
 def matching_sources(symbol: str, side: str, alerts: list[str]) -> list[str]:
     """Только реальные исходные события той же пары и направления."""
     return [text for text in alerts if _pair(text) == symbol and _side(text) == side]
@@ -439,6 +453,17 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
                                 "efficiency": round(efficiency,3), "ohlc": ohlc}
                 except (TypeError, ValueError):
                     pass
+        if source_age_min is None:
+            queued = candidate_age_minutes(source_text)
+            if queued is not None:
+                source_age_min = queued
+                max_queued = 60.0 * float(getattr(cfg, "SIGNAL_SOURCE_MAX_CANDLES_AGE", 1.25))
+                if queued > max_queued:
+                    return {"eligible": False, "reason": "stale_source",
+                            "source_tf": source_tf or "H1", "source_age_min": round(queued, 1),
+                            "remaining_h1": remaining_h1, "route_atr": round(route_atr, 3),
+                            "median_body_atr": round(median_body_atr, 3),
+                            "efficiency": round(efficiency, 3), "ohlc": ohlc}
 
     early_ohlc = bool(ohlc.get("available") and float(ohlc.get("score", 50)) >=
                       float(getattr(cfg, "SIGNAL_EARLY_OHLC_SCORE", 68)) and
@@ -491,6 +516,7 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
             life = trade_lifecycle.evaluate(
                 symbol, direction, by_tf, events, significance=result,
                 active_routes=active,
+                now_local=datetime.now(ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))),
             )
             result["trade_lifecycle"] = life.describe()
             result["trade_lifecycle_status"] = life.status

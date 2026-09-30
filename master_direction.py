@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import config as cfg
 import news as newsmod
@@ -213,8 +214,6 @@ def analyze_symbol(
     idm_sweep_ctx = idm.analyze_symbol(symbol, by_tf, side)
     pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
     ohlc_ctx = ohlc_movement.setup_adjustment(by_tf, side) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
-    if not ohlc_ctx.get("allow", True):
-        return None
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
     aligned, opposite = _module_evidence(symbol, side, alerts)
     evidence_families = _aligned_families(symbol, side, alerts)
@@ -330,14 +329,20 @@ def analyze_symbol(
     life = None
     if getattr(cfg, "TRADE_LIFECYCLE_ENABLED", True):
         try:
+            local_tz = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
             life = trade_lifecycle.evaluate(
                 symbol, side, by_tf, events or [], now_utc,
                 regime_name=getattr(regime_ctx, "name", "") if regime_ctx else "",
+                now_local=datetime.now(local_tz),
             )
         except Exception:
             log.exception("TRADE_LIFECYCLE_MASTER %s", symbol)
             life = None
+        if life and not life.allow_new_entry and not life.allow_manage:
+            return None
         if life and not life.allow_new_entry:
+            # Direction may still be valid for accompaniment, but this is not a
+            # new Master entry and must not occupy the hourly new-entry cap.
             return None
 
     confidence = min(91, quality - 4)
@@ -559,6 +564,7 @@ def analyze_market(
     dxy_bias: int = 0,
     events: list[newsmod.NewsEvent] | None = None,
     now_utc: datetime | None = None,
+    priority_keys: set[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Возвращает подтверждённые результаты без преждевременного форматирования."""
     candidates = []
@@ -588,4 +594,15 @@ def analyze_market(
                 log.exception("Master Direction %s", symbol)
     candidates.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
     limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 2))
-    return candidates[:limit]
+    selected = candidates[:limit]
+    if priority_keys:
+        have = {(item.get("symbol"), item.get("side")) for item in selected}
+        extras = []
+        for item in candidates[limit:]:
+            key = (item.get("symbol"), item.get("side"))
+            if key in priority_keys and key not in have:
+                extras.append(item)
+                have.add(key)
+        if extras:
+            selected = selected + extras
+    return selected

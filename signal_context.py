@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 
@@ -81,6 +82,29 @@ def source_name(text: str) -> str:
         if marker in upper:
             return name
     return "Модуль"
+
+
+_VOLATILE_EVENT_LINE = re.compile(
+    r"^(?:Текущая цена:|Качество:|Вероятность:|Killer Score:|"
+    r"Уверенность(?: модели)?:|Статус решения:|Currency Strength:|"
+    r"Контекст младших ТФ:).*$",
+    re.M | re.I,
+)
+
+
+def event_fingerprint(text: str) -> str:
+    """Stable id for one setup: pair/side/source + structural lines, not live price."""
+    cleaned = _VOLATILE_EVENT_LINE.sub("", text or "")
+    keep = []
+    for raw in cleaned.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("━"):
+            continue
+        keep.append(line)
+        if len(keep) >= 10:
+            break
+    blob = "|".join([pair_of(text), side_of(text), source_name(text), *keep])
+    return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
 
 def _quality(text: str) -> int:
@@ -174,7 +198,10 @@ def verdict(ctx: dict) -> tuple[bool, str]:
     allow_pullback = bool(getattr(cfg, "CONTEXT_ALLOW_LABELED_PULLBACK", True))
     pullback_max = int(getattr(cfg, "CONTEXT_PULLBACK_MAX_PROGRESS_PCT", 25))
 
-    if ctx.get("weak_reversal"):
+    if ctx.get("weak_reversal") and (
+        ctx.get("against_h4")
+        or str(ctx.get("structure_state") or "") in ("CONFIRMED", "SHIFT_CONFIRMED")
+    ):
         return False, "weak_reversal"
     # Partial TF disagreement and ordinary strength mismatch are context, not
     # independent vetoes. Master already prices them into quality/probability.

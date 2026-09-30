@@ -5,7 +5,7 @@ Future sessions are never filled with candles from yesterday.  This prevents a
 already happened today.
 """
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import config as cfg
 from analysis import atr, closed_candles
@@ -16,10 +16,14 @@ class SessionPhase:
     session:str; phase:str; direction:int=0; high:float=0; low:float=0; reason:str=""; status:str="OBSERVED"
 
 def _local_dt(raw):
+    """Twelve Data candles are requested in UTC. Naive stamps are UTC, not local."""
     try:
         x=datetime.fromisoformat(str(raw).replace("Z","+00:00"))
-        return x.replace(tzinfo=TZ) if x.tzinfo is None else x.astimezone(TZ)
-    except Exception:return None
+        if x.tzinfo is None:
+            x = x.replace(tzinfo=timezone.utc)
+        return x.astimezone(TZ)
+    except Exception:
+        return None
 
 def _key(h):
     if h>=15:return "AMERICA"
