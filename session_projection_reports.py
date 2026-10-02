@@ -431,6 +431,95 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
     return reports
 
 
+
+def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
+    """One concise caption for the Echo + Next Pivot album of one pair."""
+    symbol = str(bundle.get("symbol") or "")
+    echo = bundle.get("echo") or {}
+    pivot = bundle.get("pivot") or {}
+    er = echo.get("result") or {}
+    pr = pivot.get("result") or {}
+    lines = ["🔭 ЭХО + 🎯 СЛЕДУЮЩИЙ PIVOT — ЕДИНЫЙ СЦЕНАРИЙ", f"💱 Пара: {symbol}"]
+    period = str(bundle.get("period") or "")
+    if period:
+        lines.append(f"Период: {period}")
+    eside = er.get("side")
+    pside = pr.get("side")
+    if eside:
+        lines.append(f"Эхо · фон к следующей сессии: {eside} · вероятность {er.get('direction_probability', '—')}%")
+    else:
+        lines.append("Эхо · фон к следующей сессии: НЕЙТРАЛЬНО")
+    if pr:
+        decimals = 3 if "JPY" in symbol else 5
+        kind = "ВЕРШИНЫ" if pr.get("kind") == "high" else "ОСНОВАНИЯ"
+        lines.append(f"Pivot · путь к зоне: {pside or 'НЕЙТРАЛЬНО'} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
+        reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else "НЕЙТРАЛЬНО")
+        if eside and pside and eside != pside:
+            lines.append(f"Связка: Echo {eside} — общий фон; Pivot {pside} — локальный крюк к зоне, не смена тезиса.")
+        elif eside and pside:
+            lines.append(f"Связка: Echo {eside} → движение к Pivot {pside} → после зоны возможна реакция {reaction}.")
+        else:
+            lines.append(f"Связка: Pivot — локальная зона; реакция {reaction} учитывается только после подтверждения M15/H1.")
+    else:
+        lines.append("Pivot: надёжная следующая зона пока не рассчитана.")
+    lines.append("🖼 1/2 — Echo · 2/2 — Next Pivot")
+    lines.append("⚠️ Информационный вероятностный сценарий, не торговый сигнал.")
+    text = "\n".join(lines)
+    return text if len(text) <= limit else text[:limit-1].rstrip() + "…"
+
+
+def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state: dict) -> list[dict]:
+    """Seven pair albums instead of fourteen unrelated notifications."""
+    session_id = briefing.briefing_id()
+    delivered = state.setdefault("session_projection_delivered", {})
+    current_name, next_name, hours = _session_context()
+    try:
+        h1_market = {symbol: (market.get(symbol) or {}).get("H1") or [] for symbol in cfg.PAIRS}
+        strength = currency_strength(h1_market, 8)
+    except Exception:
+        log.exception("ECHO_STRENGTH_CONTEXT_FAILED; continuing without strength")
+        strength = {}
+    try:
+        cached = getattr(briefing, "_DXY_CACHE", {}) or {}
+        dxy_bias = int(briefing.effective_dxy_bias(cached.get("view")) or 0)
+    except Exception:
+        usd = float((strength or {}).get("USD") or 0)
+        gap = float(getattr(cfg, "ECHO_STRENGTH_MIN_GAP", 0.04))
+        dxy_bias = 1 if usd >= gap else (-1 if usd <= -gap else 0)
+    session_sides = {}
+    try:
+        briefs = briefing.build_pair_briefs(market, strength or {}, events, datetime.now(timezone.utc))
+        for brief in briefs:
+            side = brief.side or briefing.technical_pair_side(brief)
+            if side:
+                session_sides[brief.symbol] = side
+    except Exception:
+        log.exception("SESSION_THESIS_CONTEXT_FAILED; Echo/Pivot без сверки с брифингом")
+
+    bundles = []
+    for symbol in cfg.PAIRS:
+        key = f"{session_id}|echo_pivot|{symbol}"
+        legacy_echo = f"{session_id}|echo|{symbol}"
+        legacy_pivot = f"{session_id}|pivot|{symbol}"
+        if delivered.get(key) or (delivered.get(legacy_echo) and delivered.get(legacy_pivot)):
+            continue
+        by_tf = market.get(symbol) or {}
+        thesis = session_sides.get(symbol)
+        try:
+            echo = (_echo_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias, thesis)
+                    if getattr(cfg, "ECHO_ENABLED", True) else None)
+            pivot = (_pivot_report(symbol, by_tf, events, hours, current_name, next_name, strength, dxy_bias, thesis)
+                     if getattr(cfg, "NEXT_PIVOT_ENABLED", True) else None)
+            if not echo and not pivot:
+                continue
+            bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot,
+                      "period": f"{current_name} → {next_name} · около {hours} ч"}
+            bundle["caption"] = combined_pair_caption(bundle)
+            bundles.append(bundle)
+        except Exception:
+            log.exception("SESSION_BUNDLE_BUILD_FAILED symbol=%s session=%s", symbol, session_id)
+    return bundles
+
 def mark_delivered(state: dict, key: str) -> None:
     delivered = state.setdefault("session_projection_delivered", {})
     delivered[key] = datetime.now(timezone.utc).timestamp()

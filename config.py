@@ -183,7 +183,7 @@ ECHO_ALERT_MIN_CONFIDENCE = 0.72
 ECHO_CHART_CANDLES = 40
 ECHO_CONTEXT_MIN_SCORE = 0.68
 ECHO_STRENGTH_MIN_GAP = 0.04
-# Сессионные Эхо и Next Pivot: по одной карточке на каждую из семи пар.
+# Сессионные Эхо + Next Pivot: один парный media-group (2 изображения) на каждую из семи пар.
 # Они не входят в лимит обычных торговых уведомлений.
 SESSION_PROJECTIONS_ENABLED = True
 # Если Railway пропустил открытие сессии, недоставленные карточки догоняются

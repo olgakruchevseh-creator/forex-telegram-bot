@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import config as cfg
@@ -1248,7 +1248,10 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     candidate_alerts,
                     dxy_bias=master_dxy_bias,
                     events=master_events,
-                    now_utc=closed_bar_utc(closed_dt) or datetime.now(timezone.utc),
+                    # News/Lifecycle must use the real wall clock. The closed H1
+                    # timestamp belongs to market data only; using it here can keep
+                    # Master inside a stale pre-news window for most of the hour.
+                    now_utc=datetime.now(timezone.utc),
                     priority_keys=mandatory_keys,
                 )
             except Exception:
@@ -1562,24 +1565,33 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # Только начало новой сессии: расчёт использует последнюю
                 # закрытую H1 и не догоняется произвольно через несколько часов.
                 session_events = briefing.session_events(newsmod.load_events())
-                for alert in session_projection_reports.pending_reports(
+                for bundle in session_projection_reports.pending_report_bundles(
                         market, session_events, state):
                     try:
-                        kind = "echo" if "|echo|" in alert["key"] else "pivot"
-                        caption = session_projection_reports.compact_photo_caption(alert, kind, limit=1000)
-                        caption = localize_telegram(caption)
-                        message = await context.application.bot.send_photo(
-                            chat_id=int(chat_id), photo=alert["image"], caption=caption)
-                        session_projection_reports.mark_delivered(state, alert["key"])
+                        caption = localize_telegram(bundle["caption"])
+                        media = []
+                        if bundle.get("echo"):
+                            bundle["echo"]["image"].seek(0)
+                            media.append(InputMediaPhoto(media=bundle["echo"]["image"], caption=caption))
+                        if bundle.get("pivot"):
+                            bundle["pivot"]["image"].seek(0)
+                            media.append(InputMediaPhoto(media=bundle["pivot"]["image"]))
+                        if len(media) == 1:
+                            message = await context.application.bot.send_photo(
+                                chat_id=int(chat_id), photo=media[0].media, caption=caption)
+                            message_id = getattr(message, "message_id", None)
+                        else:
+                            messages = await context.application.bot.send_media_group(
+                                chat_id=int(chat_id), media=media)
+                            message_id = getattr(messages[0], "message_id", None) if messages else None
+                        session_projection_reports.mark_delivered(state, bundle["key"])
                         save_state(state)
-                        log.info("SESSION_REPORT_SENT message_id=%s key=%s pid=%s",
-                                 getattr(message, "message_id", None), alert["key"],
-                                 briefing.instance_id())
+                        log.info("SESSION_ECHO_PIVOT_BUNDLE_SENT message_id=%s key=%s pid=%s",
+                                 message_id, bundle["key"], briefing.instance_id())
                     except Exception:
-                        # Ошибка одной отправки не перекрывает остальные пары.
-                        # Ключ не фиксируется: следующий скан повторит её.
-                        log.exception("SESSION_REPORT_SEND_FAILED key=%s pid=%s",
-                                      alert.get("key", "unknown"), briefing.instance_id())
+                        # Вся пара считается недоставленной, если album не отправился целиком.
+                        log.exception("SESSION_ECHO_PIVOT_BUNDLE_SEND_FAILED key=%s pid=%s",
+                                      bundle.get("key", "unknown"), briefing.instance_id())
             except Exception:
                 log.exception("SESSION_REPORT_SCAN_FAILED")
 
