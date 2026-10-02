@@ -28,6 +28,7 @@ import inside_bar_context
 import demand_supply_context
 import pump_dump_context
 import divergence_context
+import baskerville_context
 import auction_context
 import multi_tf_narrative
 import setup_memory
@@ -230,6 +231,7 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  demand_supply_ctx=demand_supply_context.analyze_symbol(pair,by_tf,direction)
  pump_dump_ctx=pump_dump_context.analyze_symbol(pair,by_tf,direction)
  divergence_ctx=divergence_context.analyze_symbol(pair,market,direction)
+ baskerville_ctx=baskerville_context.analyze_symbol(pair,market,direction)
  auction_ctx=auction_context.analyze_symbol(pair,by_tf,direction)
  candle_ctx=candle_context.analyze_symbol(pair,by_tf,direction,"H1")
  trading_ctx=trading_intelligence_context.analyze_symbol(pair,by_tf,direction,"H1")
@@ -265,7 +267,7 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
  # A KILLER entry cannot be exceptional if its external liquidity target is already consumed.
  if liquidity_ctx and liquidity_ctx.residual_state=="EXHAUSTED":
-  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
+  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
  # Hard contradiction only for genuinely poor context; soft disagreements reduce score.
  if senior==0 or junior==0:return {"eligible":False,"reason":"critical_tf_contradiction","families":families}
  family_score=sum(_WEIGHTS[f] for f in families)
@@ -294,6 +296,8 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  # Pump/Dump and Divergence are correlated context only: bounded score adjustment, never families.
  score += pump_dump_context.score_delta(pump_dump_ctx,direction)
  score += divergence_context.score_delta(divergence_ctx,direction)
+ # Same DIVERGENCE_CONTEXT family: bounded confirmation, never an independent KILLER family.
+ score += baskerville_context.score_delta(baskerville_ctx,direction)
  score += auction_context.score_delta(auction_ctx,direction)
  score += candle_context.score_delta(candle_ctx,direction)
  score += trading_intelligence_context.score_delta(trading_ctx,direction)
@@ -308,7 +312,7 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families}
  av=atr(h1,14); entry=float(h1[-1].close); mult=(1 if direction>0 else -1)
  targets=[entry+mult*av*x for x in (1.0,1.75,2.5)]
- return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
+ return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
 
 def process_candidates(alerts, market, strength):
  """Active Hunter + strict Execution gate.

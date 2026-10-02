@@ -7,7 +7,7 @@ def test_hunter_evaluates_market_without_current_alert(monkeypatch):
     monkeypatch.setattr(killer_engine, "_memory_texts", lambda pair, side: [])
     monkeypatch.setattr(killer_engine, "_remember_alerts", lambda alerts: None)
     monkeypatch.setattr(killer_engine, "_diag", lambda pair, side, meta: seen.append((pair, side, meta["reason"])))
-    monkeypatch.setattr(killer_engine, "evaluate", lambda pair, side, texts, market, strength: {"eligible":False,"reason":"not_enough_independent_families","families":set()})
+    monkeypatch.setattr(killer_engine, "evaluate", lambda pair, side, texts, market, strength, events=None, now_utc=None: {"eligible":False,"reason":"not_enough_independent_families","families":set()})
     out=killer_engine.process_candidates([], {"EUR/USD":{"H1":[object()]*30}}, {})
     assert out == []
     assert ("EUR/USD","LONG","not_enough_independent_families") in seen
