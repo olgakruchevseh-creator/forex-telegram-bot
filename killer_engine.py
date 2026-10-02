@@ -18,6 +18,7 @@ import trading_intelligence_context
 import path_quality_context
 import decision_quality_context
 import turtle_breakout_context
+import correlated_context_score
 import liquidity_context
 import continuation_liquidity_context
 import po3_fvg_context
@@ -286,7 +287,8 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
   # A confirmed Mother-Bar resolution can soften the compression penalty,
   # but never adds an independent KILLER family/vote.
   score += (-1 if price_action_ctx and price_action_ctx.confirmed and price_action_ctx.direction==direction else -3)
- score += inside_bar_context.score_delta(price_action_ctx,direction)
+ correlated_pa_delta, correlated_pa_meta = correlated_context_score.score(price_action_ctx,auction_ctx,turtle_ctx,direction)
+ score += correlated_pa_delta
  score += demand_supply_context.score_delta(demand_supply_ctx,direction)
  score += liquidity_context.score_delta(liquidity_ctx)
  score += continuation_liquidity_context.score_delta(continuation_liq_ctx,direction)
@@ -298,12 +300,10 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  score += divergence_context.score_delta(divergence_ctx,direction)
  # Same DIVERGENCE_CONTEXT family: bounded confirmation, never an independent KILLER family.
  score += baskerville_context.score_delta(baskerville_ctx,direction)
- score += auction_context.score_delta(auction_ctx,direction)
  score += candle_context.score_delta(candle_ctx,direction)
  score += trading_intelligence_context.score_delta(trading_ctx,direction)
  score += path_quality_context.score_delta(path_ctx,direction)
  score += decision_quality_context.score_delta(decision_quality_ctx,direction)
- score += turtle_breakout_context.score_delta(turtle_ctx,direction)
  score += multi_tf_narrative.score_delta(narrative_ctx,direction)
  setup_ctx=setup_memory.analyze(pair,direction,rname)
  score += setup_memory.score_delta(setup_ctx)
@@ -312,7 +312,7 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families}
  av=atr(h1,14); entry=float(h1[-1].close); mult=(1 if direction>0 else -1)
  targets=[entry+mult*av*x for x in (1.0,1.75,2.5)]
- return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
+ return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx,"correlated_price_action_score":correlated_pa_meta}
 
 def process_candidates(alerts, market, strength):
  """Active Hunter + strict Execution gate.

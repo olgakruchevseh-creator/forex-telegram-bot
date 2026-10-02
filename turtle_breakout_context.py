@@ -32,6 +32,10 @@ class TurtleBreakoutContext:
     trapped: bool=False
     invalidated: bool=False
     reentry_ready: bool=False
+    break_depth_atr: float=0.0
+    reclaim_body_atr: float=0.0
+    trap_quality: int=0
+    acceptance_closes: int=0
     alignment: int=0
     score: int=50
     reason: str=""
@@ -71,13 +75,27 @@ def analyze_symbol(symbol, by_tf, direction):
     plus_one=bool(beyond(prev) and reclaim(last))
     immediate_failure=bool(reclaim(last))
     trapped=bool((plus_one or immediate_failure) and attempts>=2)
-    accepted=bool(beyond(last) and beyond(prev))
+    mature=maturity>=int(getattr(cfg,"TURTLE_LEVEL_MATURITY_BARS",8)) or p.rank>=4
+    acceptance_closes=int(beyond(last))+int(beyond(prev))
+    accepted=bool(acceptance_closes>=2)
+    # Closed-candle quality of the trap: meaningful excursion through the level,
+    # reclaim body, repeated interaction and level maturity. It is descriptive
+    # context only and cannot create an independent family/signal.
+    excursion=max(0.0,(level-last.low) if wanted=="SSL" else (last.high-level))
+    break_depth_atr=excursion/av if av else 0.0
+    reclaim_body_atr=abs(last.close-last.open)/av if av else 0.0
+    q=45
+    q += min(18, attempts*3)
+    q += 10 if mature else 0
+    q += min(12, int(round(break_depth_atr*20)))
+    q += min(15, int(round(reclaim_body_atr*18))) if immediate_failure else 0
+    q += 5 if plus_one else 0
+    trap_quality=max(0,min(100,q))
     # Fast invalidation of a reversal thesis: two closed candles accepted beyond level.
     invalidated=accepted
     body=abs(last.close-last.open)
     displacement=body>=av*float(getattr(cfg,"TURTLE_REENTRY_MIN_BODY_ATR",.45))
     reentry_ready=bool(reclaims>=2 and reclaim(last) and displacement and not invalidated)
-    mature=maturity>=int(getattr(cfg,"TURTLE_LEVEL_MATURITY_BARS",8)) or p.rank>=4
 
     if invalidated:
         state="ПРИНЯТИЕ ЦЕНЫ ЗА УРОВНЕМ"; align=-1 if d==natural else 1; score=28
@@ -100,7 +118,7 @@ def analyze_symbol(symbol, by_tf, direction):
     else:
         state="ЗРЕЛЫЙ УРОВЕНЬ / ОЖИДАНИЕ" if mature else "УРОВЕНЬ / ОЖИДАНИЕ"; align=0; score=58 if mature else 52
         reason="контекст уровня сохранён; подтверждённого breakout lifecycle пока нет"
-    return TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,align,score,reason)
+    return TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,round(break_depth_atr,2),round(reclaim_body_atr,2),trap_quality,acceptance_closes,align,score,reason)
 
 def score_delta(ctx,direction):
     if not ctx:return 0
@@ -110,4 +128,5 @@ def describe(ctx):
     if not ctx:return "Пробой/ложный пробой: данных недостаточно"
     if not ctx.level:return f"Пробой/ложный пробой: {ctx.reason}"
     return (f"Пробой/ложный пробой: {ctx.state} · {ctx.source} {ctx.timeframe} · "
-            f"тестов {ctx.attempts} · возвратов {ctx.reclaims} · зрелость {ctx.maturity_bars} бар.")
+            f"тестов {ctx.attempts} · возвратов {ctx.reclaims} · зрелость {ctx.maturity_bars} бар · "
+            f"качество ловушки {ctx.trap_quality}/100 · глубина {ctx.break_depth_atr:.2f} ATR.")
