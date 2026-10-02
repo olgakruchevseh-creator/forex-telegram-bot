@@ -1218,7 +1218,7 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int,
             risk_bits.append("цена приблизилась к защитному уровню")
         risk_text = (" Риск: " + "; ".join(risk_bits) + ".") if risk_bits else ""
         fact = (
-            f"После подтверждённого Liquidity Sweep закрылись {bars} M15-свечи подряд против {side}; "
+            f"После подтверждённого {item.get('post_signal_source') or 'сигнала'} закрылись {bars} M15-свечи подряд против {side}; "
             f"совокупное встречное движение около {move_atr:.2f} ATR.{risk_text} "
             "Это раннее предупреждение, а не отмена сигнала. Отмена по-прежнему требует "
             "нарушения защитной границы на закрытии H1 либо согласованного разворота H1+M15."
@@ -1288,9 +1288,16 @@ def _opposite_confirmed(side: str, by_tf: dict) -> bool:
     return values == [wanted, wanted]
 
 
-def _liquidity_m15_pullback_risk(item: dict, by_tf: dict) -> dict | None:
-    """Ранний контроль уже отправленного Liquidity Sweep без ложной отмены по одной M15."""
-    if "Liquidity Sweep" not in str(item.get("sources") or ""):
+def _post_signal_m15_pullback_risk(item: dict, by_tf: dict) -> dict | None:
+    """Общий ранний M15-контроль подтверждённого маршрута без реакции на одну свечу.
+
+    Применяется к Liquidity Sweep и Accumulation/Distribution (выходу из фазы).
+    Это только предупреждение об устойчивом встречном откате; отмена маршрута
+    остаётся за H1 invalidation либо согласованным разворотом H1+M15.
+    """
+    sources = str(item.get("sources") or "")
+    watched = ("Liquidity Sweep", "Accumulation/Distribution")
+    if not any(name in sources for name in watched):
         return None
     bars = movement_progress.closed_candles(by_tf.get("M15") or [], 15)
     if len(bars) < 20:
@@ -1372,8 +1379,9 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             continue
         h1_bar = h1[-1]
         new_h1 = h1_bar.dt != item.get("last_h1")
-        m15_risk = (_liquidity_m15_pullback_risk(item, by_tf)
-                    if getattr(cfg, "LIQUIDITY_POST_SIGNAL_M15_CONTROL_ENABLED", True) else None)
+        m15_risk = (_post_signal_m15_pullback_risk(item, by_tf)
+                    if getattr(cfg, "POST_SIGNAL_M15_CONTROL_ENABLED",
+                               getattr(cfg, "LIQUIDITY_POST_SIGNAL_M15_CONTROL_ENABLED", True)) else None)
 
         # Цель является объективным касанием цены, поэтому ждать закрытия H1
         # нельзя: за один час цена способна пройти сразу TR1 и TR2. Берём все
@@ -1430,12 +1438,18 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         next_target = targets[highest_reached] if highest_reached < len(targets) else targets[-1]
         problems = []
         action = ""
+        # M15/M5 are observation-only here. They may record early counter-pressure
+        # for diagnostics, but they MUST NOT create/change the official lifecycle
+        # state. Pullback/continuation/cancellation decisions remain H1-close based.
         if m15_risk and not reached and not invalid:
+            sources_text = str(item.get("sources") or "")
+            item["post_signal_source"] = ("Liquidity Sweep" if "Liquidity Sweep" in sources_text
+                                          else "выхода из фазы" if "Accumulation/Distribution" in sources_text
+                                          else "сигнала")
             item["m15_counter_bars"] = m15_risk["bars"]
             item["m15_counter_atr"] = round(float(m15_risk["move_atr"]), 2)
             item["m15_entry_cross"] = bool(m15_risk["entry_cross"])
             item["m15_invalidation_risk"] = bool(m15_risk["invalidation_risk"])
-            action = "M15_PULLBACK_RISK"
         if reached:
             if highest_reached >= len(targets):
                 action = "COMPLETE"
