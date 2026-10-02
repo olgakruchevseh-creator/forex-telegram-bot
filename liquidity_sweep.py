@@ -3,6 +3,7 @@ from __future__ import annotations
 from chart_snapshot import freeze_by_tf
 
 import json
+import hashlib
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -174,7 +175,7 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
     strength_ok, gap = _strength(setup.symbol, setup.side, strength)
     if not strength_ok:
         return None
-    setup.sent = True
+    # delivery commit is deferred until Telegram acknowledgement
     source_points = 8 if "дня" in setup.source else 5
     quality = min(94, 72 + source_points + min(7, int(abs(current.close-current.open)/av*4)) + min(5, int(abs(gap)*30)))
     return {
@@ -210,7 +211,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
     setups = {k: SweepSetup(**v) for k, v in (state.get("setups") or {}).items()}
-    messages = []
+    pending=state.setdefault("pending", {})
+    messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -225,6 +227,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                     message = format_message(event)
 
+                    digest=hashlib.sha256(message.encode()).hexdigest()[:20]
+                    pending[digest]={"setup_id":setup.setup_id,"text":message}
                     messages.append(message)
 
                     _LAST_CHART_CARDS[message] = (event, freeze_by_tf(by_tf))
@@ -244,6 +248,14 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _save(state)
     return messages
 
+
+def mark_delivered(text: str) -> bool:
+    state=_load(); digest=hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    item=(state.get("pending") or {}).pop(digest,None)
+    if not item: return False
+    setups=state.get("setups") or {}; rec=setups.get(item.get("setup_id"))
+    if rec: rec["sent"]=True
+    _save(state); _LAST_CHART_CARDS.pop(text,None); return True
 
 def render_chart(event: dict, by_tf: dict):
     """Render PNG for an already-confirmed liquidity sweep.

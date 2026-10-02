@@ -81,7 +81,7 @@ def _confirm(s,h4,h1,m15,m5,strength):
     strength_ok=gap>=0 if wanted>0 else gap<=0
     score=76 + (6 if strength_ok else 0) + (5 if _bias('H1',h1)==wanted else 0) + (4 if _bias('H4',h4)==0 else 0)
     score=min(94,score); conf=max(70,min(91,score-4))
-    s.sent=True
+    # delivery commit is deferred until Telegram acknowledgement
     return {'symbol':s.symbol,'side':s.side,'extreme':s.extreme,'trigger':micro,'close':c.close,'dt':c.dt,'quality':score,'confidence':conf,'gap':gap,'strength_ok':strength_ok,'tf':'M15'}
 
 def _price(sym,x): return f'{x:.3f}' if 'JPY' in sym else f'{x:.5f}'
@@ -98,7 +98,7 @@ def _format(e):
     ])
 
 def process_market(market,strength):
-    st=_load(); first=not st.get('bootstrapped'); setups={k:Setup(**v) for k,v in (st.get('setups') or {}).items()}; out=[]
+    st=_load(); first=not st.get('bootstrapped'); setups={k:Setup(**v) for k,v in (st.get('setups') or {}).items()}; pending=st.setdefault('pending',{}); out=[item['text'] for item in pending.values() if isinstance(item,dict) and item.get('text')]
     for symbol in cfg.PAIRS:
       try:
         by_tf=market.get(symbol) or {}; h4,h1,m15,m5=(_bars(by_tf,t) for t in ('H4','H1','M15','M5'))
@@ -109,7 +109,7 @@ def process_market(market,strength):
             og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
             if not og.get('allow',True): continue
             if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90), max(0,e['quality']-3))
-            msg=_format(e); out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
+            msg=_format(e); digest=hashlib.sha256(msg.encode()).hexdigest()[:20]; pending[digest]={'id':s.id,'text':msg}; out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
         fresh=_candidate(symbol,h4,h1)
         if fresh and fresh.id not in setups:
           for old in setups.values():
@@ -118,6 +118,13 @@ def process_market(market,strength):
       except Exception: log.exception('ATS Reversal Point %s',symbol)
     st['bootstrapped']=True
     kept=[s for s in setups.values() if not s.invalid][-500:]; st['setups']={s.id:asdict(s) for s in kept}; _save(st); return out
+
+def mark_delivered(text: str) -> bool:
+    st=_load(); digest=hashlib.sha256((text or "").encode()).hexdigest()[:20]; item=(st.get("pending") or {}).pop(digest,None)
+    if not item: return False
+    rec=(st.get("setups") or {}).get(item.get("id"))
+    if rec: rec["sent"]=True
+    _save(st); _LAST_CHART_CARDS.pop(text,None); return True
 
 def render_chart(e,by_tf):
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt

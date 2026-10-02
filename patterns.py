@@ -4,6 +4,7 @@ from chart_snapshot import freeze_by_tf
 
 import json
 import io
+import hashlib
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -506,6 +507,26 @@ def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[st
     return _directional_break(h1, side) or _directional_break(m15, side)
 
 
+def pattern_123_states(by_tf: dict) -> list[dict]:
+    """Внутренние lifecycle-факты 1-2-3 на основных ТФ; сами по себе не являются сигналами."""
+    states = []
+    for tf in cfg.PATTERN_MAIN_TFS:
+        bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+        bars = bars[-cfg.PATTERN_LOOKBACK.get(tf, 160):]
+        life = pattern_123_lifecycle(tf, bars)
+        state = str(life.get("state", "NONE"))
+        if state in {"NONE", "REJECTED"}:
+            continue
+        states.append({
+            "name": "Паттерн 1-2-3", "tf": tf, "state": state,
+            "side": life.get("side", ""), "trigger": life.get("trigger"),
+            "p1": life.get("p1"), "p2": life.get("p2"), "p3": life.get("p3"),
+            "retest_low": life.get("retest_low"), "retest_high": life.get("retest_high"),
+            "reason": life.get("reason", ""),
+        })
+    return states
+
+
 def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
     found = []
     for tf in cfg.PATTERN_MAIN_TFS:
@@ -684,6 +705,25 @@ def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.Bytes
             draw.line(points, fill=color, width=4)
             for x, y in points:
                 draw.ellipse((x-5, y-5, x+5, y+5), fill=color)
+    # Для 1-2-3 подписываем фактические P1/P2/P3 и показываем динамический Retest Pocket.
+    if pattern.name == "Паттерн 1-2-3":
+        life = pattern_123_lifecycle(pattern.tf, closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf]))
+        if life.get("state") in {"CONFIRMED", "CONFIRMED_PRIOR", "RETEST_POCKET", "RETEST_RECLAIM"}:
+            full = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
+            shown_start = max(0, len(full) - len(bars))
+            piv = _alternating_pivots(_pivots(full, cfg.PATTERN_PIVOT.get(pattern.tf, 3)))
+            if len(piv) >= 3:
+                for label, (idx, price, _kind) in zip(("P1", "P2", "P3"), piv[-3:]):
+                    local_i = idx - shown_start
+                    if 0 <= local_i < len(bars):
+                        px, py = x_at(local_i), y_at(price)
+                        draw.ellipse((px-8, py-8, px+8, py+8), fill="#ffffff")
+                        draw.text((px+10, py-25), label, fill="#ffffff", font=small)
+            low, high = life.get("retest_low"), life.get("retest_high")
+            if low is not None and high is not None:
+                y1, y2 = y_at(float(high)), y_at(float(low))
+                draw.rectangle((left, min(y1,y2), right, max(y1,y2)), fill="#7f8cff22", outline="#7f8cff99", width=2)
+                draw.text((left+8, min(y1,y2)+4), "ЗОНА РЕТЕСТА", fill="#d7dcff", font=small)
     level_y = y_at(pattern.level)
     side_color = "#42e889" if pattern.side == "LONG" else "#ff6575"
     draw.line((left, level_y, right, level_y), fill=side_color, width=3)
@@ -709,6 +749,12 @@ def image_for_alert(text: str) -> io.BytesIO | None:
 
 
 def mark_card_delivered(text: str) -> None:
+    """Commit a pattern event only after successful Telegram delivery."""
+    state = _load(); digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    item = (state.get("pending") or {}).pop(digest, None)
+    if item:
+        state.setdefault("sent", {})[item["key"]] = item.get("dt") or item["key"]
+        _save(state)
     _PENDING_CARDS.pop(text, None)
 
 
@@ -792,8 +838,14 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
+    pending = state.setdefault("pending", {})
     observed = state.setdefault("observed", {})
     messages: list[str] = []
+    for digest, item in list(pending.items()):
+        if not isinstance(item, dict) or item.get("key") in sent or not item.get("text"):
+            pending.pop(digest, None); continue
+        messages.append(item["text"])
+    pending_keys = {item.get("key") for item in pending.values() if isinstance(item, dict)}
     strength = strength or {}
     now_utc = datetime.now(timezone.utc)
     try:
@@ -831,10 +883,13 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
 
             # Внутренний журнал наблюдения: бот знает, какую свежую геометрию видел,
             # но пользователь получает только полностью подтверждённую фигуру.
-            observed[symbol] = [
-                {"name": p.name, "side": p.side, "tf": p.tf, "dt": p.dt, "level": p.level}
-                for p in candidates[:8]
-            ]
+            observed[symbol] = {
+                "confirmed": [
+                    {"name": p.name, "side": p.side, "tf": p.tf, "dt": p.dt, "level": p.level}
+                    for p in candidates[:8]
+                ],
+                "pattern_123_lifecycle": pattern_123_states(by_tf),
+            }
             if first:
                 for p in candidates:
                     sent[f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"] = p.dt
@@ -843,7 +898,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             news_note, penalty = _pattern_news_context(symbol, now_utc, pattern_events)
             for p in candidates:
                 key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
-                if key in sent:
+                if key in sent or key in pending_keys:
                     continue
                 residual = _residual_potential(p, by_tf)
                 if not residual.get("eligible", True):
@@ -860,9 +915,12 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     p = Pattern(p.name, p.side, p.tf, p.quality, max(1, p.confidence-penalty),
                                 p.fact, p.level, p.dt)
                 text = _fmt(symbol, p, context_side, news_note, by_tf)
+                digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+                if digest not in pending:
+                    pending[digest] = {"key": key, "dt": p.dt, "text": text}
+                    pending_keys.add(key)
                 messages.append(text)
                 _PENDING_CARDS[text] = (symbol, p, freeze_by_tf(by_tf))
-                sent[key] = p.dt
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:
             log.exception("Паттерны %s", symbol)

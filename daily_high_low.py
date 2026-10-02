@@ -4,6 +4,7 @@ from chart_snapshot import freeze_by_tf
 
 import io
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -297,13 +298,27 @@ def image_for_alert(text: str) -> io.BytesIO | None:
     return render_chart(card[0], card[1])
 
 
+
+def mark_delivered(text: str) -> bool:
+    state = _load(); digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    item = (state.get("pending") or {}).pop(digest, None)
+    if not item: return False
+    state.setdefault("sent", {})[item["event_id"]] = item.get("h1_dt", "")
+    _save(state); _PENDING_CARDS.pop(text, None); return True
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
+    pending = state.setdefault("pending", {})
     last_h1 = state.setdefault("last_h1", {})
     messages = []
+    for digest,item in list(pending.items()):
+        if not isinstance(item,dict) or item.get("event_id") in sent or not item.get("text"):
+            pending.pop(digest,None); continue
+        messages.append(item["text"])
+    pending_ids={item.get("event_id") for item in pending.values() if isinstance(item,dict)}
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -315,10 +330,14 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 continue
             last_h1[symbol] = h1_dt
             event = detect_event(symbol, by_tf, strength)
-            if event and event["event_id"] not in sent:
-                sent[event["event_id"]] = h1_dt
-                if not first:
+            if event and event["event_id"] not in sent and event["event_id"] not in pending_ids:
+                if first:
+                    sent[event["event_id"]] = h1_dt
+                else:
                     text = format_message(event)
+                    digest=hashlib.sha256(text.encode()).hexdigest()[:20]
+                    pending[digest]={"event_id":event["event_id"],"h1_dt":h1_dt,"text":text}
+                    pending_ids.add(event["event_id"])
                     messages.append(text)
                     _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))
         except Exception:

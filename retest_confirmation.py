@@ -4,6 +4,7 @@ from chart_snapshot import freeze_by_tf
 _RETEST_CHART_CACHE = {}
 
 import json
+import hashlib
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -164,7 +165,7 @@ def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
     if (gap * wanted) < minimum_gap:
         return None
 
-    setup.sent = True
+    # delivery commit is deferred until Telegram acknowledgement
     reaction_atr = directional_body / av
     quality = min(94, 78 + (5 if setup.tf == "H4" else 2) + min(9, int(reaction_atr * 10)))
     return {
@@ -198,7 +199,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
     setups = {key: RetestSetup(**value) for key, value in (state.get("setups") or {}).items()}
-    messages = []
+    pending=state.setdefault("pending",{})
+    messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -215,6 +217,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         message = format_message(event)
 
                         _RETEST_CHART_CACHE[message] = (event, freeze_by_tf(by_tf))
+                        digest=hashlib.sha256(message.encode()).hexdigest()[:20]; pending[digest]={"setup_id":existing.setup_id,"text":message}
                         messages.append(message)
 
                 bars = _bars(by_tf, tf)
@@ -227,6 +230,13 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["setups"] = {key: asdict(value) for key, value in list(setups.items())[-500:]}
     _save(state)
     return messages
+
+def mark_delivered(text: str) -> bool:
+    state=_load(); digest=hashlib.sha256((text or "").encode()).hexdigest()[:20]; item=(state.get("pending") or {}).pop(digest,None)
+    if not item: return False
+    for rec in (state.get("setups") or {}).values():
+        if rec.get("setup_id")==item.get("setup_id"): rec["sent"]=True; break
+    _save(state); _RETEST_CHART_CACHE.pop(text,None); return True
 
 def render_retest_chart(symbol, candles, event, output_path):
     """Render a compact PNG chart for an already-confirmed structural retest.

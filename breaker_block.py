@@ -4,6 +4,7 @@ from chart_snapshot import freeze_by_tf
 
 import io
 import json
+import hashlib
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -127,7 +128,7 @@ def confirm_breaker(c: BreakerCandidate, h1: list[Candle], h4: list[Candle], m15
     if not strength_ok:
         return None
 
-    c.sent = True
+    # delivery commit is deferred until Telegram acknowledgement
     quality = min(96, c.source_quality + 7 + min(6, int(body/av*4)) + min(5, int(abs(gap)*25)))
     return {
         "symbol": c.symbol, "side": c.side, "source_side": c.source_side,
@@ -163,8 +164,9 @@ def format_message(e: dict) -> str:
 def process_market(market: dict, strength: dict[str, float], invalidated_blocks: list[dict] | None = None) -> list[str]:
     state = _load(); first = not bool(state.get("bootstrapped"))
     candidates = {k: BreakerCandidate(**v) for k, v in (state.get("candidates") or {}).items()}
+    pending=state.setdefault("pending", {})
     ingest_invalidated(invalidated_blocks or [], candidates)
-    messages: list[str] = []
+    messages: list[str] = [item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
@@ -181,7 +183,7 @@ def process_market(market: dict, strength: dict[str, float], invalidated_blocks:
                         events.append(event)
             if events and not first:
                 best = max(events, key=lambda x: x["quality"])
-                text = format_message(best); messages.append(text)
+                text = format_message(best); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"breaker_id":next(c.breaker_id for c in candidates.values() if c.symbol==best["symbol"] and c.broken_dt==best["broken_dt"]),"text":text}; messages.append(text)
                 _LAST_CHART_CARDS[text] = (best, freeze_by_tf(by_tf))
         except Exception:
             log.exception("Breaker Block %s", symbol)
@@ -192,6 +194,13 @@ def process_market(market: dict, strength: dict[str, float], invalidated_blocks:
     _save(state)
     return messages
 
+
+def mark_delivered(text: str) -> bool:
+    state=_load(); digest=hashlib.sha256((text or "").encode()).hexdigest()[:20]; item=(state.get("pending") or {}).pop(digest,None)
+    if not item: return False
+    rec=(state.get("candidates") or {}).get(item.get("breaker_id"))
+    if rec: rec["sent"]=True
+    _save(state); _LAST_CHART_CARDS.pop(text,None); return True
 
 def render_chart(event: dict, by_tf: dict):
     import matplotlib

@@ -1194,7 +1194,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 for text in patterns.process_market(market, strength):
                     structural = any(name in text for name in (
-                        "BOS", "Двойная", "голова и плечи", "AB=CD",
+                        "BOS", "Двойная", "голова и плечи", "AB=CD", "Паттерн 1-2-3",
                         "треугольник", "клин", "флаг", "вымпел", "прямоугольник",
                     ))
                     module_alerts.append((1 if structural else 3, text))
@@ -1415,6 +1415,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             await _deliver_trade_card(context.application, int(chat_id), text, source_image)
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
                 patterns.mark_card_delivered(text)
+            # Unified delivery acknowledgement: confirmed facts stay PENDING until
+            # the exact Telegram card has been delivered successfully.
+            for _module in (liquidity_sweep, breaker_block, smart_money_62_26, daily_high_low, retest_confirmation, ats_reversal_point):
+                try:
+                    _module.mark_delivered(source_text)
+                except Exception:
+                    log.exception("DELIVERY_ACK_FAILED module=%s", getattr(_module, "__name__", "unknown"))
             _mark_event_delivered(state, source_event_id)
             for extra in bundle.get("allies") or []:
                 _mark_event_delivered(state, _source_event_id(extra))

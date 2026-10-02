@@ -9,6 +9,7 @@ from chart_snapshot import freeze_by_tf
 
 import io
 import json
+import hashlib
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -190,7 +191,7 @@ def _confirm(s: Setup, h4: list[Candle], h1: list[Candle], m15: list[Candle], m5
     if m5b == -wanted: return None
     ok,gap = _strength_ok(s.symbol,s.side,strength)
     if not ok: return None
-    s.sent=True
+    # delivery commit is deferred until Telegram acknowledgement
     quality=min(97,s.quality+8+(4 if m5b==wanted else 0)+min(5,int(abs(gap)*30)))
     return {**asdict(s),"close":c.close,"gap":gap,"quality":quality,"confidence":min(93,quality-3),"confirm_dt":c.dt}
 
@@ -217,7 +218,7 @@ def format_message(e: dict) -> str:
 
 def process_market(market: dict, strength: dict[str,float]) -> list[str]:
     state=_load(); first=not bool(state.get("bootstrapped"))
-    setups={k:Setup(**v) for k,v in (state.get("setups") or {}).items()}; messages=[]
+    setups={k:Setup(**v) for k,v in (state.get("setups") or {}).items()}; pending=state.setdefault("pending",{}); messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
         try:
             by_tf=market.get(symbol) or {}
@@ -229,7 +230,7 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
                     og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
                     if not og.get('allow',True): continue
                     if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90),max(0,e['quality']-3))
-                    text=format_message(e); messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
+                    text=format_message(e); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"setup_id":s.setup_id,"text":text}; messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
             fresh=_find_setup(symbol,d1,h4,h1,m15)
             if fresh and fresh.setup_id not in setups:
                 # Новый setup заменяет старые незавершённые того же направления.
@@ -243,6 +244,13 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
     state["setups"]={s.setup_id:asdict(s) for s in kept[-400:]}; _save(state)
     return messages
 
+
+def mark_delivered(text: str) -> bool:
+    state=_load(); digest=hashlib.sha256((text or "").encode()).hexdigest()[:20]; item=(state.get("pending") or {}).pop(digest,None)
+    if not item: return False
+    rec=(state.get("setups") or {}).get(item.get("setup_id"))
+    if rec: rec["sent"]=True
+    _save(state); _LAST_CHART_CARDS.pop(text,None); return True
 
 def render_chart(event: dict, by_tf: dict):
     import matplotlib
