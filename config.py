@@ -773,6 +773,12 @@ KILLER_HUNTER_ENABLED = True  # active scan of all pairs/sides; execution gates 
 # 84 вместо 88: тот же класс сетапа, чуть больше проходов по баллу.
 # Пол независимости не трогаем — по-прежнему 5 разных семейств.
 KILLER_SCORE_THRESHOLD = 84
+# KILLER has a stricter hard news veto than ordinary entries. Reuse the shared
+# economic calendar; never create a second calendar/feed. Both currencies of
+# the pair are checked for HIGH-impact events.
+KILLER_NEWS_GUARD_ENABLED = True
+KILLER_NEWS_BLOCK_BEFORE_MINUTES = 120
+KILLER_NEWS_BLOCK_AFTER_MINUTES = 30
 KILLER_MIN_FAMILIES = 5
 KILLER_CHART_IMAGES_ENABLED = True
 # Memory of confirmed families survives Railway restarts when STATE_DIR is set.

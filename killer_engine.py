@@ -32,6 +32,7 @@ import auction_context
 import multi_tf_narrative
 import setup_memory
 import evidence_families
+import news as newsmod
 from analysis import analyze_tf, atr, closed_candles
 
 log = logging.getLogger("fxbot.killer")
@@ -171,8 +172,33 @@ def _views(by_tf, direction):
   out[tf]=analyze_tf(tf,tf,b).bias if len(b)>=20 else 0
  return out
 
-def evaluate(pair, side, texts, market, strength):
+def _news_guard(pair, events=None, now_utc=None):
+ """Hard veto for NEW KILLER entries around HIGH-impact news on either pair currency."""
+ if not getattr(cfg,"KILLER_NEWS_GUARD_ENABLED",True):
+  return {"blocked":False}
+ try: base,quote=pair.split("/")
+ except ValueError: return {"blocked":False}
+ now=now_utc or datetime.now(timezone.utc)
+ before=int(getattr(cfg,"KILLER_NEWS_BLOCK_BEFORE_MINUTES",120))
+ after=int(getattr(cfg,"KILLER_NEWS_BLOCK_AFTER_MINUTES",30))
+ relevant=[]
+ for event in events or []:
+  if str(getattr(event,"impact","")).upper() != "HIGH": continue
+  if str(getattr(event,"currency","")).upper() not in (base,quote): continue
+  try: minutes=(event.dt_utc-now).total_seconds()/60.0
+  except Exception: continue
+  if -after <= minutes <= before:
+   relevant.append((abs(minutes),minutes,event))
+ if not relevant: return {"blocked":False}
+ _,minutes,event=min(relevant,key=lambda x:x[0])
+ return {"blocked":True,"currency":event.currency,"title":getattr(event,"title","") or "HIGH-impact",
+         "minutes":round(minutes,1),"event_id":getattr(event,"event_id","")}
+
+def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  direction=1 if side=="LONG" else -1; by_tf=market.get(pair) or {}
+ news_guard=_news_guard(pair,events,now_utc)
+ if news_guard.get("blocked"):
+  return {"eligible":False,"reason":"high_impact_news_veto","families":set(),"news_guard":news_guard}
  families=set(); fam_best={}
  for t in texts:
   for f in _families(t):
@@ -292,6 +318,10 @@ def process_candidates(alerts, market, strength):
  families, OHLC, late-entry, residual, TF alignment and score threshold.
  """
  _PENDING.clear(); grouped=defaultdict(list)
+ try: events=newsmod.load_events()
+ except Exception:
+  log.exception("KILLER_NEWS_CALENDAR_FAILED"); events=[]
+ now_utc=datetime.now(timezone.utc)
  _remember_alerts(alerts)
  for t in alerts:
   p,s=_pair(t),_side(t)
@@ -309,7 +339,7 @@ def process_candidates(alerts, market, strength):
  out=[]
  for pair,side in sorted(keys):
   texts=_memory_texts(pair,side)
-  meta=evaluate(pair,side,texts,market,strength)
+  meta=evaluate(pair,side,texts,market,strength,events=events,now_utc=now_utc)
   _diag(pair,side,meta)
   fams=sorted(meta.get("families") or [])
   if not meta.get("eligible"):
@@ -359,7 +389,7 @@ def _diag(pair, side, meta):
    "not_enough_independent_families":"families", "insufficient_h1":"ohlc",
    "late_entry":"late_entry", "late_impulse":"late_entry", "ohlc_contradiction":"ohlc",
    "erl_residual_exhausted":"residual", "critical_tf_contradiction":"htf_ltf",
-   "score_below_threshold":"score",
+   "score_below_threshold":"score", "high_impact_news_veto":"news_guard",
   }.get(reason,"telegram_ready" if meta.get("eligible") else reason)
   rec={"utc":datetime.now(timezone.utc).isoformat(timespec="seconds"),"pair":pair,"side":side,
        "stage":stage,"reason":reason,"eligible":bool(meta.get("eligible")),"score":meta.get("score"),
