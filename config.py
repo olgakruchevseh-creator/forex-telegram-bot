@@ -139,8 +139,8 @@ SIGNAL_SETUP_COOLDOWN_HOURS = 1.5
 # Верхний предел НОВЫХ торговых карточек модулей за одну закрытую H1
 # (не обещание «будет ровно N»). 0 = без лимита (опасно: флуд).
 # Обязательные AMD / пробой уровня в этот бюджет не входят.
-# После склейки одной идеи на пару 4 разных пары за H1 — потолок, не квота.
-MAX_MODULE_ALERTS_PER_H1 = 4
+# После склейки одной идеи на пару общий числовой потолок отключён: каждый уникальный прошедший сигнал может быть доставлен.
+MAX_MODULE_ALERTS_PER_H1 = 0
 SIGNAL_JOURNAL_ENABLED = True
 # Legacy journal still records outcomes, but its separate daily/weekly Telegram summaries are disabled.
 # Daily Calibration Report is the single statistical Telegram report.
@@ -163,7 +163,7 @@ MASTER_DIRECTION_ENABLED = True
 MASTER_STRENGTH_MIN_GAP = 0.05
 MASTER_MIN_QUALITY = 78
 MASTER_REQUIRE_MODULE_TRIGGER = True
-MASTER_MAX_SIGNALS_PER_H1 = 4
+MASTER_MAX_SIGNALS_PER_H1 = 0
 # Направленная торговая карточка в чат только после прохождения Master.
 MASTER_REQUIRE_FOR_DELIVERY = True
 # Echo — сессионная информационная проекция. В Master Direction не вмешивается.

@@ -600,12 +600,14 @@ def analyze_market(
             except Exception:
                 log.exception("Master Direction %s", symbol)
     candidates.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
-    limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 2))
-    selected = candidates[:limit]
+    # 0 = без лимита: не отбрасываем более поздние качественные кандидаты.
+    limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 0) or 0)
+    selected = candidates[:limit] if limit > 0 else list(candidates)
     if priority_keys:
         have = {(item.get("symbol"), item.get("side")) for item in selected}
         extras = []
-        for item in candidates[limit:]:
+        remaining = candidates[limit:] if limit > 0 else []
+        for item in remaining:
             key = (item.get("symbol"), item.get("side"))
             if key in priority_keys and key not in have:
                 extras.append(item)
