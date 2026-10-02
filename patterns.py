@@ -313,28 +313,96 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     return out
 
 
-def pattern_123(tf: str, bars: list[Candle]) -> list[Pattern]:
-    """Подтверждённый зеркальный паттерн 1-2-3 с пробоем точки 2."""
-    out: list[Pattern] = []
+def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
+    """Фактическое состояние 1-2-3 без создания отдельной стратегии.
+
+    STRUCTURE_ARMED означает, что P1/P2/P3 уже валидны, но первый закрытый
+    пробой точки 2 ещё не произошёл. CONFIRMED появляется только на первом
+    таком закрытии. После пробоя состояние может отражать RETEST_POCKET /
+    RETEST_RECLAIM; пробой защитной границы P1 отменяет структуру.
+    """
     n = cfg.PATTERN_PIVOT.get(tf, 3)
     piv = _alternating_pivots(_pivots(bars, n))
-    if len(piv) < 3:
-        return out
+    if len(piv) < 3 or len(bars) < 3:
+        return {"state": "NONE"}
     p1, p2, p3 = piv[-3:]
     if p3[0] < len(bars) - (n + 6):
+        return {"state": "NONE"}
+
+    av = atr(bars, int(getattr(cfg, "PATTERN_123_ATR_LENGTH", 14))) or _range(bars[-1])
+    leg = abs(p2[1] - p1[1])
+    retrace = abs(p3[1] - p2[1])
+    ratio = retrace / leg if leg > 0 else 99.0
+    min_leg = av * float(getattr(cfg, "PATTERN_123_MIN_P1_P2_ATR", .65))
+    if leg < min_leg:
+        return {"state": "REJECTED", "reason": "p1_p2_too_small", "leg_atr": leg / av if av else 0.0}
+    if not float(getattr(cfg, "PATTERN_123_P3_MIN_RETRACE", .30)) <= ratio <= float(getattr(cfg, "PATTERN_123_P3_MAX_RETRACE", .85)):
+        return {"state": "REJECTED", "reason": "p3_retrace", "retrace": ratio}
+
+    if (p1[2], p2[2], p3[2]) == ("L", "H", "L"):
+        side, direction = "LONG", 1
+        p3_valid = p3[1] >= p1[1] + av * float(getattr(cfg, "PATTERN_123_P3_HOLD_ATR", .05))
+    elif (p1[2], p2[2], p3[2]) == ("H", "L", "H"):
+        side, direction = "SHORT", -1
+        p3_valid = p3[1] <= p1[1] - av * float(getattr(cfg, "PATTERN_123_P3_HOLD_ATR", .05))
+    else:
+        return {"state": "NONE"}
+    if not p3_valid:
+        return {"state": "INVALIDATED", "reason": "p3_failed_hold", "side": side}
+
+    trigger = float(p2[1])
+    break_buffer = av * float(getattr(cfg, "PATTERN_123_BREAK_BUFFER_ATR", .05))
+    invalid_buffer = av * float(getattr(cfg, "PATTERN_123_INVALIDATION_ATR", .05))
+    pocket = av * float(getattr(cfg, "PATTERN_123_RETEST_POCKET_ATR", .20))
+    after = bars[p3[0] + 1:]
+    first_break_i = None
+    for i, c in enumerate(after, start=p3[0] + 1):
+        if side == "LONG" and c.close < p1[1] - invalid_buffer:
+            return {"state": "INVALIDATED", "reason": "p1_broken", "side": side, "trigger": trigger}
+        if side == "SHORT" and c.close > p1[1] + invalid_buffer:
+            return {"state": "INVALIDATED", "reason": "p1_broken", "side": side, "trigger": trigger}
+        crossed = (c.close > trigger + break_buffer) if side == "LONG" else (c.close < trigger - break_buffer)
+        if crossed:
+            first_break_i = i
+            break
+
+    base = {"side": side, "trigger": trigger, "p1": p1[1], "p2": p2[1], "p3": p3[1],
+            "leg_atr": leg / av if av else 0.0, "retrace": ratio, "atr": av,
+            "retest_low": trigger - pocket, "retest_high": trigger + pocket}
+    if first_break_i is None:
+        return {"state": "STRUCTURE_ARMED", **base}
+    if first_break_i == len(bars) - 1:
+        return {"state": "CONFIRMED", "confirmation_index": first_break_i, **base}
+
+    later = bars[first_break_i + 1:]
+    touched = any(c.low <= trigger + pocket and c.high >= trigger - pocket for c in later)
+    if touched:
+        last = bars[-1]
+        reclaimed = (last.close > trigger + break_buffer) if side == "LONG" else (last.close < trigger - break_buffer)
+        return {"state": "RETEST_RECLAIM" if reclaimed else "RETEST_POCKET", "confirmation_index": first_break_i, **base}
+    return {"state": "CONFIRMED_PRIOR", "confirmation_index": first_break_i, **base}
+
+
+def pattern_123(tf: str, bars: list[Candle]) -> list[Pattern]:
+    """1-2-3 выходит наружу только на первом подтверждённом пробое точки 2."""
+    out: list[Pattern] = []
+    life = pattern_123_lifecycle(tf, bars)
+    if life.get("state") != "CONFIRMED":
         return out
-    leg, retrace = abs(p2[1] - p1[1]), abs(p3[1] - p2[1])
-    if leg <= 0 or not .30 <= retrace / leg <= .85:
+    last = bars[-1]
+    side = str(life["side"])
+    if side == "LONG" and not _bull(last):
         return out
-    prev, last = bars[-2], bars[-1]
-    if (p1[2], p2[2], p3[2]) == ("L", "H", "L") and p3[1] > p1[1]:
-        if prev.close <= p2[1] < last.close and _bull(last):
-            _add(out, "Паттерн 1-2-3", "LONG", tf, 86, 82,
-                 "Точка 3 удержалась выше точки 1; закрытая свеча пробила точку 2 вверх.", p2[1], last)
-    elif (p1[2], p2[2], p3[2]) == ("H", "L", "H") and p3[1] < p1[1]:
-        if prev.close >= p2[1] > last.close and _bear(last):
-            _add(out, "Паттерн 1-2-3", "SHORT", tf, 86, 82,
-                 "Точка 3 удержалась ниже точки 1; закрытая свеча пробила точку 2 вниз.", p2[1], last)
+    if side == "SHORT" and not _bear(last):
+        return out
+    leg_atr = float(life.get("leg_atr", 0.0))
+    retrace = float(life.get("retrace", 0.0))
+    q = min(92, 84 + int(min(4.0, max(0.0, leg_atr - .65) * 2.0)))
+    conf = min(90, 81 + (2 if .38 <= retrace <= .72 else 0))
+    fact = (f"P1→P2 = {leg_atr:.2f} ATR; P3 удержан, коррекция {retrace*100:.0f}%; "
+            f"первая закрытая свеча пробила точку 2 с ATR-буфером. "
+            f"Зона ретеста: {life['retest_low']:.5f}–{life['retest_high']:.5f}.")
+    _add(out, "Паттерн 1-2-3", side, tf, q, conf, fact, float(life["trigger"]), last)
     return out
 
 
