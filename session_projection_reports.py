@@ -432,6 +432,16 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
 
 
 
+def _side_badge(side: str | None) -> str:
+    """Consistent visual direction badge for the combined Echo + Next Pivot card."""
+    side = str(side or "").upper()
+    if side == "LONG":
+        return "🟢 LONG"
+    if side == "SHORT":
+        return "🔴 SHORT"
+    return "🟡 НЕЙТРАЛЬНО"
+
+
 def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     """One concise caption for the Echo + Next Pivot album of one pair."""
     symbol = str(bundle.get("symbol") or "")
@@ -446,20 +456,20 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     eside = er.get("side")
     pside = pr.get("side")
     if eside:
-        lines.append(f"Эхо · фон к следующей сессии: {eside} · вероятность {er.get('direction_probability', '—')}%")
+        lines.append(f"Эхо · фон к следующей сессии: {_side_badge(eside)} · вероятность {er.get('direction_probability', '—')}%")
     else:
-        lines.append("Эхо · фон к следующей сессии: НЕЙТРАЛЬНО")
+        lines.append(f"Эхо · фон к следующей сессии: {_side_badge(None)}")
     if pr:
         decimals = 3 if "JPY" in symbol else 5
         kind = "ВЕРШИНЫ" if pr.get("kind") == "high" else "ОСНОВАНИЯ"
-        lines.append(f"Pivot · путь к зоне: {pside or 'НЕЙТРАЛЬНО'} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
+        lines.append(f"Pivot · путь к зоне: {_side_badge(pside)} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
         reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else "НЕЙТРАЛЬНО")
         if eside and pside and eside != pside:
-            lines.append(f"Связка: Echo {eside} — общий фон; Pivot {pside} — локальный крюк к зоне, не смена тезиса.")
+            lines.append(f"Связка: Echo {_side_badge(eside)} — общий фон; Pivot {_side_badge(pside)} — локальный крюк к зоне, не смена тезиса.")
         elif eside and pside:
-            lines.append(f"Связка: Echo {eside} → движение к Pivot {pside} → после зоны возможна реакция {reaction}.")
+            lines.append(f"Связка: Echo {_side_badge(eside)} → движение к Pivot {_side_badge(pside)} → после зоны возможна реакция {_side_badge(reaction)}.")
         else:
-            lines.append(f"Связка: Pivot — локальная зона; реакция {reaction} учитывается только после подтверждения M15/H1.")
+            lines.append(f"Связка: Pivot — локальная зона; реакция {_side_badge(reaction)} учитывается только после подтверждения M15/H1.")
     else:
         lines.append("Pivot: надёжная следующая зона пока не рассчитана.")
     lines.append("🖼 1/2 — Echo · 2/2 — Next Pivot")

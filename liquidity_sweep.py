@@ -141,10 +141,11 @@ def detect_new_sweep(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[C
 def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: list[Candle], strength: dict[str, float]) -> dict | None:
     if setup.sent or setup.invalid or len(h1) < 20 or not h4 or not m15:
         return None
-    # Снятие фиксируется H1, но подтверждающий CHOCH/BOS разрешён по уже
-    # закрытой M15 — ждать ещё одну полную H1 слишком поздно.
-    current = m15[-1] if m15[-1].dt > setup.sweep_dt else h1[-1]
-    confirm_tf = "M15" if current is m15[-1] else "H1"
+    # H1 Telegram Gate: снятие ликвидности и финальный CHOCH/BOS H1-сценария
+    # подтверждаются только НОВОЙ закрытой H1. M15 остаётся внутренним фильтром
+    # качества/направления, но больше не может самостоятельно выпустить H1-карточку.
+    current = h1[-1]
+    confirm_tf = "H1"
     if current.dt <= setup.sweep_dt or current.dt == setup.last_dt:
         return None
     setup.last_dt = current.dt
@@ -160,9 +161,8 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
         setup.invalid = True
         return None
     break_buffer = av * float(getattr(cfg, "LIQUIDITY_CHOCH_BUFFER_ATR", .05))
-    body_factor = (.18 if confirm_tf == "M15" else
-                   float(getattr(cfg, "LIQUIDITY_CONFIRM_BODY_ATR", .35)))
-    body_need = av * float(getattr(cfg, "LIQUIDITY_M15_CONFIRM_BODY_ATR", body_factor))
+    body_factor = float(getattr(cfg, "LIQUIDITY_CONFIRM_BODY_ATR", .35))
+    body_need = av * body_factor
     wanted = 1 if setup.side == "LONG" else -1
     if wanted > 0:
         broken = current.close > setup.confirm_level+break_buffer and current.close > current.open
@@ -276,7 +276,7 @@ def render_chart(event: dict, by_tf: dict):
                 return getattr(obj, name)
         return default
 
-    tf = _get(event, "tf", "confirm_tf", default="M15")
+    tf = _get(event, "tf", "confirm_tf", default="H1")
     bars = by_tf.get(tf) if isinstance(by_tf, dict) else None
     if not bars:
         for fallback in ("M15", "H1", "M5", "H4"):

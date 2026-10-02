@@ -499,12 +499,15 @@ def _strength_confirms(symbol: str, side: str, strength: dict[str, float]) -> bo
 
 
 def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[str, float]) -> bool:
-    """Гармоника выходит наружу при силе валют и пробое на H1 либо M15."""
+    """Финальное подтверждение гармоники: только закрытый H1-пробой.
+
+    M15/M5 могут использоваться внутренними контекстными фильтрами, но не
+    заменяют закрытие H1 и не выпускают часовую торговую карточку раньше времени.
+    """
     if not _strength_confirms(symbol, side, strength):
         return False
     h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
-    m15 = closed_candles(by_tf.get("M15") or [], TF_MINUTES["M15"])
-    return _directional_break(h1, side) or _directional_break(m15, side)
+    return _directional_break(h1, side)
 
 
 def pattern_123_states(by_tf: dict) -> list[dict]:
