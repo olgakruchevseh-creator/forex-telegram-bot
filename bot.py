@@ -1558,19 +1558,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 for alert in session_projection_reports.pending_reports(
                         market, session_events, state):
                     try:
-                        caption = localize_telegram(alert["text"])
-                        long_caption = len(caption) > 1000
-                        if long_caption:
-                            # У Telegram подпись к фото короче обычного сообщения.
-                            # Полный русский разбор отправляем сразу следом, не
-                            # обрезая список относящихся к паре новостей.
-                            module_name = "ЭХО" if "|echo|" in alert["key"] else "СЛЕДУЮЩИЙ PIVOT"
-                            pair = alert["key"].rsplit("|", 1)[-1]
-                            caption = f"🔭 {module_name} · {pair}\nПолный сессионный разбор — следующим сообщением."
+                        kind = "echo" if "|echo|" in alert["key"] else "pivot"
+                        caption = session_projection_reports.compact_photo_caption(alert, kind, limit=1000)
+                        caption = localize_telegram(caption)
                         message = await context.application.bot.send_photo(
                             chat_id=int(chat_id), photo=alert["image"], caption=caption)
-                        if long_caption:
-                            await _send_parts(context.application, int(chat_id), alert["text"])
                         session_projection_reports.mark_delivered(state, alert["key"])
                         save_state(state)
                         log.info("SESSION_REPORT_SENT message_id=%s key=%s pid=%s",

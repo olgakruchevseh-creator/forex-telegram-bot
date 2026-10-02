@@ -153,6 +153,42 @@ def _minimal_echo_ray(symbol: str, by_tf: dict, side: str) -> io.BytesIO:
     out=io.BytesIO(); out.name=f"echo_minimal_{symbol.replace('/', '')}.png"
     image.save(out,format="PNG"); out.seek(0); return out
 
+
+def compact_photo_caption(report: dict, kind: str, limit: int = 1000) -> str:
+    """Keep Echo/Next Pivot attached to its chart even when the full report is long.
+
+    Telegram photo captions are shorter than ordinary messages.  The session
+    projection is informational, so prefer one self-contained photo card over a
+    detached second text message.  Full text remains in ``report["text"]`` for
+    logs/tests; delivery uses this compact caption.
+    """
+    text = str((report or {}).get("text") or "")
+    if len(text) <= limit:
+        return text
+    lines = [line.strip() for line in text.splitlines() if line.strip() and line.strip("━")]
+    wanted = (
+        "💱 Пара:", "Период:", "Режим расчёта:", "Направление к границе",
+        "Вероятность направления:", "Достаточность данных", "Форма ожидаемого пути:",
+        "Первичное движение к Pivot:", "Ожидаемая зона", "Окно Pivot", "Статус Pivot:",
+        "Вероятность первичного", "Ожидаемая реакция", "Связка Echo → Pivot:",
+        "📰", "⚠️ Это вероятностный",
+    )
+    title = "🔭 ЭХО — ПРОГНОЗ ДО СЛЕДУЮЩЕЙ СЕССИИ" if kind == "echo" else "🎯 NEXT PIVOT — ПРОГНОЗ ДО СЛЕДУЮЩЕЙ СЕССИИ"
+    picked = [title]
+    for line in lines:
+        if line == title:
+            continue
+        if any(line.startswith(prefix) for prefix in wanted):
+            picked.append(line)
+    caption = "\n".join(dict.fromkeys(picked))
+    if len(caption) <= limit:
+        return caption
+    # Last-resort safe trim: never create a detached text continuation merely
+    # because optional explanatory lines exceeded the caption budget.
+    suffix = "\n⚠️ Информационный сценарий, не торговый сигнал."
+    return caption[: max(0, limit-len(suffix)-1)].rstrip() + suffix
+
+
 def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hours: int,
                  current_name: str, next_name: str, strength: dict | None = None,
                  dxy_bias: int = 0, session_side: str | None = None) -> dict:

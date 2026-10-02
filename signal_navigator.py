@@ -1209,16 +1209,28 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int,
                 "Это завершение прежнего пути, а не автоматический сигнал разворота.")
     elif action == "PULLBACK_HOLD":
         title = f"↩️ ОТКАТ ВНУТРИ {side} — СДЕЛКУ НЕ СНИМАЕМ"
-        depth = item.get("pullback_depth") or "коррекция"
+        depth = item.get("pullback_depth") or "КОРРЕКЦИЯ"
         bars = int(item.get("pullback_bars") or 0)
         retrace = int(item.get("pullback_retrace") or 0)
+        pb_atr = float(item.get("pullback_atr") or 0)
+        zone = item.get("pullback_zone") or []
         max_h1 = int(getattr(cfg, "NAVIGATOR_TIME_PULLBACK_MAX_H1", 4))
         left = max(1, max_h1 - bars)
+        zone_text = (f" Вероятная зона: {movement_progress._price(symbol, float(zone[0]))}–"
+                     f"{movement_progress._price(symbol, float(zone[1]))}." if len(zone) == 2 else "")
+        risk_bits = []
+        if item.get("pullback_entry_risk"):
+            risk_bits.append("высокий риск возврата через исходный Entry")
+        if item.get("pullback_stop_risk"):
+            risk_bits.append("зона отката затрагивает защитный уровень")
+        if item.get("pullback_reversal_threat"):
+            risk_bits.append("глубокое встречное движение + структурный конфликт: угроза разворота повышена")
+        risk_text = (" Риск: " + "; ".join(risk_bits) + ".") if risk_bits else ""
         fact = (
-            f"По уже присланному {side} идёт {depth}: примерно {bars} часовых свечей "
-            f"и {retrace}% от максимума хода. По времени обычно ещё около {left}–{max_h1} часов. "
-            f"Это не разворот и не новый SHORT/LONG. "
-            f"Направление то же. Ждём окончание отката, маршрут не отменяем."
+            f"По уже присланному {side} идёт откат {depth}: примерно {bars} H1-свечей, "
+            f"глубина {retrace}% последнего импульса / {pb_atr:.2f} ATR.{zone_text}{risk_text} "
+            f"По времени ориентир ещё около {left}–{max_h1} часов. "
+            f"Пока подтверждённой отмены нет, исходный маршрут остаётся активным."
         )
     elif action == "PULLBACK_DONE":
         title = f"✅ ОТКАТ СНЯТ — {side} ПРОДОЛЖАЕТСЯ"
@@ -1388,6 +1400,12 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                 ((h1_best - anchor) * direction) / total * 100))))
             max_prog = max(int(item.get("max_progress") or 0), h1_best_progress, progress)
             retrace = max(0, max_prog - h1_close_progress)
+            # Depth is measured against the actual favourable impulse, not the
+            # full TR ladder.  This makes the labels comparable with Fibonacci
+            # retracement and lets us express the correction in ATR.
+            impulse_size = abs(float(h1_best) - anchor)
+            counter_size = abs(float(h1_best) - float(h1_bar.close))
+            fib_retrace = int(round(100.0 * counter_size / impulse_size)) if impulse_size > 0 else 0
             min_retrace = int(getattr(cfg, "SIGNAL_PULLBACK_MIN_RETRACE_PCT", 8))
             deep_at = int(getattr(cfg, "SIGNAL_PULLBACK_DEEP_PCT", 35))
             recover_at = int(getattr(cfg, "SIGNAL_PULLBACK_DONE_RECOVER_PCT", 3))
@@ -1412,13 +1430,45 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             pullback_confirmed=(pullback_bars>=min_pb_bars or equivalent) and regime_name not in ("RANGE","COMPRESSION")
             if retrace >= min_retrace and pullback_confirmed and not item.get("pullback_open"):
                 item["pullback_open"] = True
-                item["pullback_retrace"] = retrace
+                item["pullback_retrace"] = fib_retrace
                 item["pullback_bars"] = pullback_bars
-                item["pullback_depth"] = (
-                    "глубокий откат" if retrace >= deep_at else
-                    "средний откат" if retrace >= min_retrace * 2 else
-                    "маленький откат"
-                )
+                item["pullback_atr"] = round(counter_move / av_pb, 2) if av_pb > 0 else 0.0
+                if fib_retrace >= 79:
+                    depth_name, band = "КРИТИЧЕСКИЙ", (0.786, 1.0)
+                elif fib_retrace >= 62:
+                    depth_name, band = "ГЛУБОКИЙ", (0.618, 0.786)
+                elif fib_retrace >= 38:
+                    depth_name, band = "СРЕДНИЙ", (0.382, 0.618)
+                else:
+                    depth_name, band = "МЕЛКИЙ", (0.236, 0.382)
+                item["pullback_depth"] = depth_name
+                if impulse_size > 0:
+                    if direction > 0:
+                        z1, z2 = h1_best - impulse_size * band[1], h1_best - impulse_size * band[0]
+                    else:
+                        z1, z2 = h1_best + impulse_size * band[0], h1_best + impulse_size * band[1]
+                    item["pullback_zone"] = [min(z1, z2), max(z1, z2)]
+                # Entry/protection risk is a fact about the existing signal,
+                # never a new opposite trade recommendation.
+                zone = item.get("pullback_zone") or []
+                inv = float(item.get("invalidation") or 0)
+                if zone:
+                    zl, zh = map(float, zone)
+                    item["pullback_entry_risk"] = bool(zl <= anchor <= zh or
+                        (direction > 0 and zl < anchor) or (direction < 0 and zh > anchor))
+                    item["pullback_stop_risk"] = bool(inv and (zl <= inv <= zh or
+                        (direction > 0 and zl <= inv) or (direction < 0 and zh >= inv)))
+                else:
+                    item["pullback_entry_risk"] = False
+                    item["pullback_stop_risk"] = False
+                try:
+                    st_ctx = structure_context.analyze_symbol(symbol, by_tf, direction)
+                    opposite_structure = bool(st_ctx and structure_context.alignment(st_ctx, direction) < 0)
+                except Exception:
+                    opposite_structure = False
+                item["pullback_reversal_threat"] = bool(
+                    depth_name in ("ГЛУБОКИЙ", "КРИТИЧЕСКИЙ") and
+                    opposite_structure and equivalent)
                 action = "PULLBACK_HOLD"
             elif item.get("pullback_open") and retrace <= recover_at:
                 item["pullback_open"] = False
