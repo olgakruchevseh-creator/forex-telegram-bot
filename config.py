@@ -827,6 +827,12 @@ DEMAND_SUPPLY_FLIP_RETEST_MAX_BARS = 3
 # Weekly audit patch 78+: conservative context additions.
 SIGNAL_PULLBACK_MIN_H1_BARS = 3
 SIGNAL_PULLBACK_EQUIVALENT_MOVE_ATR = 0.85
+# Early post-signal protection for confirmed Liquidity Sweep routes.
+# Three closed M15 candles are required; one candle is never treated as a pullback/cancel.
+LIQUIDITY_POST_SIGNAL_M15_CONTROL_ENABLED = True
+LIQUIDITY_POST_SIGNAL_M15_COUNTER_BARS = 3
+LIQUIDITY_POST_SIGNAL_M15_MIN_ATR = 0.35
+LIQUIDITY_POST_SIGNAL_M15_STOP_NEAR_ATR = 0.25
 PUMP_DUMP_CONTEXT_ENABLED = True
 PUMP_DUMP_IMPULSE_BARS = 3
 PUMP_DUMP_MIN_IMPULSE_ATR = 1.35

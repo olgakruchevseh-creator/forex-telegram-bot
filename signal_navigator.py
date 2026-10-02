@@ -1207,6 +1207,22 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int,
         title = "🏆 МАРШРУТ ПОЛНОСТЬЮ ОТРАБОТАН"
         fact = (f"Достигнута последняя доступная структурная цель {reached_names[-1]}. "
                 "Это завершение прежнего пути, а не автоматический сигнал разворота.")
+    elif action == "M15_PULLBACK_RISK":
+        title = f"⚠️ РАННИЙ M15-КОНТРОЛЬ — {side} ПОД ДАВЛЕНИЕМ"
+        bars = int(item.get("m15_counter_bars") or 0)
+        move_atr = float(item.get("m15_counter_atr") or 0)
+        risk_bits = []
+        if item.get("m15_entry_cross"):
+            risk_bits.append("цена вернулась через исходный Entry")
+        if item.get("m15_invalidation_risk"):
+            risk_bits.append("цена приблизилась к защитному уровню")
+        risk_text = (" Риск: " + "; ".join(risk_bits) + ".") if risk_bits else ""
+        fact = (
+            f"После подтверждённого Liquidity Sweep закрылись {bars} M15-свечи подряд против {side}; "
+            f"совокупное встречное движение около {move_atr:.2f} ATR.{risk_text} "
+            "Это раннее предупреждение, а не отмена сигнала. Отмена по-прежнему требует "
+            "нарушения защитной границы на закрытии H1 либо согласованного разворота H1+M15."
+        )
     elif action == "PULLBACK_HOLD":
         title = f"↩️ ОТКАТ ВНУТРИ {side} — СДЕЛКУ НЕ СНИМАЕМ"
         depth = item.get("pullback_depth") or "КОРРЕКЦИЯ"
@@ -1272,6 +1288,46 @@ def _opposite_confirmed(side: str, by_tf: dict) -> bool:
     return values == [wanted, wanted]
 
 
+def _liquidity_m15_pullback_risk(item: dict, by_tf: dict) -> dict | None:
+    """Ранний контроль уже отправленного Liquidity Sweep без ложной отмены по одной M15."""
+    if "Liquidity Sweep" not in str(item.get("sources") or ""):
+        return None
+    bars = movement_progress.closed_candles(by_tf.get("M15") or [], 15)
+    if len(bars) < 20:
+        return None
+    last = bars[-1]
+    if str(last.dt) == str(item.get("last_m15_check") or ""):
+        return None
+    direction = 1 if item.get("side") == "LONG" else -1
+    needed = int(getattr(cfg, "LIQUIDITY_POST_SIGNAL_M15_COUNTER_BARS", 3))
+    tail = bars[-needed:]
+    if len(tail) < needed:
+        return None
+    opposite = all(((b.close < b.open) if direction > 0 else (b.close > b.open)) for b in tail)
+    if not opposite:
+        item["last_m15_check"] = str(last.dt)
+        return None
+    av = movement_progress.atr(bars, 14)
+    if av <= 0:
+        return None
+    # Net movement from the first counter candle open to latest close; wicks alone do not trigger it.
+    counter = max(0.0, ((tail[0].open - last.close) if direction > 0 else (last.close - tail[0].open)))
+    move_atr = counter / av
+    minimum = float(getattr(cfg, "LIQUIDITY_POST_SIGNAL_M15_MIN_ATR", 0.35))
+    if move_atr < minimum:
+        item["last_m15_check"] = str(last.dt)
+        return None
+    anchor = float(item.get("anchor") or 0)
+    invalidation = float(item.get("invalidation") or 0)
+    entry_cross = bool(anchor and ((last.close < anchor) if direction > 0 else (last.close > anchor)))
+    invalidation_risk = False
+    if invalidation:
+        distance = ((last.close - invalidation) if direction > 0 else (invalidation - last.close))
+        invalidation_risk = distance <= av * float(getattr(cfg, "LIQUIDITY_POST_SIGNAL_M15_STOP_NEAR_ATR", 0.25))
+    return {"dt": str(last.dt), "bars": needed, "move_atr": move_atr,
+            "entry_cross": entry_cross, "invalidation_risk": invalidation_risk}
+
+
 def _continuation_check(item: dict, by_tf: dict, strength: dict[str, float]) -> list[str]:
     wanted = 1 if item["side"] == "LONG" else -1
     problems = []
@@ -1316,6 +1372,8 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             continue
         h1_bar = h1[-1]
         new_h1 = h1_bar.dt != item.get("last_h1")
+        m15_risk = (_liquidity_m15_pullback_risk(item, by_tf)
+                    if getattr(cfg, "LIQUIDITY_POST_SIGNAL_M15_CONTROL_ENABLED", True) else None)
 
         # Цель является объективным касанием цены, поэтому ждать закрытия H1
         # нельзя: за один час цена способна пройти сразу TR1 и TR2. Берём все
@@ -1326,7 +1384,7 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         target_bars = [bar for bar in m5 if not checkpoint or bar.dt > checkpoint]
         if new_h1:
             target_bars.append(h1_bar)
-        if not target_bars and not new_h1:
+        if not target_bars and not new_h1 and not m15_risk:
             continue
         current_bar = target_bars[-1] if target_bars else h1_bar
         targets = item.get("targets") or [{"name": "TR1", "tf": item.get("target_tf"), "price": item.get("target")}]
@@ -1371,13 +1429,20 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
         reached_names = [targets[index]["name"] for index in range(reached_before, highest_reached)]
         next_target = targets[highest_reached] if highest_reached < len(targets) else targets[-1]
         problems = []
+        action = ""
+        if m15_risk and not reached and not invalid:
+            item["m15_counter_bars"] = m15_risk["bars"]
+            item["m15_counter_atr"] = round(float(m15_risk["move_atr"]), 2)
+            item["m15_entry_cross"] = bool(m15_risk["entry_cross"])
+            item["m15_invalidation_risk"] = bool(m15_risk["invalidation_risk"])
+            action = "M15_PULLBACK_RISK"
         if reached:
             if highest_reached >= len(targets):
                 action = "COMPLETE"
             else:
                 problems = _continuation_check(item, by_tf, strength or {})
                 action = "TARGET_RISK" if problems else "TARGET_CLEAR"
-        else:
+        elif not action:
             # Возврат к цене старта — обычный ретест, а не отмена. Без
             # структурной границы сценарий снимается только при согласованном
             # развороте H1 и M15.
@@ -1482,7 +1547,8 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                            "target_dt": current_bar.dt,
                            "progress": progress, "max_progress": progress,
                            "reached_count": highest_reached,
-                           "near_for": reached_before + 1}
+                           "near_for": reached_before + 1,
+                           "m15_dt": (m15_risk or {}).get("dt", "")}
         messages.append(message)
     state["pending_lifecycle"] = pending
     _save(state)
@@ -1499,6 +1565,8 @@ def mark_lifecycle_delivered(text: str) -> bool:
     item = active.get(event["symbol"])
     if item:
         item["last_h1"] = event["h1_dt"]
+        if event.get("m15_dt"):
+            item["last_m15_check"] = event["m15_dt"]
         item["last_target_dt"] = event.get("target_dt") or item.get("last_target_dt", "")
         item["last_progress"] = event["progress"]
         item["max_progress"] = max(int(item.get("max_progress") or 0),
