@@ -42,6 +42,25 @@ def _bucket(v):
     try:v=float(v)
     except (TypeError,ValueError):return '—'
     lo=int(v//10)*10; return f'{lo}–{min(100,lo+9)}'
+
+def _named_bucket(v, cuts, labels):
+    try:v=float(v)
+    except (TypeError,ValueError):return '—'
+    for i in range(len(cuts)-1):
+        if cuts[i] <= v < cuts[i+1]: return labels[i]
+    return labels[-1]
+
+def _metric_eff(sent,outcomes,extract,bucket):
+    groups=defaultdict(lambda:[0,0.0])
+    for d in sent:
+        o=outcomes.get(d.get('event_id'))
+        if not o: continue
+        val=extract(d)
+        name=bucket(val)
+        if name=='—': continue
+        groups[name][0]+=1; groups[name][1]+=float(o.get('efficiency_3h') or 0)
+    return ', '.join(f'{k}: n={v[0]}, eff={v[1]/v[0]*100:.0f}%' for k,v in groups.items()) or '—'
+
 def _report(day):
     decisions=[r for r in _read_jsonl(_journal()) if _local_date(r.get('recorded_utc'))==day]
     outcomes_all=_read_jsonl(_replay())
@@ -95,6 +114,10 @@ def _report(day):
             qb=_bucket(d['quality']); qcal[qb][0]+=1; qcal[qb][1]+=float(o.get('efficiency_3h') or 0)
     caltxt=', '.join(f'{k}: n={v[0]}, факт-eff {v[1]/v[0]*100:.0f}%' for k,v in sorted(cal.items())) or '—'
     qcaltxt=', '.join(f'{k}: n={v[0]}, факт-eff {v[1]/v[0]*100:.0f}%' for k,v in sorted(qcal.items())) or '—'
+    master_ranges=_metric_eff(sent,outcomes,lambda d:d.get('quality'),lambda v:_named_bucket(v,(0,78,81,85,101),('<78','78–80','81–84','85+','85+')))
+    killer_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('killer_score'),lambda v:_named_bucket(v,(0,84,87,91,101),('<84','84–86','87–90','91+','91+')))
+    progress_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('progress_pct'),lambda v:_named_bucket(v,(0,20,35,45,101),('0–19%','20–34%','35–44%','45%+','45%+')))
+    strength_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('directed_strength_gap'),lambda v:_named_bucket(v,(-99,0,.03,.05,.12,99),('<0','0–0.02','0.03–0.04','0.05–0.11','≥0.12','≥0.12')))
     family_counts=[int(((r.get('confirmation_families') or {}).get('independent_family_count') or 0)) for r in sent]
     source_counts=[int(((r.get('confirmation_families') or {}).get('source_count') or 0)) for r in sent]
     problems=[]
@@ -116,6 +139,8 @@ def _report(day):
       group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Regime',by_reg),group_line('Сессии',by_session),'',
       f'Блокировки: полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
+      f'Master ranges: {master_ranges}',f'KILLER ranges: {killer_ranges}',
+      f'Progress ranges: {progress_ranges}',f'Strength ranges: {strength_ranges}',
       (f'Подтверждения: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f}' if source_counts else 'Подтверждения: —'),
       f"Контроль: {'; '.join(problems)}",'',
       'Коррелированные подтверждения учитываются по семействам; число источников не трактуется как число независимых голосов.',

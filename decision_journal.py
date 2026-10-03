@@ -11,7 +11,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import config as cfg
 import market_state
-from analysis import closed_candles
+import numerical_parameter_registry
+from analysis import closed_candles, atr
 
 log=logging.getLogger('fxbot.decision_journal')
 TF_MIN={'W1':10080,'D1':1440,'H4':240,'H1':60,'M15':15,'M5':5}
@@ -79,6 +80,45 @@ def _append(rec):
   p=_path(); p.parent.mkdir(parents=True,exist_ok=True)
   with p.open('a',encoding='utf-8') as f: f.write(json.dumps(rec,ensure_ascii=False,separators=(',',':'))+'\n')
  except Exception: log.exception('DECISION_JOURNAL_WRITE_SKIPPED')
+def _calibration_metrics(text, by_tf, direction, ctx):
+ # Pure telemetry: calculations below cannot affect the caller's decision.
+ route=(ctx or {}).get('route') or {}
+ progress=(ctx or {}).get('progress')
+ h1=closed_candles((by_tf or {}).get('H1') or [],60)
+ av=atr(h1,int(getattr(cfg,'ATR_PERIOD',14))) if h1 else 0.0
+ current=float(h1[-1].close) if h1 else None
+ targets=(route or {}).get('targets') or []
+ tr1=None
+ if targets:
+  try: tr1=float(targets[0].get('price'))
+  except (TypeError,ValueError,AttributeError): tr1=None
+ remaining_atr=(abs(tr1-current)/av if tr1 is not None and current is not None and av>0 else None)
+ ohlc=(ctx or {}).get('ohlc') or {}
+ killer=_num(text,'Killer Score')
+ fam=None
+ m=re.search(r'Независимые семейства:\s*(\d+)',text or '',re.I)
+ if m: fam=int(m.group(1))
+ return {
+  'progress_pct':progress,
+  'remaining_to_tr1_atr':round(remaining_atr,3) if remaining_atr is not None else None,
+  'atr':round(av,8) if av else None,
+  'directed_strength_gap':(ctx or {}).get('directed_gap'),
+  'senior_agreement':(ctx or {}).get('senior_n'),
+  'junior_agreement':(ctx or {}).get('junior_n'),
+  'regime':(ctx or {}).get('regime'),
+  'movement_mode':(ctx or {}).get('mode'),
+  'ohlc_score':ohlc.get('score'),
+  'weak_reversal':bool((ctx or {}).get('weak_reversal')),
+  'killer_score':killer,
+  'killer_family_count':fam,
+  'pullback_depth':(ctx or {}).get('pullback_depth'),
+  'pullback_atr':(ctx or {}).get('pullback_atr'),
+  'pullback_retrace_pct':(ctx or {}).get('pullback_retrace'),
+  'pullback_entry_risk':(ctx or {}).get('pullback_entry_risk'),
+  'pullback_stop_risk':(ctx or {}).get('pullback_stop_risk'),
+  'pullback_reversal_threat':(ctx or {}).get('pullback_reversal_threat'),
+ }
+
 def _base(text,market,strength,status,reason='',allies=None,ctx=None):
  # local import avoids a circular import at module load
  import signal_context
@@ -99,6 +139,8 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
   'confirmation_price':_price(text,['Подтверждение','Закрытие','close']),
   'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text,ctx),
   'tf_snapshot':_freshness(by_tf),'context_gate':ctx or {},'market_state':snap,
+  'calibration':_calibration_metrics(text,by_tf,direction,ctx) if getattr(cfg,'NUMERICAL_CALIBRATION_ENABLED',True) else {},
+  'parameter_snapshot':numerical_parameter_registry.snapshot() if getattr(cfg,'NUMERICAL_CALIBRATION_ENABLED',True) else {},
   'strength_snapshot':{k:strength.get(k) for k in pair.split('/') if k in (strength or {})} if pair else {}}
 def record_decision(text,market,strength,status,reason='',allies=None,ctx=None):
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
