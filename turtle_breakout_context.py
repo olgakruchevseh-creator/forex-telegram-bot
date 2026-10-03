@@ -36,6 +36,11 @@ class TurtleBreakoutContext:
     reclaim_body_atr: float=0.0
     trap_quality: int=0
     acceptance_closes: int=0
+    wyckoff_test: bool=False
+    wyckoff_test_confirmed: bool=False
+    first_attempt_failed: bool=False
+    second_entry_ready: bool=False
+    lifecycle_note: str=""
     alignment: int=0
     score: int=50
     reason: str=""
@@ -97,9 +102,48 @@ def analyze_symbol(symbol, by_tf, direction):
     displacement=body>=av*float(getattr(cfg,"TURTLE_REENTRY_MIN_BODY_ATR",.45))
     reentry_ready=bool(reclaims>=2 and reclaim(last) and displacement and not invalidated)
 
+    # Wyckoff adaptation: after a Spring/Upthrust reclaim, require a later test
+    # that revisits the level without a fresh accepted break. This is context,
+    # not a new signal/family. The test is deliberately based on CLOSED bars.
+    prior_reclaim_i = next((i for i in range(len(look)-2, max(-1,len(look)-8), -1) if reclaim(look[i])), None)
+    wyckoff_test=False; wyckoff_test_confirmed=False
+    if prior_reclaim_i is not None and prior_reclaim_i < len(look)-1:
+        after=look[prior_reclaim_i+1:]
+        wyckoff_test=any(test(x) for x in after)
+        if wyckoff_test:
+            # Successful test: current close remains back on the reclaimed side
+            # and the test does not show two-close acceptance beyond the level.
+            recent=after[-2:]
+            accepted_after=sum(1 for x in recent if beyond(x))>=2
+            held=(last.close>level+tol if wanted=="SSL" else last.close<level-tol)
+            wyckoff_test_confirmed=bool(held and not accepted_after)
+
+    # Brooks adaptation: a first continuation attempt after reclaim may fail,
+    # but a second closed-candle attempt with displacement can restore quality.
+    # It is intentionally stricter than merely counting two reclaims.
+    first_attempt_failed=False; second_entry_ready=False
+    if prior_reclaim_i is not None and prior_reclaim_i <= len(look)-3:
+        post=look[prior_reclaim_i+1:]
+        if len(post)>=2:
+            first=post[0]
+            first_dir=(first.close-first.open)*natural
+            first_attempt_failed=bool(first_dir<=0 or abs(first.close-first.open)<av*.20)
+            second_dir=(last.close-last.open)*natural
+            second_entry_ready=bool(first_attempt_failed and wyckoff_test_confirmed and second_dir>0 and displacement and not invalidated)
+    lifecycle_note=("Wyckoff test подтверждён" if wyckoff_test_confirmed else
+                    "Wyckoff test наблюдается" if wyckoff_test else "")
+    if second_entry_ready:
+        lifecycle_note=(lifecycle_note+"; " if lifecycle_note else "")+"Brooks second entry подтверждён"
+
     if invalidated:
         state="ПРИНЯТИЕ ЦЕНЫ ЗА УРОВНЕМ"; align=-1 if d==natural else 1; score=28
         reason="два закрытия подтверждают acceptance; reversal-гипотеза отменена"
+    elif second_entry_ready:
+        state="ВТОРАЯ ПОПЫТКА ПОСЛЕ ЛОЖНОГО ПРОБОЯ"; align=1 if d==natural else -1; score=89
+        reason="reclaim удержан на Wyckoff test; первая попытка ослабла, вторая подтверждена displacement"
+    elif wyckoff_test_confirmed:
+        state="SPRING/UPTHRUST — TEST ПОДТВЕРЖДЁН"; align=1 if d==natural else -1; score=87
+        reason="после reclaim уровень повторно протестирован и удержан закрытой свечой"
     elif reentry_ready:
         state="ПОВТОРНЫЙ RECLAIM ПОДТВЕРЖДЁН"; align=1 if d==natural else -1; score=88
         reason="повторный reclaim + свежий displacement разрешают повторную оценку"
@@ -118,7 +162,7 @@ def analyze_symbol(symbol, by_tf, direction):
     else:
         state="ЗРЕЛЫЙ УРОВЕНЬ / ОЖИДАНИЕ" if mature else "УРОВЕНЬ / ОЖИДАНИЕ"; align=0; score=58 if mature else 52
         reason="контекст уровня сохранён; подтверждённого breakout lifecycle пока нет"
-    return TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,round(break_depth_atr,2),round(reclaim_body_atr,2),trap_quality,acceptance_closes,align,score,reason)
+    return TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,round(break_depth_atr,2),round(reclaim_body_atr,2),trap_quality,acceptance_closes,wyckoff_test,wyckoff_test_confirmed,first_attempt_failed,second_entry_ready,lifecycle_note,align,score,reason)
 
 def score_delta(ctx,direction):
     if not ctx:return 0
@@ -129,4 +173,4 @@ def describe(ctx):
     if not ctx.level:return f"Пробой/ложный пробой: {ctx.reason}"
     return (f"Пробой/ложный пробой: {ctx.state} · {ctx.source} {ctx.timeframe} · "
             f"тестов {ctx.attempts} · возвратов {ctx.reclaims} · зрелость {ctx.maturity_bars} бар · "
-            f"качество ловушки {ctx.trap_quality}/100 · глубина {ctx.break_depth_atr:.2f} ATR.")
+            f"качество ловушки {ctx.trap_quality}/100 · глубина {ctx.break_depth_atr:.2f} ATR" + (f" · {ctx.lifecycle_note}." if ctx.lifecycle_note else "."))

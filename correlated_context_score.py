@@ -9,6 +9,7 @@ from __future__ import annotations
 import inside_bar_context
 import auction_context
 import turtle_breakout_context
+import pattern_failure_context
 
 _FALSE_TURTLE={"ЛОЖНЫЙ ПРОБОЙ / RECLAIM","ЛОВУШКА ПРОБОЯ","TURTLE SOUP PLUS ONE","ПОВТОРНЫЙ RECLAIM ПОДТВЕРЖДЁН"}
 
@@ -22,15 +23,17 @@ def _same_false_break(inside_ctx, auction_ctx, turtle_ctx, direction:int)->bool:
         votes+=1
     return votes>=2
 
-def score(inside_ctx, auction_ctx, turtle_ctx, direction:int):
+def score(inside_ctx, auction_ctx, turtle_ctx, direction:int, pattern_failure_ctx=None):
     parts={
         "inside_bar":inside_bar_context.score_delta(inside_ctx,direction),
         "auction":auction_context.score_delta(auction_ctx,direction),
         "turtle":turtle_breakout_context.score_delta(turtle_ctx,direction),
     }
+    if pattern_failure_ctx is not None:
+        parts["pattern_failure"]=pattern_failure_context.score_delta(pattern_failure_ctx,direction)
     negatives=sum(v for v in parts.values() if v<0)
     positives=[v for v in parts.values() if v>0]
-    duplicate=_same_false_break(inside_ctx,auction_ctx,turtle_ctx,direction)
+    duplicate=_same_false_break(inside_ctx,auction_ctx,turtle_ctx,direction) or bool(pattern_failure_ctx and getattr(pattern_failure_ctx,"alignment",0)>0 and positives)
     # When >=2 layers describe the same false-break lifecycle, only the strongest
     # positive micro-confirmation counts. Contradictions remain additive.
     positive=(max(positives) if positives else 0) if duplicate else sum(positives)

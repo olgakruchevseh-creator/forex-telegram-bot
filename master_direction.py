@@ -35,6 +35,7 @@ import trading_intelligence_context
 import path_quality_context
 import decision_quality_context
 import turtle_breakout_context
+import pattern_failure_context
 import evidence_families
 import trade_lifecycle
 from analysis import PairStack, build_stack, split_pair
@@ -271,6 +272,7 @@ def analyze_symbol(
     path_ctx = path_quality_context.analyze_symbol(symbol, by_tf, side, alerts)
     decision_quality_ctx = decision_quality_context.analyze_symbol(symbol, by_tf, side)
     turtle_ctx = turtle_breakout_context.analyze_symbol(symbol, by_tf, side)
+    pattern_failure_ctx = pattern_failure_context.analyze_symbol(symbol, by_tf, side)
     # KILLER already applied the same book-context stack to become eligible.
     # Do not pay those coins again on the same pair/side.
     killer_already = any(
@@ -414,6 +416,8 @@ def analyze_symbol(
         "decision_quality_score": decision_quality_ctx.score if decision_quality_ctx else None,
         "turtle_breakout_context": turtle_breakout_context.describe(turtle_ctx),
         "turtle_breakout_score": turtle_ctx.score if turtle_ctx else None,
+        "pattern_failure_context": pattern_failure_context.describe(pattern_failure_ctx),
+        "pattern_failure_score": pattern_failure_ctx.score if pattern_failure_ctx else None,
         "auction_context": auction_context.describe(auction_ctx),
         "multi_tf_narrative": multi_tf_narrative.describe(narrative_ctx),
         "setup_memory": setup_memory.describe(setup_ctx),

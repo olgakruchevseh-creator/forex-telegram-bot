@@ -23,6 +23,7 @@ import market_maker_model
 import demand_supply_context
 import decision_quality_context
 import turtle_breakout_context
+import pattern_failure_context
 import next_pivot_projection
 import trade_lifecycle
 import news as newsmod
@@ -736,6 +737,10 @@ def _macro_horizon_lines(side: str, by_tf: dict, symbol: str = "") -> list[str]:
             notes.append("пробой/принятие цены против сценария сокращает горизонт")
         elif tc.alignment > 0:
             high = int(round(high * 1.10)); notes.append("breakout/reclaim-контекст поддерживает направление")
+
+    pf = pattern_failure_context.analyze_symbol(symbol, by_tf, direction) if symbol else None
+    if pf and pf.state == "ПРОВАЛ ПАТТЕРНА ПОДТВЕРЖДЁН":
+        notes.append(f"провал {pf.original_pattern} подтверждает {pf.failure_side}")
 
     # Keep estimates useful and bounded for an intraday FX system.
     low, high = max(4, min(low, 168)), max(low, min(high, 336))
