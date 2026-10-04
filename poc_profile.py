@@ -144,13 +144,19 @@ def _value_lifecycle(symbol: str, by_tf: dict, prof: Profile, m15: list[Candle],
     touched_now = cur.low <= ref+tol and cur.high >= ref-tol
     prior = m15[-int(getattr(cfg, "VALUE_RETEST_LOOKBACK", 6))-1:-1]
     prior_touches = sum(1 for c in prior if c.low <= ref+tol and c.high >= ref-tol)
+    retest_ready = prior_touches >= 1
     state = "CALCULATED"
     if dist <= float(getattr(cfg, "VALUE_APPROACH_ATR", .30)): state = "APPROACH"
     if touched_now: state = "FIRST_TOUCH" if prior_touches == 0 else "RETEST"
     side = 0
-    if touched_now and cur.close > ref+tol and cur.close > cur.open:
+    # First touch is observation only.  Acceptance/rejection may become directional
+    # only on a later interaction (retest), unless the conservative guard is
+    # explicitly disabled in config.
+    require_retest = bool(getattr(cfg, "VALUE_REQUIRE_RETEST", True))
+    reaction_ready = touched_now and (retest_ready or not require_retest)
+    if reaction_ready and cur.close > ref+tol and cur.close > cur.open:
         state, side = "ACCEPTANCE", 1
-    elif touched_now and cur.close < ref-tol and cur.close < cur.open:
+    elif reaction_ready and cur.close < ref-tol and cur.close < cur.open:
         state, side = "REJECTION", -1
     structure_ok = False
     structure_state = ""
@@ -167,6 +173,7 @@ def _value_lifecycle(symbol: str, by_tf: dict, prof: Profile, m15: list[Candle],
     return {"state": state, "reference": name, "reference_price": ref,
             "side": side, "structure_confirmed": structure_ok,
             "structure_state": structure_state, "distance_atr": dist,
+            "prior_touches": prior_touches, "retest_ready": retest_ready,
             "vwap_available": prof.vwap is not None, "vwap_source": prof.vwap_source}
 
 
@@ -193,8 +200,9 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     body = abs(cur.close-cur.open)
     min_body = av*float(getattr(cfg, "POC_CONFIRM_BODY_ATR", .22))
     touched = cur.low <= ref+tol and cur.high >= ref-tol
-    accept_long = touched and prev.close <= ref+tol and cur.close > ref+tol and cur.close > cur.open
-    reject_short = touched and prev.close >= ref-tol and cur.close < ref-tol and cur.close < cur.open
+    retest_ok = bool(lifecycle.get("retest_ready")) or not bool(getattr(cfg, "VALUE_REQUIRE_RETEST", True))
+    accept_long = retest_ok and touched and prev.close <= ref+tol and cur.close > ref+tol and cur.close > cur.open
+    reject_short = retest_ok and touched and prev.close >= ref-tol and cur.close < ref-tol and cur.close < cur.open
     if body < min_body or not (accept_long or reject_short):
         return None
     side = "LONG" if accept_long else "SHORT"
@@ -212,13 +220,18 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     distance = abs(cur.close-ref)/av
     if distance > float(getattr(cfg, "POC_MAX_ENTRY_DISTANCE_ATR", .65)):
         return None
-    quality = 72 + min(8, int(body/av*5)) + min(6, int(abs(gap)*25))
+    # Real VWAP close to POC is a bounded confluence only; never another vote.
+    value_confluence = False
+    if prof.vwap is not None:
+        value_confluence = abs(prof.vwap-prof.poc)/av <= float(getattr(cfg, "VALUE_POC_VWAP_CONFLUENCE_ATR", .20))
+    quality = 72 + min(8, int(body/av*5)) + min(6, int(abs(gap)*25)) + (3 if value_confluence else 0)
     if _bias("H1", h1) == wanted:
         quality += 5
     quality = min(94, quality)
     return {"symbol": symbol, "side": side, "poc": prof.poc, "val": prof.val, "vah": prof.vah,
             "close": cur.close, "dt": cur.dt, "gap": gap, "quality": quality,
             "value_reference": ref_name, "value_reference_price": ref,
+            "value_confluence": value_confluence,
             "confidence": max(60, min(90, quality-4)), "profile": prof, "lifecycle": lifecycle}
 
 
@@ -239,6 +252,8 @@ def format_message(e: dict) -> str:
         f"Опорная value-точка: {ref_name} · {_price(e['symbol'], e.get('value_reference_price', e['poc']))}",
         f"Реакция: {action}",
         f"Состояние value lifecycle: {e.get('lifecycle', {}).get('state', '—')}",
+        f"Ретест подтверждён: {'да' if e.get('lifecycle', {}).get('retest_ready') else 'нет'}",
+        f"VWAP + POC конфлюэнс: {'да' if e.get('value_confluence') else 'нет/недоступен'}",
         (f"VWAP: {_price(e['symbol'], e['profile'].vwap)} · источник: фактический volume провайдера"
          if e['profile'].vwap is not None else "VWAP: недоступен для текущих FX-свечей · поддельный volume не создаётся"),
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100",
@@ -292,6 +307,9 @@ def render_chart(e: dict, by_tf: dict):
     ax.axhspan(e["val"], e["vah"], alpha=.08)
     ax.axhline(e["poc"], linestyle="--", linewidth=1.4)
     ax.text(len(bars)-1, e["poc"], " POC", ha="right", va="bottom")
+    if e["profile"].vwap is not None:
+        ax.axhline(e["profile"].vwap, linestyle=":", linewidth=1.2)
+        ax.text(len(bars)-1, e["profile"].vwap, " VWAP", ha="right", va="top")
     ax.annotate(e["side"], (len(bars)-1, e["close"]), xytext=(-45, 20 if e["side"]=="LONG" else -28),
                 textcoords="offset points", arrowprops={"arrowstyle":"->"})
     ax.set_title(f"{e['symbol']} · POC · {e['side']} · M15")

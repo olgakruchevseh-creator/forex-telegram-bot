@@ -311,9 +311,17 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     if top <= bottom:
         return out
     top_n, bottom_n = top_slope / av, bottom_slope / av
-    tolerance = av * .05
-    breaks_up = previous.close <= top + tolerance and last.close > top + tolerance and _bull(last)
-    breaks_down = previous.close >= bottom - tolerance and last.close < bottom - tolerance and _bear(last)
+    # По референсам 2026-10-04 фигура сама по себе не равна направлению.
+    # Пробой должен быть именно сильным закрытым импульсом, а не тонким проколом
+    # границы. Ретест после BOS остаётся обязанностью существующего
+    # retest_confirmation.py и не дублируется здесь.
+    tolerance = av * float(getattr(cfg, "PATTERN_CHART_BREAK_BUFFER_ATR", .05))
+    min_break_body = av * float(getattr(cfg, "PATTERN_CHART_BREAK_MIN_BODY_ATR", .35))
+    body = _body(last)
+    breaks_up = (previous.close <= top + tolerance and last.close > top + tolerance
+                 and _bull(last) and body >= min_break_body)
+    breaks_down = (previous.close >= bottom - tolerance and last.close < bottom - tolerance
+                   and _bear(last) and body >= min_break_body)
     old_x = max(0, len(history)-18)
     old_top = top-top_slope*(len(history)-old_x)
     old_bottom = bottom-bottom_slope*(len(history)-old_x)

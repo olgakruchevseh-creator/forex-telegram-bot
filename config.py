@@ -386,6 +386,10 @@ POC_CHART_LOOKBACK = 72
 VALUE_LIFECYCLE_ENABLED = True
 VALUE_APPROACH_ATR = 0.30
 VALUE_RETEST_LOOKBACK = 6
+# Conservative lifecycle: first touch is context only; direction requires a later retest.
+VALUE_REQUIRE_RETEST = True
+# If real provider-volume VWAP exists and sits near POC, use only a small quality bonus.
+VALUE_POC_VWAP_CONFLUENCE_ATR = 0.20
 VALUE_REQUIRE_STRUCTURE_CONFIRM = True
 
 ORDER_BLOCK_ENABLED = True
@@ -486,6 +490,8 @@ PATTERN_MAIN_TFS = ["W1", "D1", "H4", "H1"]
 PATTERN_CONFIRM_TFS = ["M15", "M5"]
 PATTERN_CHART_IMAGES_ENABLED = True
 PATTERN_CHART_LOOKBACK = 55
+PATTERN_CHART_BREAK_BUFFER_ATR = 0.05
+PATTERN_CHART_BREAK_MIN_BODY_ATR = 0.35
 PATTERN_NEWS_BEFORE_MINUTES = 60
 PATTERN_NEWS_AFTER_MINUTES = 30
 # Structural pattern late-entry/residual-potential guard.
