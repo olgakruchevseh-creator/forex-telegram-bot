@@ -1,4 +1,8 @@
-"""Снятие ликвидности с последующим подтверждённым CHOCH/BOS на H1."""
+"""Снятие ликвидности: pool → sweep/reclaim → structure → PD-array confluence.
+
+FVG/Order Block здесь не являются отдельным голосом или самостоятельным сигналом:
+они только описывают качество реакции после уже подтверждённого liquidity+structure lifecycle.
+"""
 from __future__ import annotations
 from chart_snapshot import freeze_by_tf
 
@@ -138,6 +142,35 @@ def detect_new_sweep(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[C
     return max(choices,key=lambda x:x[0],default=(0,None))[1]
 
 
+def _pd_array_confluence(h1: list[Candle], m15: list[Candle], side: str, av: float) -> tuple[str, int]:
+    """Read-only FVG/OB confluence after structure confirmation.
+
+    It never creates direction and never vetoes an otherwise valid sweep. This keeps
+    Liquidity, Structure and PD-array evidence correlated instead of double-counted.
+    """
+    labels=[]
+    recent=m15[-12:] if len(m15)>=3 else []
+    # Confirmed three-candle imbalance in the same delivery direction.
+    for i in range(2,len(recent)):
+        a,c=recent[i-2],recent[i]
+        if side=="LONG" and c.low>a.high+av*.015:
+            labels.append("FVG"); break
+        if side=="SHORT" and c.high<a.low-av*.015:
+            labels.append("FVG"); break
+    # Last opposite H1 candle is an OB proxy; require current structure close to
+    # have moved away from its body in the expected direction.
+    if len(h1)>=3:
+        cur=h1[-1]
+        for c in reversed(h1[-8:-1]):
+            opposite=(c.close<c.open) if side=="LONG" else (c.close>c.open)
+            if not opposite: continue
+            lo,hi=sorted((c.open,c.close))
+            reacted=(cur.close>hi) if side=="LONG" else (cur.close<lo)
+            if reacted: labels.append("Order Block")
+            break
+    return (" + ".join(labels) if labels else "нет подтверждённой FVG/OB реакции", min(4,2*len(labels)))
+
+
 def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: list[Candle], strength: dict[str, float]) -> dict | None:
     if setup.sent or setup.invalid or len(h1) < 20 or not h4 or not m15:
         return None
@@ -177,12 +210,15 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
         return None
     # delivery commit is deferred until Telegram acknowledgement
     source_points = 8 if "дня" in setup.source else 5
-    quality = min(94, 72 + source_points + min(7, int(abs(current.close-current.open)/av*4)) + min(5, int(abs(gap)*30)))
+    pd_array, pd_bonus = _pd_array_confluence(h1, m15, setup.side, av)
+    quality = min(94, 72 + source_points + min(7, int(abs(current.close-current.open)/av*4)) + min(5, int(abs(gap)*30)) + pd_bonus)
+    lifecycle = "ПУЛ ЛИКВИДНОСТИ → SWEEP → ВОЗВРАТ → CHOCH/BOS → " + ("FVG/OB КОНФЛЮЭНС" if pd_bonus else "СТРУКТУРА ПОДТВЕРЖДЕНА")
     return {
         "symbol": setup.symbol, "side": setup.side, "source": setup.source,
         "level": setup.level, "sweep_price": setup.sweep_price,
         "confirm_level": setup.confirm_level, "close": current.close, "confirm_tf": confirm_tf,
         "gap": gap, "quality": quality, "confidence": min(90, quality-4),
+        "pd_array_confluence": pd_array, "pd_array_bonus": pd_bonus, "lifecycle": lifecycle,
     }
 
 
@@ -201,6 +237,8 @@ def format_message(event: dict) -> str:
         f"Уровень подтверждения CHOCH/BOS: {_price(event['symbol'], event['confirm_level'])}",
         f"Цена закрытия {event.get('confirm_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
         f"Подтверждение: более поздняя закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
+        f"Конфлюэнс после структуры: {event.get('pd_array_confluence', 'не оценён')}",
+        f"Lifecycle: {event.get('lifecycle', 'SWEEP → ВОЗВРАТ → CHOCH/BOS')}",
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
         f"✅ Факт: ликвидность {where} уровня снята, цена вернулась обратно и последующей закрытой {event.get('confirm_tf', 'H1')}-свечой подтвердила {event['side']}.",
