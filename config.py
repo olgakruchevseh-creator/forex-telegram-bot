@@ -935,3 +935,8 @@ WEEKLY_RHYTHM_CHART_IMAGES_ENABLED = True
 # This strengthens the existing liquidity family; it does not create a signal.
 ICT_ROUTE_REQUIRE_SOURCE_SWEEP_RECLAIM = True
 ICT_ROUTE_UNRECLAIMED_SOURCE_IS_CONFLICT = True
+
+# Liquidity post-event refinement (2026-10-04): context only, no new signal family.
+# FVG remains imbalance/PD-array context and is never promoted to a stop-liquidity pool.
+LIQUIDITY_BREAK_ACCEPTANCE_ENABLED = True
+LIQUIDITY_BREAK_RETEST_ENABLED = True

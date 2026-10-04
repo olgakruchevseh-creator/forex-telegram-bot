@@ -4,7 +4,7 @@ import liquidity_map
 from analysis import closed_candles
 @dataclass(frozen=True)
 class LiquidityNarrative:
-    direction:int; target_side:str; level:float; source:str; timeframe:str; status:str; distance_atr:float; confidence:int; obstacles:tuple=(); consumed:int=0
+    direction:int; target_side:str; level:float; source:str; timeframe:str; status:str; distance_atr:float; confidence:int; obstacles:tuple=(); consumed:int=0; hierarchy:str="LOCAL"; post_event:str="UNTOUCHED"
     def as_dict(self): return asdict(self)
 def analyze_symbol(symbol,by_tf,direction):
     direction=1 if direction in (1,'LONG') else -1 if direction in (-1,'SHORT') else 0
@@ -17,7 +17,7 @@ def analyze_symbol(symbol,by_tf,direction):
     confidence=max(35,min(90,48+p.rank*6-int(max(0,p.distance_atr-1)*4)))
     obstacles=tuple(f'{q.side}:{q.source}:{q.timeframe}' for q in sorted(liquidity_map.build_map(symbol,by_tf),key=lambda x:x.distance_atr) if q.status in ('intact','approached') and q.side!=wanted and q.distance_atr < p.distance_atr)[:3]
     consumed=sum(1 for q in liquidity_map.build_map(symbol,by_tf) if q.side==wanted and q.status in ('swept','reclaimed','invalidated'))
-    return LiquidityNarrative(direction,wanted,p.level,p.source,p.timeframe,p.status,round(p.distance_atr,3),confidence,obstacles,consumed)
+    return LiquidityNarrative(direction,wanted,p.level,p.source,p.timeframe,p.status,round(p.distance_atr,3),confidence,obstacles,consumed,getattr(p,"hierarchy","LOCAL"),getattr(p,"post_event","UNTOUCHED"))
 def describe(x):
     if not x:return 'Draw on Liquidity: данных недостаточно'
-    return f"Draw on Liquidity: {x.target_side} {x.level:.5f} · {x.source} {x.timeframe} · {x.distance_atr:.2f} ATR · {x.confidence}% · препятствий {len(x.obstacles)} · снято {x.consumed}"
+    return f"Draw on Liquidity: {x.target_side} {x.level:.5f} · {x.source} {x.timeframe} · {x.distance_atr:.2f} ATR · {x.hierarchy} · {x.post_event} · {x.confidence}% · препятствий {len(x.obstacles)} · снято {x.consumed}"

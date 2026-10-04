@@ -25,7 +25,9 @@ class LiquidityPool:
     zone_low:float|None=None
     zone_high:float|None=None
     family:str="LIQUIDITY_LEVELS"
-    liquidity_scope:str="EXTERNAL"  # BSL/SSL/EQH/EQL/PDH-PDL/Old High-Low are external pools
+    liquidity_scope:str="EXTERNAL"  # external stop pool; FVG is deliberately NOT a liquidity pool
+    hierarchy:str="LOCAL"           # HTF / STRUCTURAL / LOCAL
+    post_event:str="UNTOUCHED"      # UNTOUCHED / APPROACH / SWEEP_RECLAIM / BREAK_ACCEPTED / BREAK_RETESTED
 
 
 def _bars(by_tf,tf):
@@ -135,7 +137,19 @@ def build_map(symbol,by_tf):
                 elif any(c.low<lower for c in recent): status="swept"
         dist=abs(ref.close-level)/av
         if status=="intact" and abs(ref.close-level)<=approach: status="approached"
-        pools.append(LiquidityPool(side,level,source,tf,rank,status,dist,zone_low,zone_high))
+        hierarchy="HTF" if tf in ("W1","D1","H4") or source.startswith("previous-day") else ("STRUCTURAL" if rank>=3 else "LOCAL")
+        post_event=("SWEEP_RECLAIM" if status=="reclaimed" else "BREAK_ACCEPTED" if status=="invalidated" else "APPROACH" if status=="approached" else "UNTOUCHED")
+        # A confirmed close through the pool is acceptance, not a sweep/reversal.
+        # If price later retests the broken level from the far side and holds, mark it separately.
+        if post_event=="BREAK_ACCEPTED" and recent:
+            upper=zone_high if zone_high is not None else level; lower=zone_low if zone_low is not None else level
+            if side=="BSL":
+                broke=next((i for i,c in enumerate(recent) if c.close>upper+tol),None)
+                if broke is not None and any(c.low<=upper+approach and c.close>upper for c in recent[broke+1:]): post_event="BREAK_RETESTED"
+            else:
+                broke=next((i for i,c in enumerate(recent) if c.close<lower-tol),None)
+                if broke is not None and any(c.high>=lower-approach and c.close<lower for c in recent[broke+1:]): post_event="BREAK_RETESTED"
+        pools.append(LiquidityPool(side,level,source,tf,rank,status,dist,zone_low,zone_high,"LIQUIDITY_LEVELS","EXTERNAL",hierarchy,post_event))
     return pools
 
 
