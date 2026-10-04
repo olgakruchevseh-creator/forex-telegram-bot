@@ -378,6 +378,13 @@ POC_MIN_STRENGTH_GAP = 0.04
 POC_MAX_ENTRY_DISTANCE_ATR = 0.65
 POC_CHART_IMAGES_ENABLED = True
 POC_CHART_LOOKBACK = 72
+# VWAP/POC lifecycle. A true VWAP is used ONLY when the provider supplies
+# positive volume for the actual candles. Physical FX Twelve Data normally
+# supplies OHLC without volume, so the bot must not manufacture a fake VWAP.
+VALUE_LIFECYCLE_ENABLED = True
+VALUE_APPROACH_ATR = 0.30
+VALUE_RETEST_LOOKBACK = 6
+VALUE_REQUIRE_STRUCTURE_CONFIRM = True
 
 ORDER_BLOCK_ENABLED = True
 ORDER_BLOCK_PIVOT_BARS = 3

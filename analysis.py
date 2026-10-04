@@ -14,6 +14,9 @@ class Candle:
     high: float
     low: float
     close: float
+    # Optional provider volume. Physical FX from Twelve Data normally has no volume;
+    # keep None rather than manufacturing tick/exchange volume.
+    volume: float | None = None
 
 
 @dataclass

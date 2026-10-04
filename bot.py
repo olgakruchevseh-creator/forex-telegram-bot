@@ -127,7 +127,7 @@ def save_state(state: dict) -> None:
 
 def _parse_values(values: list) -> list[Candle]:
     candles = [
-        Candle(dt=v["datetime"], open=float(v["open"]), high=float(v["high"]), low=float(v["low"]), close=float(v["close"]))
+        Candle(dt=v["datetime"], open=float(v["open"]), high=float(v["high"]), low=float(v["low"]), close=float(v["close"]), volume=(float(v["volume"]) if v.get("volume") not in (None, "", "null") else None))
         for v in values or []
     ]
     candles.sort(key=lambda x: x.dt)

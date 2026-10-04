@@ -58,6 +58,8 @@ class Profile:
     step: float
     bins: list[float]
     weights: list[float]
+    vwap: float | None = None
+    vwap_source: str = "UNAVAILABLE"
 
 
 def _bars(by_tf: dict, tf: str) -> list[Candle]:
@@ -99,8 +101,18 @@ def _profile(bars: list[Candle], bins_n: int = 48, value_area: float = .70) -> P
             chosen.add(right); acc += rw; right += 1
         else:
             chosen.add(left); acc += lw; left -= 1
+    # True volume-weighted average only when the provider really supplied volume.
+    # For physical FX Twelve Data normally does not, so vwap remains None.
+    vb = [(c, float(c.volume)) for c in bars if getattr(c, "volume", None) is not None and float(c.volume) > 0]
+    vwap = None
+    source = "UNAVAILABLE"
+    if len(vb) >= max(10, int(len(bars) * .80)):
+        den = sum(v for _, v in vb)
+        if den > 0:
+            vwap = sum(((c.high + c.low + c.close) / 3.0) * v for c, v in vb) / den
+            source = "PROVIDER_VOLUME"
     return Profile(centers[p], min(centers[i] for i in chosen)-step/2,
-                   max(centers[i] for i in chosen)+step/2, step, centers, w)
+                   max(centers[i] for i in chosen)+step/2, step, centers, w, vwap, source)
 
 
 def _bias(tf: str, bars: list[Candle]) -> int:
@@ -113,6 +125,49 @@ def _strength_ok(symbol: str, side: str, strength: dict[str, float]) -> tuple[bo
     gap = strength.get(base, 0.0)-strength.get(quote, 0.0)
     need = float(getattr(cfg, "POC_MIN_STRENGTH_GAP", .04))
     return (gap >= need if side == "LONG" else gap <= -need), gap
+
+
+def _value_lifecycle(symbol: str, by_tf: dict, prof: Profile, m15: list[Candle], av: float) -> dict:
+    """Classify value interaction without inventing direction from a touch.
+
+    CALCULATED -> APPROACH -> FIRST_TOUCH -> RETEST -> ACCEPTANCE/REJECTION ->
+    STRUCTURE_CONFIRMED. Direction exists only after closed-candle reaction and
+    structure agreement.
+    """
+    cur = m15[-1]
+    refs = [("POC", prof.poc)]
+    if prof.vwap is not None:
+        refs.append(("VWAP", prof.vwap))
+    name, ref = min(refs, key=lambda x: abs(cur.close-x[1]))
+    dist = abs(cur.close-ref) / max(av, 1e-12)
+    tol = max(prof.step*1.25, av*float(getattr(cfg, "POC_TOUCH_ATR", .12)))
+    touched_now = cur.low <= ref+tol and cur.high >= ref-tol
+    prior = m15[-int(getattr(cfg, "VALUE_RETEST_LOOKBACK", 6))-1:-1]
+    prior_touches = sum(1 for c in prior if c.low <= ref+tol and c.high >= ref-tol)
+    state = "CALCULATED"
+    if dist <= float(getattr(cfg, "VALUE_APPROACH_ATR", .30)): state = "APPROACH"
+    if touched_now: state = "FIRST_TOUCH" if prior_touches == 0 else "RETEST"
+    side = 0
+    if touched_now and cur.close > ref+tol and cur.close > cur.open:
+        state, side = "ACCEPTANCE", 1
+    elif touched_now and cur.close < ref-tol and cur.close < cur.open:
+        state, side = "REJECTION", -1
+    structure_ok = False
+    structure_state = ""
+    if side:
+        try:
+            import structure_context
+            sc = structure_context.analyze_symbol(symbol, by_tf, side)
+            structure_state = sc.state
+            structure_ok = bool(sc.side == side and sc.state in {"CONFIRMED", "SHIFT_CONFIRMED"})
+        except Exception:
+            log.exception("VALUE_STRUCTURE_CONTEXT_FAILED symbol=%s", symbol)
+    if side and structure_ok:
+        state = "STRUCTURE_CONFIRMED"
+    return {"state": state, "reference": name, "reference_price": ref,
+            "side": side, "structure_confirmed": structure_ok,
+            "structure_state": structure_state, "distance_atr": dist,
+            "vwap_available": prof.vwap is not None, "vwap_source": prof.vwap_source}
 
 
 def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
@@ -128,6 +183,7 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     av = atr(m15, 14)
     if av <= 0:
         return None
+    lifecycle = _value_lifecycle(symbol, by_tf, prof, m15, av)
     tol = max(prof.step*1.25, av*float(getattr(cfg, "POC_TOUCH_ATR", .12)))
     body = abs(cur.close-cur.open)
     min_body = av*float(getattr(cfg, "POC_CONFIRM_BODY_ATR", .22))
@@ -138,6 +194,10 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
         return None
     side = "LONG" if reclaim_long else "SHORT"
     wanted = 1 if side == "LONG" else -1
+    # A value touch/reclaim is context, never a standalone direction.
+    if getattr(cfg, "VALUE_REQUIRE_STRUCTURE_CONFIRM", True):
+        if lifecycle.get("side") != wanted or not lifecycle.get("structure_confirmed"):
+            return None
     # POC confirms acceptance/rejection; it does not override opposite H4 context.
     if _bias("H4", h4) == -wanted or _bias("M15", m15) != wanted:
         return None
@@ -153,7 +213,7 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     quality = min(94, quality)
     return {"symbol": symbol, "side": side, "poc": prof.poc, "val": prof.val, "vah": prof.vah,
             "close": cur.close, "dt": cur.dt, "gap": gap, "quality": quality,
-            "confidence": max(60, min(90, quality-4)), "profile": prof}
+            "confidence": max(60, min(90, quality-4)), "profile": prof, "lifecycle": lifecycle}
 
 
 def _price(symbol: str, v: float) -> str:
@@ -168,6 +228,9 @@ def format_message(e: dict) -> str:
         "Профиль: H1 · закрытые свечи", f"POC: {_price(e['symbol'], e['poc'])}",
         f"Value Area: {_price(e['symbol'], e['val'])}–{_price(e['symbol'], e['vah'])}",
         f"Закрытие M15: {_price(e['symbol'], e['close'])}", f"Реакция: {action}",
+        f"Состояние value lifecycle: {e.get('lifecycle', {}).get('state', '—')}",
+        (f"VWAP: {_price(e['symbol'], e['profile'].vwap)} · источник: фактический volume провайдера"
+         if e['profile'].vwap is not None else "VWAP: недоступен для текущих FX-свечей · поддельный volume не создаётся"),
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100",
         f"Вероятность: {e['confidence']}%", "",
         "✅ Факт: закрытая M15 подтвердила реакцию у POC; H4 не противоречит направлению.",
