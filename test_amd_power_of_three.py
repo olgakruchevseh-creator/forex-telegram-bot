@@ -4,6 +4,7 @@ import os
 import tempfile
 import io
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import amd_power_of_three as amd
 from analysis import Candle
@@ -104,6 +105,30 @@ class AmdPowerOfThreeTests(unittest.TestCase):
         }
         amd._PENDING_CARDS["карточка"] = (event, {"H1": h1})
         self.assertIsNotNone(amd.image_for_alert("карточка"))
+
+    def test_runtime_requires_existing_structure_confirmation(self):
+        h1 = bullish_model()
+        other = [range_bar(i) for i in range(25)]
+        by_tf = {"H1": h1, "H4": other, "M15": other}
+        with patch.object(amd, "atr", return_value=.25), \
+             patch.object(amd, "_bias", side_effect=lambda tf, _bars: 1), \
+             patch.object(amd.choch, "analyze_symbol", return_value=None), \
+             patch.object(amd.mss, "analyze_symbol", return_value=None):
+            self.assertIsNone(amd.detect_amd("EUR/USD", h1, other, other, {"EUR": .10, "USD": 0}, by_tf))
+
+    def test_runtime_accepts_aligned_choch(self):
+        h1 = bullish_model()
+        other = [range_bar(i) for i in range(25)]
+        by_tf = {"H1": h1, "H4": other, "M15": other}
+        ctx = SimpleNamespace(alignment=1, timeframe="M15", level=101.0)
+        with patch.object(amd, "atr", return_value=.25), \
+             patch.object(amd, "_bias", side_effect=lambda tf, _bars: 1), \
+             patch.object(amd.choch, "analyze_symbol", return_value=ctx), \
+             patch.object(amd.mss, "analyze_symbol", return_value=None):
+            event = amd.detect_amd("EUR/USD", h1, other, other, {"EUR": .10, "USD": 0}, by_tf)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["structure_name"], "CHoCH")
+        self.assertEqual(event["lifecycle"], "ЭКСПАНСИЯ")
 
 
 if __name__ == "__main__":

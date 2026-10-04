@@ -11,6 +11,8 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+import choch
+import mss
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.amd")
@@ -74,6 +76,7 @@ def detect_amd(
     h4: list[Candle],
     m15: list[Candle],
     strength: dict[str, float],
+    by_tf: dict | None = None,
 ) -> dict | None:
     range_n = int(getattr(cfg, "AMD_RANGE_BARS", 20))
     max_age = int(getattr(cfg, "AMD_MAX_MANIPULATION_AGE_BARS", 6))
@@ -145,6 +148,29 @@ def detect_amd(
         strength_ok, gap = _strength(symbol, side, strength)
         if not strength_ok:
             continue
+
+        # Последние PO3-правила: sweep и возврат внутрь диапазона — это ещё
+        # только манипуляция. Финальная AMD-модель разрешена лишь после
+        # подтверждённой структурной смены существующими CHoCH/MSS-движками.
+        structure_name = "совместимый режим"
+        structure_tf = exit_tf
+        structure_level = broken
+        if by_tf is not None:
+            choch_ctx = choch.analyze_symbol(symbol, by_tf, wanted)
+            mss_ctx = mss.analyze_symbol(symbol, by_tf, wanted)
+            aligned = []
+            if choch_ctx is not None and choch_ctx.alignment > 0:
+                aligned.append(("CHoCH", choch_ctx.timeframe, choch_ctx.level))
+            if mss_ctx is not None and mss_ctx.alignment > 0:
+                aligned.append(("MSS", mss_ctx.timeframe, mss_ctx.level))
+            opposed = ((choch_ctx is not None and choch_ctx.alignment < 0) or
+                       (mss_ctx is not None and mss_ctx.alignment < 0))
+            if opposed or not aligned:
+                continue
+            structure_name, structure_tf, structure_level = max(
+                aligned, key=lambda item: {"H1": 3, "M15": 2, "M5": 1}.get(item[1], 0)
+            )
+
         quality = 74
         quality += min(8, touches_low + touches_high)
         quality += min(6, int(abs(exit_bar.close-exit_bar.open) / av * 3))
@@ -164,6 +190,9 @@ def detect_amd(
             "touches_low": touches_low, "touches_high": touches_high,
             "gap": gap, "quality": quality, "confidence": min(91, quality - 4),
             "age_h1": age_h1, "extension_atr": extension_atr, "late": late,
+            "reclaim_confirmed": True, "structure_confirmed": True,
+            "structure_name": structure_name, "structure_tf": structure_tf,
+            "structure_level": structure_level, "lifecycle": "ЭКСПАНСИЯ",
         })
     return max(candidates, key=lambda x: (not x["late"], x["quality"], x["manipulation_dt"]), default=None)
 
@@ -182,12 +211,15 @@ def format_message(event: dict) -> str:
         f"Направление: {event['side']} {icon}",
         f"📦 Накопление: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"🧹 Манипуляция: снятие {swept} границы до {_price(event['symbol'], event['manipulation'])}",
-        f"⚡ Подтверждённый выход: за пределы {opposite} границы {_price(event['symbol'], event['broken'])}",
+        f"↩️ Возврат/закрепление: ПОДТВЕРЖДЕНО внутри диапазона после sweep",
+        f"🧭 Структура: {event.get('structure_name', 'CHoCH/MSS/BOS')} {event.get('structure_tf', event.get('exit_tf', 'H1'))} ПОДТВЕРЖДЕНА",
+        f"⚡ Экспансия: выход за {opposite} границу {_price(event['symbol'], event['broken'])}",
         f"💵 Цена подтверждения {event.get('exit_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
-        "Согласование: закрытая M15/H1; H4 не противоречит",
+        "Согласование: sweep → возврат → структура → закрытый выход; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
-        f"✅ Факт: после накопления цена сняла ликвидность за {swept} границей, вернулась и закрытой {event.get('exit_tf', 'H1')}-свечой подтвердила ранний выход {event['side']}.",
+        f"Состояние: {event.get('lifecycle', 'ЭКСПАНСИЯ')}", "",
+        f"✅ Факт: после накопления цена сняла ликвидность за {swept} границей, вернулась в диапазон, подтвердила структуру и только затем перешла в экспансию {event['side']}.",
     ])
 
 
@@ -279,7 +311,7 @@ def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str
         return "ФАЗА НЕ ПОДТВЕРЖДЕНА"
 
     # Полная модель имеет высший приоритет: накопление -> sweep -> выход.
-    completed = detect_amd(symbol, h1, h4, m15, strength)
+    completed = detect_amd(symbol, h1, h4, m15, strength, by_tf)
     if completed:
         if completed.get("late"):
             return (f"ПОЗДНЯЯ СТАДИЯ {completed['side']} · ОСНОВНАЯ ЧАСТЬ ИМПУЛЬСА УЖЕ ПРОЙДЕНА · "
@@ -303,7 +335,7 @@ def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str
         if swept_low != swept_high:
             side = "LONG" if swept_low else "SHORT"
             edge = "НИЖНЯЯ" if swept_low else "ВЕРХНЯЯ"
-            manipulations.append((j, f"МАНИПУЛЯЦИЯ: СНЯТА {edge} ГРАНИЦА · СЦЕНАРИЙ {side} ЕЩЁ НЕ ПОДТВЕРЖДЁН"))
+            manipulations.append((j, f"SWEEP ПОДТВЕРЖДЁН: СНЯТА {edge} ГРАНИЦА И ВОЗВРАТ В ДИАПАЗОН · СЦЕНАРИЙ {side} ЕЩЁ НЕ ПОДТВЕРЖДЁН"))
     if manipulations:
         return max(manipulations, key=lambda item: item[0])[1]
 
@@ -316,12 +348,12 @@ def briefing_status(symbol: str, by_tf: dict, strength: dict[str, float]) -> str
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
-    if int(state.get("logic_version") or 0) != 3:
+    if int(state.get("logic_version") or 0) != 4:
         # Старый pending содержал только ключ и не позволял восстановить
         # карточку/картинку после перезапуска. Историю доставленных сохраняем.
         state.setdefault("sent", {})
         state["pending"] = {}
-        state["logic_version"] = 3
+        state["logic_version"] = 4
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
     pending = state.setdefault("pending", {})
@@ -350,7 +382,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
             h4 = closed_candles(by_tf.get("H4") or [], TF_MINUTES["H4"])
             m15 = closed_candles(by_tf.get("M15") or [], TF_MINUTES["M15"])
-            event = detect_amd(symbol, h1, h4, m15, strength)
+            event = detect_amd(symbol, h1, h4, m15, strength, by_tf)
             # Запоздалый AMD остаётся информационным статусом брифинга и не
             # передаётся Навигатору как новая торговая возможность.
             if (not event or event.get("late") or event["key"] in sent
