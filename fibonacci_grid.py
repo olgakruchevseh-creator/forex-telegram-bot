@@ -84,6 +84,15 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         level_50 = end.price + move * .50
         level_618 = end.price + move * .618
     zone_low, zone_high = sorted((level_50, level_618))
+    retrace_ratios = (.236, .382, .50, .618, .705, .786, .85)
+    extension_ratios = (1.618, 2.618, 3.618, 4.236)
+    if side == "LONG":
+        fib_levels = {r: end.price - move * r for r in retrace_ratios}
+        fib_extensions = {r: start.price + move * r for r in extension_ratios}
+    else:
+        fib_levels = {r: end.price + move * r for r in retrace_ratios}
+        fib_extensions = {r: start.price - move * r for r in extension_ratios}
+    deep_zone = sorted((fib_levels[.786], fib_levels[.85]))
     current = h1[-1]
     body = abs(current.close - current.open)
     body_ok = body >= av * float(getattr(cfg, "FIBONACCI_REACTION_BODY_ATR", .30))
@@ -112,6 +121,10 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         "key": f"{symbol}|{side}|{h1[end.index].dt}|{end.price:.6f}",
         "symbol": symbol, "side": side, "low": zone_low, "high": zone_high,
         "level_50": level_50, "level_618": level_618, "close": current.close,
+        "fib_levels": fib_levels, "fib_extensions": fib_extensions,
+        "ote_low": min(fib_levels[.618], fib_levels[.786]),
+        "ote_high": max(fib_levels[.618], fib_levels[.786]),
+        "ote_reference": fib_levels[.705], "deep_low": deep_zone[0], "deep_high": deep_zone[1],
         "impulse_start": start.price, "impulse_end": end.price,
         "impulse_start_dt": h1[start.index].dt, "impulse_end_dt": h1[end.index].dt,
         "reaction_dt": current.dt,
@@ -131,6 +144,9 @@ def format_message(event: dict) -> str:
         f"Зона коррекции 50–61.8%: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"Уровень 50%: {_price(event['symbol'], event['level_50'])}",
         f"Уровень 61.8%: {_price(event['symbol'], event['level_618'])}",
+        f"OTE 61.8–78.6%: {_price(event['symbol'], event['ote_low'])}–{_price(event['symbol'], event['ote_high'])} · опорный 70.5%: {_price(event['symbol'], event['ote_reference'])}",
+        f"Глубокий откат 78.6–85%: {_price(event['symbol'], event['deep_low'])}–{_price(event['symbol'], event['deep_high'])}",
+        "Цели расширения: " + " · ".join(f"{r:.3f}={_price(event['symbol'], p)}" for r, p in event['fib_extensions'].items()),
         f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
         "Подтверждение: H1 · M15", f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",

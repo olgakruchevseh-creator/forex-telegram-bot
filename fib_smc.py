@@ -159,7 +159,8 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
         return None
 
     fib_a = float(getattr(cfg, "FIB_SMC_RETRACE_MIN", .50))
-    fib_b = float(getattr(cfg, "FIB_SMC_RETRACE_MAX", .705))
+    fib_b = float(getattr(cfg, "FIB_SMC_RETRACE_MAX", .786))
+    fib_ref = float(getattr(cfg, "FIB_SMC_OTE_REFERENCE", .705))
     if side == "LONG":
         l1, l2 = end.price-move*fib_a, end.price-move*fib_b
     else:
@@ -193,7 +194,7 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
     return {
         "key": f"{symbol}|{side}|{h1[end.index].dt}|{end.price:.6f}|{m15[-1].dt}",
         "symbol": symbol, "side": side, "zone_low": zone_low, "zone_high": zone_high,
-        "fib_min": fib_a, "fib_max": fib_b, "impulse_start": start.price, "impulse_end": end.price,
+        "fib_min": fib_a, "fib_max": fib_b, "fib_reference": fib_ref, "impulse_start": start.price, "impulse_end": end.price,
         "impulse_start_dt": h1[start.index].dt, "impulse_end_dt": h1[end.index].dt,
         "confirm_dt": m15[-1].dt, "close": m15[-1].close, "bos_level": bos_level,
         "ob_ok": ob_ok, "ob_low": ob_low, "ob_high": ob_high, "smc_zone": smc_zone,
@@ -215,7 +216,8 @@ def format_message(e: dict) -> str:
         "━━━━━━━━━━━━━━━━━━", f"🧬 FIB + SMC — {e['side']} ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {e['symbol']}", f"Направление: {e['side']}",
         "Импульс: H1 · подтверждение: M15 + M5",
-        f"Fib-зона {e['fib_min']*100:.1f}–{e['fib_max']*100:.1f}%: {_price(e['symbol'], e['zone_low'])}–{_price(e['symbol'], e['zone_high'])}",
+        f"OTE-зона {e['fib_min']*100:.1f}–{e['fib_max']*100:.1f}%: {_price(e['symbol'], e['zone_low'])}–{_price(e['symbol'], e['zone_high'])}",
+        f"Опорный уровень OTE: {e.get('fib_reference', .705)*100:.1f}%",
         f"SMC-подтверждение: {' + '.join(smc)}",
         f"BOS/CHOCH M15: {_price(e['symbol'], e['bos_level'])}",
         f"Цена подтверждения: {_price(e['symbol'], e['close'])}",

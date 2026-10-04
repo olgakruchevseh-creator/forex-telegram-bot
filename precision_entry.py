@@ -107,7 +107,7 @@ def analyze(pair: str, side: str, by_tf: dict, texts: list[str] | None) -> Preci
     move=abs(float(end.price)-float(start.price))
     if move < av*float(getattr(cfg,"PRECISION_ENTRY_MIN_IMPULSE_ATR",1.2)):
         return PrecisionEntryContext(side=side,price=price,reason="impulse_too_small")
-    lo_r=float(getattr(cfg,"PRECISION_ENTRY_OTE_MIN",.62)); hi_r=float(getattr(cfg,"PRECISION_ENTRY_OTE_MAX",.79))
+    lo_r=float(getattr(cfg,"PRECISION_ENTRY_OTE_MIN",.618)); hi_r=float(getattr(cfg,"PRECISION_ENTRY_OTE_MAX",.786))
     if side=="LONG":
         ote=sorted((float(end.price)-move*lo_r,float(end.price)-move*hi_r))
     else:
