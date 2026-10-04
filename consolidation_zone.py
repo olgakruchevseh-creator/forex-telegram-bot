@@ -40,6 +40,11 @@ class Zone:
     breakout_dt: str = ""
     breakout_price: float = 0.0
     reset_epoch: int = 0
+    liquidity_lifecycle: str = "STANDARD_BREAKOUT"
+    liquidity_source: str = ""
+    sweep_price: float = 0.0
+    reclaim_dt: str = ""
+    retest_dt: str = ""
 
 
 def _path() -> Path:
@@ -140,6 +145,47 @@ def _refresh_broken_state(zone: Zone, by_tf: dict) -> None:
         zone.last_dt = bars[-1].dt
 
 
+
+def _liquidity_lifecycle(zone: Zone, by_tf: dict, wanted: int):
+    """Recognise the ICT box lifecycle without creating a new signal family.
+
+    LONG: EQL/SSL-like lower-edge sweep -> close back in box -> retest/hold -> upper expansion.
+    SHORT mirrors this from EQH/BSL at the upper edge. Only CLOSED M15 candles are used.
+    The box edge itself is treated as the local EQH/EQL pool; liquidity_map remains the
+    authoritative map for broader external pools.
+    """
+    bars = _bars(by_tf, "M15")
+    if len(bars) < 8:
+        return None
+    av = atr(bars, 14) or max(zone.high-zone.low, 1e-12)
+    tol = av * float(getattr(cfg, "CONSOLIDATION_LIQUIDITY_EDGE_TOL_ATR", 0.12))
+    lookback = bars[-int(getattr(cfg, "CONSOLIDATION_LIQUIDITY_LOOKBACK_M15", 24)):]
+    # exclude the current breakout candle; lifecycle must pre-exist expansion
+    hist = lookback[:-1]
+    if wanted > 0:
+        sweeps=[(i,c) for i,c in enumerate(hist) if c.low < zone.low-tol and c.close > zone.low]
+        source="EQL/SSL нижней границы"
+    else:
+        sweeps=[(i,c) for i,c in enumerate(hist) if c.high > zone.high+tol and c.close < zone.high]
+        source="EQH/BSL верхней границы"
+    if not sweeps:
+        return None
+    si, sw = sweeps[-1]
+    after=hist[si+1:]
+    if not after:
+        return None
+    # Reclaim is already encoded by sweep candle close; require a later closed candle
+    # to hold/retest the swept edge instead of treating the wick itself as confirmation.
+    if wanted > 0:
+        retests=[c for c in after if c.low <= zone.low+tol and c.close >= zone.low]
+        sweep_price=sw.low
+    else:
+        retests=[c for c in after if c.high >= zone.high-tol and c.close <= zone.high]
+        sweep_price=sw.high
+    if not retests:
+        return None
+    return {"source":source,"sweep_price":sweep_price,"reclaim_dt":sw.dt,"retest_dt":retests[-1].dt}
+
 def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool:
     bars = _bars(by_tf, "M15")
     if len(bars) < 20:
@@ -174,6 +220,20 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
     need = float(getattr(cfg, "CONSOLIDATION_MIN_STRENGTH_GAP", 0.05))
     if (wanted > 0 and gap < need) or (wanted < 0 and gap > -need):
         return False
+    lifecycle = _liquidity_lifecycle(zone, by_tf, wanted)
+    if lifecycle:
+        zone.liquidity_lifecycle = "SWEEP_RECLAIM_RETEST_EXPANSION"
+        zone.liquidity_source = lifecycle["source"]
+        zone.sweep_price = lifecycle["sweep_price"]
+        zone.reclaim_dt = lifecycle["reclaim_dt"]
+        zone.retest_dt = lifecycle["retest_dt"]
+        zone.quality = min(100, zone.quality + int(getattr(cfg, "CONSOLIDATION_LIQUIDITY_LIFECYCLE_BONUS", 3)))
+    else:
+        zone.liquidity_lifecycle = "STANDARD_BREAKOUT"
+        zone.liquidity_source = ""
+        zone.sweep_price = 0.0
+        zone.reclaim_dt = ""
+        zone.retest_dt = ""
     og = ohlc_movement.guard_event(by_tf, side, zone.quality)
     if not og.get("allow", True): return False
     zone.quality = og.get("quality", zone.quality)
@@ -197,6 +257,11 @@ def format_message(zone: Zone) -> str:
         f"Касания границ: {zone.touches_low}/{zone.touches_high}",
         f"Ширина: {zone.width_atr:.2f} ATR", f"Качество зоны: {zone.quality}/100",
         "Подтверждение: закрытая M15 + согласование минимум 2/3 H1/M15/M5 + сила валют",
+        *([f"Ликвидность: {zone.liquidity_source}",
+           f"Цепочка: SWEEP → ВОЗВРАТ → РЕТЕСТ → ЭКСПАНСИЯ",
+           f"Экстремум Sweep: {_price(zone.symbol, zone.sweep_price)}",
+           f"Возврат: {zone.reclaim_dt} · ретест: {zone.retest_dt}"]
+          if zone.liquidity_lifecycle == "SWEEP_RECLAIM_RETEST_EXPANSION" else []),
         f"Цена выхода: {_price(zone.symbol, zone.breakout_price)}",
         f"Свеча подтверждения: {zone.breakout_dt}", "",
         f"Факт: подтверждённый выход {zone.breakout_side} из ранее зафиксированной зоны консолидации."

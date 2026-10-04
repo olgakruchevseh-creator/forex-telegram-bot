@@ -21,6 +21,7 @@ class IDMContext:
     level: float
     distance_atr: float
     swept: bool
+    liquidity_scope: str = "INTERNAL"  # IDM is inducement/internal liquidity, never a second external-pool vote
 
 
 def _bars(by_tf: dict, tf: str, minutes: int) -> list[Candle]:
@@ -81,4 +82,4 @@ def describe(ctx: IDMContext | None) -> str:
         state = "близкий inducement ещё не снят — риск преждевременного входа"
     else:
         state = "inducement далеко — нейтрально"
-    return f"IDM {ctx.timeframe}: {state} · {label} {ctx.level:.5f} · {ctx.distance_atr:.2f} ATR"
+    return f"IDM {ctx.timeframe} · внутренняя ликвидность: {state} · {label} {ctx.level:.5f} · {ctx.distance_atr:.2f} ATR"

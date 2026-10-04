@@ -25,6 +25,7 @@ class LiquidityPool:
     zone_low:float|None=None
     zone_high:float|None=None
     family:str="LIQUIDITY_LEVELS"
+    liquidity_scope:str="EXTERNAL"  # BSL/SSL/EQH/EQL/PDH-PDL/Old High-Low are external pools
 
 
 def _bars(by_tf,tf):
