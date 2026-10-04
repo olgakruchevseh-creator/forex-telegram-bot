@@ -20,6 +20,7 @@ import liquidity_context
 import continuation_liquidity_context
 import po3_fvg_context
 import structure_context
+import weekly_rhythm_context
 import premium_discount
 import market_regime
 import market_state
@@ -203,6 +204,7 @@ def analyze_symbol(
     shift_lifecycle = choch.analyze_lifecycle(symbol, by_tf, side)
     mss_ctx = mss.analyze_symbol(symbol, by_tf, side)
     structure_ctx = structure_context.analyze_symbol(symbol, by_tf, side)
+    weekly_rhythm_ctx = weekly_rhythm_context.analyze_symbol(symbol, by_tf)
     erl_ctx = erl.analyze_symbol(symbol, by_tf, side)
     liquidity_ctx = liquidity_context.analyze_symbol(symbol, by_tf, side, alerts)
     continuation_liq_ctx = continuation_liquidity_context.analyze_symbol(symbol, by_tf, side, alerts)
@@ -374,6 +376,9 @@ def analyze_symbol(
         "evidence": aligned,
         "evidence_families": sorted(evidence_families),
         "structure_context": structure_context.describe(structure_ctx),
+        "weekly_rhythm": weekly_rhythm_context.describe(weekly_rhythm_ctx),
+        "weekly_rhythm_phase": weekly_rhythm_ctx.phase if weekly_rhythm_ctx else "NONE",
+        "weekly_rhythm_alignment": weekly_rhythm_context.alignment(weekly_rhythm_ctx, side),
         "structure_state": structure_ctx.state,
         "dxy_bias": dxy_bias,
         "zigzag_h4": "LONG" if h4_zz > 0 else ("SHORT" if h4_zz < 0 else "RANGE"),

@@ -41,6 +41,7 @@ import killer_engine
 import accumulation_distribution
 import consolidation_zone
 import amd_power_of_three
+import weekly_rhythm_context
 import crt_candle_range
 import ohlc_movement
 import liquidity_sweep
@@ -549,6 +550,8 @@ def _source_image_for(text: str, source_text: str):
             return patterns.image_for_alert(source_text)
         if "🎯 AMD / POWER OF THREE" in text:
             return amd_power_of_three.image_for_alert(source_text)
+        if "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in text:
+            return weekly_rhythm_context.image_for_alert(source_text)
         if "🕯 CRT — CANDLE RANGE THEORY" in text:
             return crt_candle_range.image_for_alert(source_text)
         if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in text:
@@ -1053,6 +1056,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("amd"); log.exception("Ошибка модуля AMD / Power of Three")
 
+        if getattr(cfg, "WEEKLY_RHYTHM_ENABLED", True):
+            try:
+                for text in weekly_rhythm_context.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                scan_stats.note_fail("weekly_rhythm"); log.exception("Ошибка модуля Ритм недели")
+
         if getattr(cfg, "CRT_CANDLE_RANGE_ENABLED", True):
             try:
                 for text in crt_candle_range.process_market(market, strength):
@@ -1470,6 +1480,11 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         amd_power_of_three.mark_delivered(source_text)
                     except Exception:
                         log.exception("Фиксация доставленного AMD")
+                if "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in source_text:
+                    try:
+                        weekly_rhythm_context.mark_delivered(source_text)
+                    except Exception:
+                        log.exception("Фиксация доставленного Ритма недели")
                 if "🕯 CRT — CANDLE RANGE THEORY" in source_text:
                     try:
                         crt_candle_range.mark_delivered(source_text)
