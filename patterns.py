@@ -26,6 +26,9 @@ CANDLE_PATTERN_NAMES = {
     "Утренняя звезда", "Вечерняя звезда",
     "Три белых солдата", "Три чёрные вороны",
     "Бычий Belt Hold", "Медвежий Belt Hold",
+    "Просвет в облаках", "Завеса из тёмных облаков",
+    "Бычий харами", "Медвежий харами",
+    "Пинцет снизу", "Пинцет сверху",
 }
 
 # Карточки живут только в памяти одного сканирования. Текст остаётся прежним,
@@ -88,37 +91,87 @@ def _add(out, name, side, tf, q, conf, fact, level, c):
         out.append(Pattern(name, side, tf, q, conf, fact, level, c.dt))
 
 
+def _candle_strength(c: Candle, av: float) -> float:
+    """Нормированная сила закрытой свечи: тело + положение закрытия + ATR."""
+    rng = _range(c)
+    body_ratio = _body(c) / rng
+    atr_ratio = min(1.35, rng / max(av, 1e-12))
+    close_pos = (c.close - c.low) / rng if _bull(c) else (c.high - c.close) / rng
+    return max(0.0, min(1.0, body_ratio * .50 + min(1.0, atr_ratio) * .25 + close_pos * .25))
+
+
+def _japanese_scores(base_q: int, base_conf: int, c: Candle, av: float, *, confirm: float = 0.0) -> tuple[int, int]:
+    """Не платим фиксированные очки только за название японской фигуры."""
+    strength = _candle_strength(c, av)
+    q = base_q + round((strength - .60) * 14) + round(max(-1.0, min(1.0, confirm)) * 4)
+    conf = base_conf + round((strength - .60) * 12) + round(max(-1.0, min(1.0, confirm)) * 5)
+    return max(68, min(94, q)), max(66, min(92, conf))
+
+
 def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
-    if len(bars) < 6:
+    if len(bars) < 8:
         return []
     out, a, b, c = [], bars[-3], bars[-2], bars[-1]
     av = atr(bars, 14) or _range(c)
-    # Engulfing / outside reversal.
+    prior = bars[-8:-3]
+    prior_move = (prior[-1].close - prior[0].close) / max(av, 1e-12) if len(prior) >= 2 else 0.0
+
+    def add(name, side, q, conf, fact, level, confirm=0.0):
+        q, conf = _japanese_scores(q, conf, c, av, confirm=confirm)
+        _add(out, name, side, tf, q, conf, fact, level, c)
+
+    # Engulfing / outside reversal. Контекст предыдущего движения повышает доверие.
     if _bear(b) and _bull(c) and c.open <= b.close and c.close >= b.open and _body(c) >= _body(b) * 1.05:
-        _add(out, "Бычье поглощение", "LONG", tf, 80, 78, "Закрытая бычья свеча полностью поглотила тело предыдущей медвежьей свечи.", c.low, c)
+        add("Бычье поглощение", "LONG", 80, 78, "Закрытая бычья свеча полностью поглотила тело предыдущей медвежьей свечи.", c.low, -prior_move)
     if _bull(b) and _bear(c) and c.open >= b.close and c.close <= b.open and _body(c) >= _body(b) * 1.05:
-        _add(out, "Медвежье поглощение", "SHORT", tf, 80, 78, "Закрытая медвежья свеча полностью поглотила тело предыдущей бычьей свечи.", c.high, c)
-    # Pin bars, Hammer / Shooting Star.
+        add("Медвежье поглощение", "SHORT", 80, 78, "Закрытая медвежья свеча полностью поглотила тело предыдущей бычьей свечи.", c.high, prior_move)
+
+    # Hammer / Shooting Star: тень + качественное закрытие, но не самостоятельный разворот.
     upper, lower, body = c.high - max(c.open, c.close), min(c.open, c.close) - c.low, max(_body(c), av * .03)
     if lower >= body * 2.2 and upper <= body * .8 and c.close >= c.low + _range(c) * .60:
-        _add(out, "Молот / бычий Pin Bar", "LONG", tf, 76, 74, "Длинная нижняя тень отвергнута, свеча закрылась в верхней части диапазона.", c.low, c)
+        add("Молот / бычий Pin Bar", "LONG", 76, 74, "Длинная нижняя тень отвергнута, свеча закрылась в верхней части диапазона.", c.low, -prior_move)
     if upper >= body * 2.2 and lower <= body * .8 and c.close <= c.low + _range(c) * .40:
-        _add(out, "Падающая звезда / медвежий Pin Bar", "SHORT", tf, 76, 74, "Длинная верхняя тень отвергнута, свеча закрылась в нижней части диапазона.", c.high, c)
+        add("Падающая звезда / медвежий Pin Bar", "SHORT", 76, 74, "Длинная верхняя тень отвергнута, свеча закрылась в нижней части диапазона.", c.high, prior_move)
+
     # Morning / Evening Star.
     if _bear(a) and _body(b) <= _body(a) * .55 and _bull(c) and c.close >= (a.open + a.close) / 2:
-        _add(out, "Утренняя звезда", "LONG", tf, 84, 80, "Трёхсвечный разворот подтверждён закрытием выше середины первой медвежьей свечи.", min(a.low, b.low, c.low), c)
+        add("Утренняя звезда", "LONG", 84, 80, "Трёхсвечный разворот подтверждён закрытием выше середины первой медвежьей свечи.", min(a.low, b.low, c.low), -prior_move)
     if _bull(a) and _body(b) <= _body(a) * .55 and _bear(c) and c.close <= (a.open + a.close) / 2:
-        _add(out, "Вечерняя звезда", "SHORT", tf, 84, 80, "Трёхсвечный разворот подтверждён закрытием ниже середины первой бычьей свечи.", max(a.high, b.high, c.high), c)
+        add("Вечерняя звезда", "SHORT", 84, 80, "Трёхсвечный разворот подтверждён закрытием ниже середины первой бычьей свечи.", max(a.high, b.high, c.high), prior_move)
+
     # Three soldiers / crows.
     if all(_bull(x) for x in (a, b, c)) and a.close < b.close < c.close and min(_body(x) / _range(x) for x in (a, b, c)) >= .55:
-        _add(out, "Три белых солдата", "LONG", tf, 86, 82, "Три сильные закрытые бычьи свечи последовательно обновили закрытия вверх.", min(a.low, b.low, c.low), c)
+        add("Три белых солдата", "LONG", 86, 82, "Три сильные закрытые бычьи свечи последовательно обновили закрытия вверх.", min(a.low, b.low, c.low), .8)
     if all(_bear(x) for x in (a, b, c)) and a.close > b.close > c.close and min(_body(x) / _range(x) for x in (a, b, c)) >= .55:
-        _add(out, "Три чёрные вороны", "SHORT", tf, 86, 82, "Три сильные закрытые медвежьи свечи последовательно обновили закрытия вниз.", max(a.high, b.high, c.high), c)
+        add("Три чёрные вороны", "SHORT", 86, 82, "Три сильные закрытые медвежьи свечи последовательно обновили закрытия вниз.", max(a.high, b.high, c.high), .8)
+
+    # Piercing Line / Dark Cloud Cover: обязательное проникновение за середину тела.
+    bmid = (b.open + b.close) / 2
+    if _bear(b) and _body(b) >= av * .35 and _bull(c) and c.open <= b.close and c.close > bmid and c.close < b.open:
+        add("Просвет в облаках", "LONG", 79, 76, "После медвежьей свечи бычье закрытие вернулось выше середины её тела.", min(b.low, c.low), -prior_move)
+    if _bull(b) and _body(b) >= av * .35 and _bear(c) and c.open >= b.close and c.close < bmid and c.close > b.open:
+        add("Завеса из тёмных облаков", "SHORT", 79, 76, "После бычьей свечи медвежье закрытие ушло ниже середины её тела.", max(b.high, c.high), prior_move)
+
+    # Harami: слабее поглощения, поэтому требует выраженного предыдущего тела.
+    inside_body = min(c.open, c.close) >= min(b.open, b.close) and max(c.open, c.close) <= max(b.open, b.close)
+    if inside_body and _body(b) >= av * .55 and _body(c) <= _body(b) * .55:
+        if _bear(b) and _bull(c):
+            add("Бычий харами", "LONG", 75, 72, "Малое бычье тело сформировалось внутри крупного предыдущего медвежьего тела; требуется внешнее подтверждение.", min(b.low, c.low), -prior_move)
+        elif _bull(b) and _bear(c):
+            add("Медвежий харами", "SHORT", 75, 72, "Малое медвежье тело сформировалось внутри крупного предыдущего бычьего тела; требуется внешнее подтверждение.", max(b.high, c.high), prior_move)
+
+    # Tweezer reversal: близкие экстремумы + противоположное закрытие.
+    tol = max(av * .10, _range(c) * .08)
+    if _bear(b) and _bull(c) and abs(c.low - b.low) <= tol and _body(c) >= av * .25:
+        add("Пинцет снизу", "LONG", 76, 73, "Два близких минимума и бычье закрытие показывают повторное отвержение нижней цены.", min(b.low, c.low), -prior_move)
+    if _bull(b) and _bear(c) and abs(c.high - b.high) <= tol and _body(c) >= av * .25:
+        add("Пинцет сверху", "SHORT", 76, 73, "Два близких максимума и медвежье закрытие показывают повторное отвержение верхней цены.", max(b.high, c.high), prior_move)
+
     # Belt Hold.
     if _bull(c) and _body(c) >= av * .75 and (c.open - c.low) <= _range(c) * .08:
-        _add(out, "Бычий Belt Hold", "LONG", tf, 78, 75, "Сильная бычья свеча открылась у минимума и закрылась направленным импульсом.", c.low, c)
+        add("Бычий Belt Hold", "LONG", 78, 75, "Сильная бычья свеча открылась у минимума и закрылась направленным импульсом.", c.low, .5)
     if _bear(c) and _body(c) >= av * .75 and (c.high - c.open) <= _range(c) * .08:
-        _add(out, "Медвежий Belt Hold", "SHORT", tf, 78, 75, "Сильная медвежья свеча открылась у максимума и закрылась направленным импульсом.", c.high, c)
+        add("Медвежий Belt Hold", "SHORT", 78, 75, "Сильная медвежья свеча открылась у максимума и закрылась направленным импульсом.", c.high, .5)
     return out
 
 
