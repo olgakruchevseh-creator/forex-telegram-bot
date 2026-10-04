@@ -50,6 +50,13 @@ class FvgZone:
     structural_fvg: bool = False
     structural_shift: str = ""
     structural_level: float = 0.0
+    lifecycle: str = "СОЗДАН"
+    inverted: bool = False
+    inversion_dt: str = ""
+    inversion_close: float = 0.0
+    ifvg_side: str = ""
+    ifvg_retest_sent: bool = False
+    test_count: int = 0
 
 
 def _path() -> Path:
@@ -210,19 +217,22 @@ def _fvg_class(zone: FvgZone) -> str:
 
 
 def format_message(zone: FvgZone, event: str = "new") -> str:
-    title = "🟦 IMBALANCE — НОВАЯ FVG" if event == "new" else "🔄 IMBALANCE — РЕТЕСТ ПОДТВЕРЖДЁН"
-    fact = (
-        "Трёхсвечная неэффективность сформирована закрытой свечой и подтверждена направлением таймфреймов."
-        if event == "new" else
-        "Цена вернулась в FVG; реакция подтверждена через Sweep+Reclaim или Recovery Closure и прошла общие фильтры."
-    )
+    if event == "new":
+        title = "🟦 IMBALANCE — НОВАЯ FVG"
+        fact = "Трёхсвечная неэффективность сформирована закрытой свечой и подтверждена направлением таймфреймов."
+    elif event == "ifvg_retest":
+        title = "🔁 IMBALANCE — IFVG · РЕТЕСТ ПОДТВЕРЖДЁН"
+        fact = "Исходная FVG была пробита закрытой свечой, сменила роль на IFVG; обратный ретест и реакция подтверждены общими фильтрами."
+    else:
+        title = "🔄 IMBALANCE — РЕТЕСТ ПОДТВЕРЖДЁН"
+        fact = "Цена вернулась в FVG; реакция подтверждена через Sweep+Reclaim или Recovery Closure и прошла общие фильтры."
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "", f"Пара: {zone.symbol}",
-        f"Таймфрейм: {zone.tf}", f"Направление: {zone.side}",
+        f"Таймфрейм: {zone.tf}", f"Направление: {zone.ifvg_side if event == 'ifvg_retest' else zone.side}",
         f"Классификация FVG: {_fvg_class(zone)}" + (" · STRUCTURAL FVG" if zone.structural_fvg else ""),
         f"Structural shift: {zone.structural_shift or 'обычный FVG без повышенного structural-веса'}",
         f"Зона FVG: {_price(zone.symbol, zone.low)}–{_price(zone.symbol, zone.high)}",
-        f"Состояние: {zone.status}", f"Согласованные ТФ: {' · '.join(zone.aligned)}",
+        f"Состояние: {zone.status}", f"Жизненный цикл: {zone.lifecycle}", f"Тестов зоны: {zone.test_count}", f"Согласованные ТФ: {' · '.join(zone.aligned)}",
         f"Разница силы валют: {zone.strength_gap:+.2f}",
         f"Размер FVG: {zone.gap_atr:.2f} ATR · импульс: {zone.impulse_atr:.2f} ATR",
         f"Заполнение зоны: {zone.fill_pct:.0f}%", f"Подтверждение зоны: {zone.reaction_path or '—'}", f"Качество: {zone.quality}/100",
@@ -273,9 +283,9 @@ def render_chart(zone: FvgZone, event: str, by_tf: dict) -> io.BytesIO:
         draw.rounded_rectangle((x-candle_w, top+8, x+candle_w, bottom-8), radius=6,
                                outline="#ffd44d", width=3)
         draw.text((max(left, x-75), top+14), "ИМПУЛЬС", fill="#ffd44d", font=small)
-    if event == "retest":
+    if event in ("retest", "ifvg_retest"):
         draw.text((right-300, y_at((zone.low+zone.high)/2)-28), "РЕТЕСТ ПОДТВЕРЖДЁН", fill="#ffffff", font=small)
-    title = "НОВАЯ FVG" if event == "new" else "РЕТЕСТ FVG"
+    title = "НОВАЯ FVG" if event == "new" else ("РЕТЕСТ IFVG" if event == "ifvg_retest" else "РЕТЕСТ FVG")
     draw.text((left, 25), f"{zone.symbol} · {zone.tf} · IMBALANCE {title} · {_fvg_class(zone)} · {zone.side}", fill="#f1f5fb", font=font)
     draw.text((left, 655), "Зона построена только по закрытым свечам · NO REPAINT", fill="#c9d1df", font=small)
     out = io.BytesIO()
@@ -306,9 +316,16 @@ def mark_delivered(text: str) -> None:
 
 
 def _update_zone(zone: FvgZone, bars: list[Candle]) -> str:
+    """Advance FVG/IFVG lifecycle using closed candles only.
+
+    A wick through the far edge never creates IFVG. Only a candle CLOSE beyond
+    that edge changes the role. The inverted zone then needs a fresh retest and
+    the same shared reaction engine before it can be confirmed.
+    """
     if zone.invalid or not bars:
         return ""
-    fresh = [c for c in bars if c.dt > zone.created_dt]
+    anchor_dt = zone.inversion_dt if zone.inverted else zone.created_dt
+    fresh = [c for c in bars if c.dt > anchor_dt]
     if not fresh:
         return ""
     c = fresh[-1]
@@ -316,18 +333,54 @@ def _update_zone(zone: FvgZone, bars: list[Candle]) -> str:
         return ""
     zone.last_seen_dt = c.dt
     width = max(zone.high-zone.low, 1e-12)
-    if zone.side == "LONG":
-        penetration = max(0.0, min(1.0, (zone.high-c.low)/width)) if c.low <= zone.high else 0.0
-        if c.close < zone.low:
-            zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"; return ""
+
+    if not zone.inverted:
+        if zone.side == "LONG":
+            touched = c.low <= zone.high and c.high >= zone.low
+            penetration = max(0.0, min(1.0, (zone.high-c.low)/width)) if c.low <= zone.high else 0.0
+            closed_through = c.close < zone.low
+        else:
+            touched = c.high >= zone.low and c.low <= zone.high
+            penetration = max(0.0, min(1.0, (c.high-zone.low)/width)) if c.high >= zone.low else 0.0
+            closed_through = c.close > zone.high
+        if touched:
+            zone.test_count += 1
+            zone.lifecycle = "ТЕСТИРУЕТСЯ"
+        zone.fill_pct = max(zone.fill_pct, penetration*100.0)
+        if closed_through:
+            zone.inverted = True
+            zone.inversion_dt = c.dt
+            zone.inversion_close = c.close
+            zone.ifvg_side = "SHORT" if zone.side == "LONG" else "LONG"
+            zone.touch_dt = ""
+            zone.reaction_path = ""
+            zone.reaction_dt = ""
+            zone.status = "IFVG — ОЖИДАЕТ РЕТЕСТА"
+            zone.lifecycle = "ПРОБИТ → IFVG"
+            return ""
+
+        reaction_side = zone.side
+        reaction_created = zone.created_dt
+        reaction_touch = zone.touch_dt
     else:
-        penetration = max(0.0, min(1.0, (c.high-zone.low)/width)) if c.high >= zone.low else 0.0
-        if c.close > zone.high:
-            zone.invalid, zone.status = True, "ЗОНА НАРУШЕНА"; return ""
-    zone.fill_pct = max(zone.fill_pct, penetration*100.0)
+        # After inversion, a wick back into the old FVG is only a test; it does
+        # not invalidate or confirm anything by itself.
+        touched = c.low <= zone.high and c.high >= zone.low
+        cancelled = (zone.ifvg_side == "SHORT" and c.close > zone.high) or (zone.ifvg_side == "LONG" and c.close < zone.low)
+        if cancelled:
+            zone.invalid = True
+            zone.status = "IFVG — ОТМЕНЁН"
+            zone.lifecycle = "IFVG → ОТМЕНЁН"
+            return ""
+        if touched:
+            zone.test_count += 1
+            zone.lifecycle = "IFVG → РЕТЕСТ"
+        reaction_side = zone.ifvg_side
+        reaction_created = zone.inversion_dt
+        reaction_touch = zone.touch_dt
 
     reaction = confirm_zone_reaction(
-        bars, zone.low, zone.high, zone.side, created_dt=zone.created_dt, touch_dt=zone.touch_dt,
+        bars, zone.low, zone.high, reaction_side, created_dt=reaction_created, touch_dt=reaction_touch,
         max_touch_age=int(getattr(cfg, "ZONE_REACTION_MAX_TOUCH_AGE", 2)),
         sweep_lookback=int(getattr(cfg, "ZONE_REACTION_SWEEP_LOOKBACK", 3)),
         reclaim_buffer_atr=float(getattr(cfg, "ZONE_REACTION_RECLAIM_BUFFER_ATR", .03)),
@@ -335,13 +388,14 @@ def _update_zone(zone: FvgZone, bars: list[Candle]) -> str:
     )
     if reaction.touch_dt and (not zone.touch_dt or reaction.touched):
         zone.touch_dt = reaction.touch_dt
-        zone.status = "ZONE_TOUCHED"
-    if not zone.retest_sent and reaction.confirmed:
+        zone.status = "IFVG — ТЕСТИРУЕТСЯ" if zone.inverted else "FVG — ТЕСТИРУЕТСЯ"
+    sent = zone.ifvg_retest_sent if zone.inverted else zone.retest_sent
+    if not sent and reaction.confirmed:
         zone.reaction_path = reaction.path
         zone.reaction_dt = reaction.confirm_dt
-        zone.status = "REACTION_CONFIRMED_INTERNAL"
-    if zone.reaction_dt and not zone.retest_sent:
-        return "reaction_pending"
+        zone.status = "IFVG_REACTION_CONFIRMED_INTERNAL" if zone.inverted else "REACTION_CONFIRMED_INTERNAL"
+    if zone.reaction_dt and not sent:
+        return "ifvg_reaction_pending" if zone.inverted else "reaction_pending"
     return ""
 
 
@@ -366,8 +420,17 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             # Update only zones created by this module after installation.
             for zone in [z for z in stored.values() if z.symbol == symbol]:
                 event = _update_zone(zone, closed_map.get(zone.tf) or [])
-                if event == "reaction_pending" and validate_zone(zone, closed_map, strength):
-                    side_i = 1 if zone.side == "LONG" else -1
+                if event in ("reaction_pending", "ifvg_reaction_pending"):
+                    original_side, original_class = zone.side, zone.fvg_class
+                    if event == "ifvg_reaction_pending":
+                        zone.side = zone.ifvg_side
+                        zone.fvg_class = "BISI" if zone.side == "LONG" else "SIBI"
+                    context_ok = validate_zone(zone, closed_map, strength)
+                    zone.side, zone.fvg_class = original_side, original_class
+                    if not context_ok:
+                        continue
+                    effective_side = zone.ifvg_side if event == "ifvg_reaction_pending" else zone.side
+                    side_i = 1 if effective_side == "LONG" else -1
                     og = ohlc_movement.guard_event(market.get(symbol) or {}, side_i, zone.quality)
                     detail = (og.get("details") or {}).get(zone.tf) or (og.get("details") or {}).get("M15") or {}
                     directional = int(detail.get("directional_bars", 0)); net = float(detail.get("net_atr", 0.0))
@@ -376,13 +439,21 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     meaningful = meaningful or (net >= float(getattr(cfg, "IMBALANCE_REACTION_EQUIVALENT_MOVE_ATR", .85)) and score >= 68)
                     early = ohlc_movement.early_entry_check(market.get(symbol) or {}, side_i)
                     if og.get("allow", True) and not og.get("range_like") and meaningful and early.get("allow", True):
-                        zone.retest_sent = True; zone.status = "РЕТЕСТ ПОДТВЕРЖДЁН"
+                        out_event = "ifvg_retest" if event == "ifvg_reaction_pending" else "retest"
+                        if out_event == "ifvg_retest":
+                            zone.ifvg_retest_sent = True
+                            zone.status = "IFVG — РЕТЕСТ ПОДТВЕРЖДЁН"
+                            zone.lifecycle = "IFVG → ПОДТВЕРЖДЁН"
+                        else:
+                            zone.retest_sent = True
+                            zone.status = "РЕТЕСТ ПОДТВЕРЖДЁН"
+                            zone.lifecycle = "УДЕРЖАН → ПОДТВЕРЖДЁН"
                         if not first:
-                            key = f"{zone.zone_id}|retest|{zone.reaction_dt[:19]}"
-                            pending_events[key] = {"zone": asdict(zone), "event": "retest"}
-                            text = format_message(zone, "retest")
+                            key = f"{zone.zone_id}|{out_event}|{zone.reaction_dt[:19]}"
+                            pending_events[key] = {"zone": asdict(zone), "event": out_event}
+                            text = format_message(zone, out_event)
                             if text not in messages: messages.append(text)
-                            _PENDING_CARDS[text] = (zone, "retest", freeze_by_tf(market.get(symbol) or {}))
+                            _PENDING_CARDS[text] = (zone, out_event, freeze_by_tf(market.get(symbol) or {}))
             for tf in MAIN_TFS:
                 zone = newest_fvg(symbol, tf, closed_map[tf])
                 if not zone or zone.zone_id in stored:
@@ -401,7 +472,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         except Exception:
             log.exception("Imbalance %s", symbol)
     state["bootstrapped"] = True
-    active = [z for z in stored.values() if not z.invalid]
+    active = [z for z in stored.values() if not z.invalid or z.lifecycle == "IFVG → ОТМЕНЁН"]
     active.sort(key=lambda z: z.created_dt)
     state["zones"] = {z.zone_id: asdict(z) for z in active[-500:]}
     state["pending_events"] = pending_events
