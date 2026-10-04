@@ -45,6 +45,14 @@ def _confirmed_mss(by_tf: dict, tf: str, candidate_side: int) -> MSSContext | No
         prior_bullish = bool(zz["prior_bullish"])
         recent_high = float(zz["last_high"])
         recent_low = float(zz["last_low"])
+        # MSS must break the protected swing of the established structure,
+        # not merely any recent local extreme.
+        protected_high = zz.get("protected_high")
+        protected_low = zz.get("protected_low")
+        if prior_bearish and protected_high is not None:
+            recent_high = float(protected_high)
+        if prior_bullish and protected_low is not None:
+            recent_low = float(protected_low)
     else:
         recent = pre[-swing_n:]
         previous = pre[-2 * swing_n:-swing_n]

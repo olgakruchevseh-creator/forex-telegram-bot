@@ -165,15 +165,22 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
         if between and prev.close <= max(between) and c.close > max(between):
             symmetry = max(0, 8 - int(abs(lows[-1][1] - lows[-2][1]) / max(tol, 1e-12) * 8))
             _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry, "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.", max(between), c)
-    # Confirmed BOS from the latest completed swing.
-    if highs and prev.close <= highs[-1][1] and c.close > highs[-1][1] + av * .05 and _bull(c):
+    # BOS is continuation of an already established HH/HL or LH/LL structure.
+    # An opposite break is a possible MSS/CHoCH and is deliberately NOT emitted
+    # here as an automatic reversal signal.  Wick-only probes never qualify:
+    # the closed candle must clear the level by an ATR buffer.
+    from analysis import swing_character
+    prior_structure = swing_character(bars[:-1], tf)
+    allow_bull_bos = prior_structure is None or bool(prior_structure.get("prior_bullish"))
+    allow_bear_bos = prior_structure is None or bool(prior_structure.get("prior_bearish"))
+    if allow_bull_bos and highs and prev.close <= highs[-1][1] and c.close > highs[-1][1] + av * .05 and _bull(c):
         impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
         clearance = min(6, int((c.close-highs[-1][1]) / max(av, 1e-12) * 12))
-        _add(out, "BOS вверх", "LONG", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Предыдущая свеча была под максимумом структуры, а новая впервые закрылась выше него.", highs[-1][1], c)
-    if lows and prev.close >= lows[-1][1] and c.close < lows[-1][1] - av * .05 and _bear(c):
+        _add(out, "BOS вверх", "LONG", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Продолжение подтверждённой HH/HL-структуры: закрытая свеча впервые закрепилась выше структурного максимума.", highs[-1][1], c)
+    if allow_bear_bos and lows and prev.close >= lows[-1][1] and c.close < lows[-1][1] - av * .05 and _bear(c):
         impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
         clearance = min(6, int((lows[-1][1]-c.close) / max(av, 1e-12) * 12))
-        _add(out, "BOS вниз", "SHORT", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Предыдущая свеча была над минимумом структуры, а новая впервые закрылась ниже него.", lows[-1][1], c)
+        _add(out, "BOS вниз", "SHORT", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Продолжение подтверждённой LH/LL-структуры: закрытая свеча впервые закрепилась ниже структурного минимума.", lows[-1][1], c)
     # Head & Shoulders: require the actual H-L-H-L-H (or inverse) geometry.
     # The neckline is a line through the two intervening pivots, not min/max of
     # every trough/peak.  Confirmation is ONLY the first closed candle beyond
