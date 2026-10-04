@@ -929,3 +929,9 @@ WEEKLY_RHYTHM_DIRECTION_MIN_CONFIDENCE = 68
 WEEKLY_RHYTHM_INVALIDATED_CONFIDENCE = 35
 WEEKLY_RHYTHM_OVEREXTENDED_REALIZATION = 1.15
 WEEKLY_RHYTHM_CHART_IMAGES_ENABLED = True
+
+# SMC route lifecycle: a confirmed route bonus requires the source-side
+# external liquidity (SSL for LONG / BSL for SHORT) to be swept and reclaimed.
+# This strengthens the existing liquidity family; it does not create a signal.
+ICT_ROUTE_REQUIRE_SOURCE_SWEEP_RECLAIM = True
+ICT_ROUTE_UNRECLAIMED_SOURCE_IS_CONFLICT = True
