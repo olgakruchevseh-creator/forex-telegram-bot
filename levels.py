@@ -579,6 +579,33 @@ def score_zone(tfs: list[str], reactions: int, pack: list[dict], now: float) -> 
     return max(0.0, min(100.0, raw))
 
 
+def level_context(zone: Zone) -> dict:
+    """Математический паспорт уровня без самостоятельного торгового направления.
+
+    Старшие ТФ и независимые реакции повышают надёжность, а повторные тесты,
+    ложные проколы и закрытия за зоной показывают расходование уровня.
+    """
+    tfs = set(zone.tfs or [])
+    if "W1" in tfs or "D1" in tfs:
+        rank = "СТАРШИЙ"
+    elif "H4" in tfs or "H1" in tfs:
+        rank = "РАБОЧИЙ"
+    else:
+        rank = "ЛОКАЛЬНЫЙ"
+    confluence = len(tfs) + (2 if tfs & SENIOR and tfs & WORKING else 0)
+    consumption = (max(0, zone.tests_recent - 1) * 8 + zone.false_wicks * 4 +
+                   zone.closes_beyond * 12)
+    if zone.tests_recent <= 1 and zone.closes_beyond == 0:
+        maturity = "СВЕЖИЙ"
+    elif consumption < 28 and zone.closes_beyond == 0:
+        maturity = "ПРОТЕСТИРОВАННЫЙ"
+    else:
+        maturity = "ОСЛАБЛЕННЫЙ"
+    reliability = int(round(max(0.0, min(100.0, zone.strength - min(consumption, 45) * .35))))
+    return {"rank": rank, "maturity": maturity, "confluence": confluence,
+            "consumption": min(100, consumption), "reliability": reliability}
+
+
 def absorb_penalty(zone: Zone) -> float:
     extra = max(0, zone.tests_recent - 2) * 7
     extra += zone.false_wicks * 3
@@ -920,6 +947,9 @@ def build_message(
     lines.append(
         f"📍 Зона: {fmt_price(zone.symbol, zone.low)}–{fmt_price(zone.symbol, zone.high)}"
     )
+    ctx = level_context(zone)
+    lines.append(f"🧭 Класс уровня: {ctx['rank']} · {ctx['maturity']}")
+    lines.append(f"🧮 Надёжность уровня: {ctx['reliability']}/100")
     if event == "new_level":
         lines.append(f"💪 Сила: {zone.strength:.0f}/100")
         lines.append(f"🔎 Подтверждение: {zone.reactions} независимые реакции")

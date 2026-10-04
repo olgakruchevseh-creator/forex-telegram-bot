@@ -270,6 +270,8 @@ LEVEL_BOUNCE_MIN_STRENGTH_GAP = 0.05
 LEVEL_FALSE_BREAK_MIN_STRENGTH_GAP = 0.05
 # Связывать противоположные подтверждённые реакции одной пары внутри дня.
 LEVEL_DIRECTION_MEMORY_HOURS = 12
+# Levels remain context-first: touch alone is never a LONG/SHORT fact.
+LEVEL_TOUCH_IS_SIGNAL = False
 ZIGZAG_SCANNER_ENABLED = True
 ZIGZAG_CHART_IMAGES_ENABLED = True
 PATTERNS_ENABLED = True
