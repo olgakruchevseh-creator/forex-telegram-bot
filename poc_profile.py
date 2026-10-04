@@ -184,27 +184,32 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     if av <= 0:
         return None
     lifecycle = _value_lifecycle(symbol, by_tf, prof, m15, av)
+    # Final confirmation must use the SAME value reference selected by the lifecycle.
+    # When real provider volume exists this may be VWAP; otherwise it is the TPO POC.
+    # A touch by itself never creates direction.
+    ref = float(lifecycle.get("reference_price", prof.poc))
+    ref_name = str(lifecycle.get("reference", "POC"))
     tol = max(prof.step*1.25, av*float(getattr(cfg, "POC_TOUCH_ATR", .12)))
     body = abs(cur.close-cur.open)
     min_body = av*float(getattr(cfg, "POC_CONFIRM_BODY_ATR", .22))
-    touched = cur.low <= prof.poc+tol and cur.high >= prof.poc-tol
-    reclaim_long = touched and prev.close <= prof.poc+tol and cur.close > prof.poc+tol and cur.close > cur.open
-    reject_short = touched and prev.close >= prof.poc-tol and cur.close < prof.poc-tol and cur.close < cur.open
-    if body < min_body or not (reclaim_long or reject_short):
+    touched = cur.low <= ref+tol and cur.high >= ref-tol
+    accept_long = touched and prev.close <= ref+tol and cur.close > ref+tol and cur.close > cur.open
+    reject_short = touched and prev.close >= ref-tol and cur.close < ref-tol and cur.close < cur.open
+    if body < min_body or not (accept_long or reject_short):
         return None
-    side = "LONG" if reclaim_long else "SHORT"
+    side = "LONG" if accept_long else "SHORT"
     wanted = 1 if side == "LONG" else -1
     # A value touch/reclaim is context, never a standalone direction.
     if getattr(cfg, "VALUE_REQUIRE_STRUCTURE_CONFIRM", True):
         if lifecycle.get("side") != wanted or not lifecycle.get("structure_confirmed"):
             return None
-    # POC confirms acceptance/rejection; it does not override opposite H4 context.
+    # VWAP/POC confirms acceptance/rejection; it does not override opposite H4 context.
     if _bias("H4", h4) == -wanted or _bias("M15", m15) != wanted:
         return None
     ok, gap = _strength_ok(symbol, side, strength)
     if not ok:
         return None
-    distance = abs(cur.close-prof.poc)/av
+    distance = abs(cur.close-ref)/av
     if distance > float(getattr(cfg, "POC_MAX_ENTRY_DISTANCE_ATR", .65)):
         return None
     quality = 72 + min(8, int(body/av*5)) + min(6, int(abs(gap)*25))
@@ -213,6 +218,7 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     quality = min(94, quality)
     return {"symbol": symbol, "side": side, "poc": prof.poc, "val": prof.val, "vah": prof.vah,
             "close": cur.close, "dt": cur.dt, "gap": gap, "quality": quality,
+            "value_reference": ref_name, "value_reference_price": ref,
             "confidence": max(60, min(90, quality-4)), "profile": prof, "lifecycle": lifecycle}
 
 
@@ -221,19 +227,23 @@ def _price(symbol: str, v: float) -> str:
 
 
 def format_message(e: dict) -> str:
-    action = "возврат и закрепление выше POC" if e["side"] == "LONG" else "отбой и закрепление ниже POC"
+    ref_name = e.get("value_reference", "POC")
+    action = (f"возврат и закрепление выше {ref_name}" if e["side"] == "LONG"
+              else f"отбой и закрепление ниже {ref_name}")
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", f"🎯 POC — {e['side']}", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {e['symbol']}", f"Направление: {e['side']}",
         "Профиль: H1 · закрытые свечи", f"POC: {_price(e['symbol'], e['poc'])}",
         f"Value Area: {_price(e['symbol'], e['val'])}–{_price(e['symbol'], e['vah'])}",
-        f"Закрытие M15: {_price(e['symbol'], e['close'])}", f"Реакция: {action}",
+        f"Закрытие M15: {_price(e['symbol'], e['close'])}",
+        f"Опорная value-точка: {ref_name} · {_price(e['symbol'], e.get('value_reference_price', e['poc']))}",
+        f"Реакция: {action}",
         f"Состояние value lifecycle: {e.get('lifecycle', {}).get('state', '—')}",
         (f"VWAP: {_price(e['symbol'], e['profile'].vwap)} · источник: фактический volume провайдера"
          if e['profile'].vwap is not None else "VWAP: недоступен для текущих FX-свечей · поддельный volume не создаётся"),
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100",
         f"Вероятность: {e['confidence']}%", "",
-        "✅ Факт: закрытая M15 подтвердила реакцию у POC; H4 не противоречит направлению.",
+        f"✅ Факт: закрытая M15 подтвердила реакцию у {ref_name}; структура подтверждена, H4 не противоречит направлению.",
         "ℹ️ POC рассчитан как TPO/price-acceptance proxy по OHLC, а не как биржевой Volume POC.",
     ])
 
