@@ -28,6 +28,7 @@ import auction_context
 import multi_tf_narrative
 import setup_memory
 import idm
+import ict_liquidity_route
 import daily_high_low
 import ohlc_movement
 import candle_context
@@ -213,6 +214,7 @@ def analyze_symbol(
     narrative_ctx = multi_tf_narrative.analyze_symbol(symbol, by_tf, side) if getattr(cfg, "MULTI_TF_NARRATIVE_ENABLED", True) else None
     setup_ctx = setup_memory.analyze(symbol, side, regime_ctx.name if regime_ctx else "") if getattr(cfg, "SETUP_MEMORY_ENABLED", True) else None
     idm_sweep_ctx = idm.analyze_symbol(symbol, by_tf, side)
+    ict_route_ctx = ict_liquidity_route.analyze_symbol(symbol, by_tf, side, alerts)
     pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
     ohlc_ctx = ohlc_movement.setup_adjustment(by_tf, side) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
@@ -264,6 +266,7 @@ def analyze_symbol(
         quality += int(getattr(cfg, "LTF_CONFIRM_ALIGN_BONUS", 5))
     # MSS/CHOCH are already represented inside the single STRUCTURE adjustment above.
     if premium_discount_ctx and premium_discount_ctx.alignment > 0: quality += int(getattr(cfg, "PD_ALIGN_BONUS", 2))
+    quality += max(0, ict_liquidity_route.score_delta(ict_route_ctx))
     if imd_ctx and imd_ctx.alignment > 0:
         quality += int(getattr(cfg, "IMD_ALIGN_BONUS", 4))
     quality += int(ohlc_ctx.get("quality_delta", 0))
@@ -324,6 +327,9 @@ def analyze_symbol(
         quality -= int(getattr(cfg, "IMD_CONFLICT_PENALTY", 4))
     if idm_sweep_ctx and idm_sweep_ctx.alignment < 0:
         quality -= int(getattr(cfg, "IDM_UNSWEPT_PENALTY", 3))
+    # Unified ICT route only adds the missing coherence conflict; it is not a new vote.
+    if ict_route_ctx and ict_route_ctx.alignment < 0:
+        quality -= int(getattr(cfg, "ICT_ROUTE_CONFLICT_PENALTY", 3))
     if pdh_pdl_ctx and pdh_pdl_ctx.alignment < 0:
         quality -= int(getattr(cfg, "PDH_PDL_UNSWEPT_PENALTY", 2))
     if profile_confirmation < 0:
@@ -376,6 +382,9 @@ def analyze_symbol(
         "htf_irl": htf_irl.describe(irl),
         "htf_irl_alignment": irl.alignment if irl else 0,
         "liquidity_context": liquidity_context.describe(liquidity_ctx),
+        "ict_liquidity_route": ict_liquidity_route.describe(ict_route_ctx),
+        "ict_liquidity_route_state": ict_route_ctx.state if ict_route_ctx else "NONE",
+        "ict_liquidity_route_ready": bool(ict_route_ctx and ict_route_ctx.ready),
         "continuation_liquidity_context": continuation_liquidity_context.describe(continuation_liq_ctx),
         "continuation_liquidity_ready": bool(continuation_liq_ctx and continuation_liq_ctx.ready),
         "po3_fvg_context": po3_fvg_context.describe(po3_fvg_ctx),
