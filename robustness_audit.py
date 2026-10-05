@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 import config as cfg
+import structural_break_guard
 
 
 def _root():
@@ -210,5 +211,16 @@ def build(rows):
     report['quality_by_source']=_quality_groups(sent,'source')
     report['quality_by_pair']=_quality_groups(sent,'pair')
     report['quality_by_regime']=_quality_groups(sent,'regime')
-    report['statistical_note']='PSR/MTRL use the replay ATR proxy, not broker returns; all outputs are OBSERVE_ONLY diagnostics.'
+    if getattr(cfg,'STRUCTURAL_BREAK_GUARD_ENABLED',True):
+        report['structural_break_health']=structural_break_guard.detector_consensus(
+            _proxy_values(sent),
+            window=int(getattr(cfg,'STRUCTURAL_BREAK_WINDOW',8)),
+            min_history=int(getattr(cfg,'STRUCTURAL_BREAK_MIN_HISTORY',24)),
+            z_warn=float(getattr(cfg,'STRUCTURAL_BREAK_Z_WARN',-1.5)),
+            z_break=float(getattr(cfg,'STRUCTURAL_BREAK_Z_CONFIRM',-2.25)),
+            confirm_windows=int(getattr(cfg,'STRUCTURAL_BREAK_CONFIRM_WINDOWS',2)),
+            recovery_windows=int(getattr(cfg,'STRUCTURAL_BREAK_RECOVERY_WINDOWS',2)),
+            cooldown_windows=int(getattr(cfg,'STRUCTURAL_BREAK_COOLDOWN_WINDOWS',1)),
+        )
+    report['statistical_note']='PSR/MTRL and structural-break health use the replay ATR proxy, not broker returns; all outputs are OBSERVE_ONLY diagnostics.'
     return report
