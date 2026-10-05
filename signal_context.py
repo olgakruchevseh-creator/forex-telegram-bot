@@ -20,6 +20,7 @@ import ohlc_movement
 import market_regime
 import zigzag_scanner
 import decision_journal
+import evidence_uncertainty_context
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -284,6 +285,15 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
             continue
         grouped.setdefault((pair, side), []).append(text)
 
+    # Layer 8: passive pair-level evidence uncertainty. It cannot alter verdicts.
+    pair_uncertainty = {}
+    if getattr(cfg, "EVIDENCE_UNCERTAINTY_ENABLED", True):
+        for pair_name in {p for p, _s in grouped}:
+            pair_uncertainty[pair_name] = evidence_uncertainty_context.assess(
+                grouped.get((pair_name, "LONG"), []),
+                grouped.get((pair_name, "SHORT"), []),
+            )
+
     dropped: list[tuple[str, str]] = []
     winners: dict[str, dict] = {}
     for (pair, side), texts in grouped.items():
@@ -293,6 +303,8 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
             texts = [killer] + [item for item in texts if item != killer]
         primary, allies = texts[0], texts[1:]
         ctx = inspect(pair, side, market.get(pair) or {}, strength)
+        if pair in pair_uncertainty:
+            ctx["evidence_uncertainty"] = pair_uncertainty[pair]
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:

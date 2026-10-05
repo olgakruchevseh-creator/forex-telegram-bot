@@ -961,3 +961,8 @@ STRUCTURAL_BREAK_Z_CONFIRM = -2.25
 STRUCTURAL_BREAK_CONFIRM_WINDOWS = 2
 STRUCTURAL_BREAK_RECOVERY_WINDOWS = 2
 STRUCTURAL_BREAK_COOLDOWN_WINDOWS = 1
+
+# Layer 8 — Evidence Uncertainty / Diversity (OBSERVE_ONLY).
+# Measures conflict, entropy, effective independent evidence and redundancy.
+# It never creates/vetoes LONG/SHORT and does not change any trading threshold.
+EVIDENCE_UNCERTAINTY_ENABLED = True
