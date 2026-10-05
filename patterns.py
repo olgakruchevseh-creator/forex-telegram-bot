@@ -811,12 +811,52 @@ def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.Bytes
     return out
 
 
+def _chart_cache_dir() -> Path:
+    root = os.getenv("STATE_DIR", "").strip()
+    dest = (Path(root) if root else Path(__file__).resolve().parent) / "pattern_chart_cache"
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def _chart_cache_path(text: str) -> Path:
+    digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    return _chart_cache_dir() / f"{digest}.png"
+
+
+def _persist_pattern_chart(text: str, symbol: str, pattern: Pattern, by_tf: dict) -> None:
+    """Persist the event-time PNG so Railway restarts cannot strip the Telegram image."""
+    if not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
+        return
+    try:
+        image = render_pattern_chart(symbol, pattern, by_tf)
+        dest = _chart_cache_path(text)
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_bytes(image.getvalue())
+        tmp.replace(dest)
+    except Exception:
+        log.exception("Не удалось сохранить картинку паттерна %s %s", symbol, pattern.tf)
+
+
 def image_for_alert(text: str) -> io.BytesIO | None:
-    card = _PENDING_CARDS.get(text)
-    if not card or not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
+    if not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
         return None
-    symbol, pattern, by_tf = card
-    return render_pattern_chart(symbol, pattern, by_tf)
+    card = _PENDING_CARDS.get(text)
+    if card:
+        symbol, pattern, by_tf = card
+        return render_pattern_chart(symbol, pattern, by_tf)
+    # A confirmed pattern exists for only one first-break candle. On the next scan
+    # it can disappear from detector output while remaining PENDING in the delivery
+    # queue. The persisted immutable PNG is therefore the authoritative fallback.
+    try:
+        dest = _chart_cache_path(text)
+        if dest.exists():
+            out = io.BytesIO(dest.read_bytes())
+            out.name = dest.name
+            out.seek(0)
+            return out
+    except Exception:
+        log.exception("Не удалось восстановить картинку паттерна")
+    return None
 
 
 def mark_card_delivered(text: str) -> None:
@@ -827,6 +867,10 @@ def mark_card_delivered(text: str) -> None:
         state.setdefault("sent", {})[item["key"]] = item.get("dt") or item["key"]
         _save(state)
     _PENDING_CARDS.pop(text, None)
+    try:
+        _chart_cache_path(text).unlink(missing_ok=True)
+    except Exception:
+        log.exception("Не удалось удалить доставленную картинку паттерна")
 
 
 def _confirmation_tf(tf: str) -> str:
@@ -1001,7 +1045,9 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     pending[digest] = {"key": key, "dt": p.dt, "text": text}
                     pending_keys.add(key)
                 messages.append(text)
-                _PENDING_CARDS[text] = (symbol, p, freeze_by_tf(by_tf))
+                frozen = freeze_by_tf(by_tf)
+                _PENDING_CARDS[text] = (symbol, p, frozen)
+                _persist_pattern_chart(text, symbol, p, frozen)
                 break  # максимум один сильнейший новый паттерн по паре за скан
         except Exception:
             log.exception("Паттерны %s", symbol)
