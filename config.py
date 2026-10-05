@@ -150,6 +150,10 @@ DECISION_JOURNAL_ENABLED = True
 # Passive replay/calibration: observe outcomes only; never changes live verdicts.
 REPLAY_CALIBRATION_ENABLED = True
 REPLAY_JOURNAL_SCAN_LIMIT = 4000
+# Passive robustness audit over Decision Replay. OBSERVE_ONLY: no veto/rerank/threshold changes.
+ROBUSTNESS_AUDIT_ENABLED = True
+ROBUSTNESS_REPLAY_LIMIT = 12000
+ROBUSTNESS_MONTE_CARLO_ITERATIONS = 1000
 # One compact end-of-trading-day calibration report; reporting only.
 DAILY_CALIBRATION_REPORT_ENABLED = True
 DAILY_CALIBRATION_REPORT_HM = (22, 35)

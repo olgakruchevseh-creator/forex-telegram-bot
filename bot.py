@@ -62,6 +62,7 @@ import signal_navigator
 import signal_journal
 import decision_journal
 import replay_calibration
+import robustness_audit
 import daily_calibration_report
 import signal_context
 import session_projection_reports
@@ -890,6 +891,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # It cannot veto, rerank or modify any live signal.
         try:
             replay_calibration.update(market)
+            robustness_audit.update()
         except Exception:
             log.exception("Replay/Calibration update skipped")
         coverage = market_coverage(market)
