@@ -22,3 +22,17 @@ def test_build_never_claims_live_effect():
     out=r.build([_row(i,.4) for i in range(35)])
     assert out['mode']=='OBSERVE_ONLY' and out['live_effect']=='NONE'
     assert 'by_pair' in out and out['rolling_oos']['status']=='OK'
+
+
+def test_cost_stress_reveals_fragile_edge():
+    rows=[_row(i,.06) for i in range(30)]
+    out=r._cost_stress(rows)
+    assert out['status']=='OK'
+    assert out['scenarios'][0]['positive_expectancy'] is True
+    assert out['scenarios'][-1]['positive_expectancy'] is False
+
+def test_dual_oos_requires_both_blocks():
+    rows=[_row(i,.3 if i < 30 else -.4) for i in range(40)]
+    for i,row in enumerate(rows): row['evaluated_utc']=f'2026-10-05T{(i//60):02d}:{(i%60):02d}:00+00:00'
+    out=r._dual_oos(rows)
+    assert out['status']=='OK' and out['both_oos_positive'] is False

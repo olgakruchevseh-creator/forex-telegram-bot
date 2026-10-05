@@ -92,6 +92,37 @@ def _monte_carlo(rows, iterations=1000, seed=2601005):
             'terminal_proxy_atr_median':round(q(finals,.5),3),'terminal_proxy_atr_p95':round(q(finals,.95),3),
             'max_drawdown_proxy_atr_p95':round(q(dds,.95),3),'prob_terminal_positive':round(sum(v>0 for v in finals)/len(finals),3)}
 
+
+
+def _cost_stress(rows, costs_atr=(0.02, 0.05, 0.10, 0.15)):
+    """Passive sensitivity test: subtract hypothetical round-trip costs in ATR.
+
+    Costs are scenarios, not broker estimates. This prevents a small raw edge from
+    looking robust when it disappears under modest spread/slippage assumptions.
+    """
+    xs=[x for x in (_r_value(r) for r in rows) if x is not None]
+    if not xs: return {'status':'INSUFFICIENT_DATA','n':0,'scenarios':[]}
+    scenarios=[]
+    for cost in costs_atr:
+        net=[x-float(cost) for x in xs]
+        scenarios.append({'round_trip_cost_atr':round(float(cost),3),
+                          'net_expectancy_proxy_atr':round(sum(net)/len(net),4),
+                          'positive_expectancy':(sum(net)/len(net))>0})
+    return {'status':'OK','n':len(xs),'note':'Hypothetical round-trip cost scenarios; not broker fill data.',
+            'scenarios':scenarios}
+
+def _dual_oos(rows, train_min=20, test_size=10):
+    """Two contiguous OOS blocks, with no optimization and no live effect."""
+    ordered=sorted(rows,key=lambda r:str(r.get('evaluated_utc') or ''))
+    need=train_min+2*test_size
+    if len(ordered)<need:
+        return {'status':'INSUFFICIENT_DATA','n':len(ordered),'required':need}
+    train=ordered[:train_min]; oos1=ordered[train_min:train_min+test_size]; oos2=ordered[train_min+test_size:train_min+2*test_size]
+    m1=_metrics(oos1); m2=_metrics(oos2)
+    e1=m1.get('expectancy_proxy_atr'); e2=m2.get('expectancy_proxy_atr')
+    return {'status':'OK','train':_metrics(train),'oos1':m1,'oos2':m2,
+            'both_oos_positive':bool(e1 is not None and e2 is not None and e1>0 and e2>0)}
+
 def _groups(rows, key):
     g=defaultdict(list)
     for r in rows:
@@ -104,6 +135,7 @@ def build(rows):
     return {'schema':1,'mode':'OBSERVE_ONLY','updated_utc':datetime.now(timezone.utc).isoformat(timespec='seconds'),
       'metric_note':'Proxy metrics use 3h MFE_ATR - MAE_ATR, not broker P&L. No fees/slippage are invented without fill data.',
       'live_effect':'NONE','overall':_metrics(sent),'rolling_oos':_rolling_oos(sent),
+      'dual_oos':_dual_oos(sent),'cost_stress':_cost_stress(sent),
       'monte_carlo':_monte_carlo(sent,iterations),'by_pair':_groups(sent,'pair'),'by_source':_groups(sent,'source'),'by_regime':_groups(sent,'regime')}
 
 def update():
