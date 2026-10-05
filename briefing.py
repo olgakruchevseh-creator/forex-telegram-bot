@@ -1133,6 +1133,62 @@ def build_briefing_text(
     return "\n".join(lines).strip()
 
 
+
+def build_briefing_sections(
+    market: dict,
+    strength: dict[str, float],
+    rank: list[tuple[str, float]],
+    dxy: Optional[IndexView],
+    events: list[newsmod.NewsEvent],
+    upcoming_events: list[newsmod.NewsEvent] | None = None,
+) -> tuple[str, list[tuple[str, str]], str]:
+    """Собирает брифинг для последовательной Telegram-доставки.
+
+    Общий контекст идёт первым, затем каждая валютная пара отдельным блоком
+    (чтобы bot.py мог поставить её HTF-картинку непосредственно над описанием),
+    а лидер/приоритет завершает брифинг. Расчёт PairBrief тот же, что и в
+    build_briefing_text; торговая логика не меняется.
+    """
+    now = now_local()
+    now_utc = datetime.now(timezone.utc)
+    sess = current_session(now)
+    usd = strength.get("USD", 0.0)
+    briefs = build_pair_briefs(market, strength, events, now_utc)
+    leaders = pick_leaders(briefs)
+    head = [
+        "━━━━━━━━━━━━━━━━━━", f"🌍 БРИФИНГ — {sess['name']}", "━━━━━━━━━━━━━━━━━━", "",
+        f"🕐 Время: {now.strftime('%H:%M')} · Europe/Amsterdam", "",
+    ]
+    try: head.extend(format_strength_block(rank))
+    except Exception: log.exception("блок силы")
+    try: head.extend(format_dxy_block(dxy, usd))
+    except Exception:
+        log.exception("блок DXY"); head.extend(["", "🇺🇸 DXY", "", "нет данных"])
+    try: head.extend(format_news_block(events or [], strength, now_utc))
+    except Exception:
+        log.exception("блок новостей"); head.extend(["", "📰 НОВОСТИ ЭТОЙ СЕССИИ", "", "Календарь сейчас недоступен"])
+    try: head.extend(format_until_next_briefing(upcoming_events or [], now_utc))
+    except Exception: log.exception("блок событий до следующего брифинга")
+    try:
+        head.extend(format_session_cycle_block(market, now))
+        head.extend(format_next_session_bias(briefs, market))
+    except Exception: log.exception("session cycle / next-session bias")
+    head.extend(["", "📊 ДОСКА ПРИОРИТЕТОВ", ""])
+
+    pair_sections = []
+    for b in briefs:
+        block = format_board([b])
+        if block[:2] == ["📊 ДОСКА ПРИОРИТЕТОВ", ""]:
+            block = block[2:]
+        pair_sections.append((b.symbol, "\n".join(block).strip()))
+
+    tail = []
+    try: tail.extend(format_leaders(leaders, briefs_have_market(briefs), briefs))
+    except Exception:
+        log.exception("лидеры"); tail.extend(["🏆 ЛИДЕР:", "НЕТ", "", "🎯 ПРИОРИТЕТ СЕССИИ:", "НЕТ"])
+    tail.extend(["", "━━━━━━━━━━━━━━━━━━"])
+    return "\n".join(head).strip(), pair_sections, "\n".join(tail).strip()
+
 def format_news_warning(
     event: newsmod.NewsEvent,
     strength: dict[str, float],

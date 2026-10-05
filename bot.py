@@ -483,9 +483,9 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             log.exception("Сборка текста /briefing")
             text = format_strength(rank, last_closed_h1_dt(h1_series(market)))
             text += "\n\nПолная доска пар сейчас недоступна."
-        for part in briefing.split_telegram(localize_telegram(text)):
-            await update.message.reply_text(part)
-        await _send_briefing_pattern_images(context.application, int(update.effective_chat.id), market)
+        await _send_briefing_sequence(
+            context.application, int(update.effective_chat.id), market, strength, rank, dxy, events, upcoming_events
+        )
     except Exception:
         log.exception("Ошибка /briefing")
         await update.message.reply_text(
@@ -817,21 +817,49 @@ def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pa
     return chosen
 
 
-async def _send_briefing_pattern_images(app: Application, chat_id: int, market: dict) -> None:
-    """Отдельные HTF-карточки брифинга; не потребляют lifecycle обычных pattern alerts."""
-    if patterns is None or not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
-        return
-    media=[]
-    for symbol in getattr(cfg, "PAIRS", []):
-        try:
-            card=patterns.briefing_htf_card(symbol, (market or {}).get(symbol) or {})
-            if not card: continue
-            card["image"].seek(0)
-            media.append(InputMediaPhoto(media=card["image"], caption=localize_telegram(card["caption"])))
-        except Exception:
-            log.exception("PATTERN_BRIEFING_IMAGE_FAILED pair=%s", symbol)
-    if media:
-        await app.bot.send_media_group(chat_id=int(chat_id), media=media[:10])
+async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, strength: dict, rank: list, dxy, events: list, upcoming_events: list) -> int:
+    """Брифинг: общий контекст → картинка пары → описание пары → ... → итог.
+
+    Если HTF-фигуры для пары нет, описание всё равно отправляется на своём месте.
+    Обычный lifecycle pattern alerts не затрагивается.
+    """
+    head, pair_sections, tail = briefing.build_briefing_sections(
+        market, strength, rank, dxy, events, upcoming_events
+    )
+    sent = 0
+    for part in briefing.split_telegram(localize_telegram(head)):
+        await send(app, int(chat_id), part); sent += 1
+    for symbol, pair_text in pair_sections:
+        pair_text = localize_telegram(pair_text)
+        card = None
+        if patterns is not None and getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
+            try:
+                card = patterns.briefing_htf_card(symbol, (market or {}).get(symbol) or {})
+            except Exception:
+                log.exception("PATTERN_BRIEFING_IMAGE_FAILED pair=%s", symbol)
+        if card:
+            try:
+                card["image"].seek(0)
+                # Если аналитика пары помещается в caption, она идёт прямо под картинкой
+                # в одном Telegram-сообщении. Иначе фото остаётся визуальным разделителем,
+                # а полный блок отправляется непосредственно следующим сообщением.
+                visual = localize_telegram(card["caption"])
+                combined = f"{visual}\n\n{pair_text}"
+                if len(combined) <= 1024:
+                    await app.bot.send_photo(chat_id=int(chat_id), photo=card["image"], caption=combined)
+                    sent += 1
+                    pair_text = ""
+                else:
+                    await app.bot.send_photo(chat_id=int(chat_id), photo=card["image"], caption=visual)
+                    sent += 1
+            except Exception:
+                log.exception("PATTERN_BRIEFING_IMAGE_SEND_FAILED pair=%s", symbol)
+        if pair_text:
+            for part in briefing.split_telegram(pair_text):
+                await send(app, int(chat_id), part); sent += 1
+    for part in briefing.split_telegram(localize_telegram(tail)):
+        await send(app, int(chat_id), part); sent += 1
+    return sent
 
 
 async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -981,18 +1009,10 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     except Exception:
                         log.exception("новости сессионного брифинга")
                         events = []; upcoming_events = []
-                    text = briefing.build_briefing_text(market, strength, rank, dxy, events, upcoming_events)
-                    parts = briefing.prepare_telegram_parts(text)
-                    already = set(briefing.delivered_parts(state, iid))
-                    for idx, part in enumerate(parts, 1):
-                        if idx in already:
-                            log.info("часть %s/%s уже доставлена, пропуск", idx, len(parts))
-                            continue
-                        await send(context.application, int(chat_id), part)
-                        briefing.mark_part_delivered(state, iid, idx, len(parts))
-                    if len(briefing.delivered_parts(state, iid)) >= len(parts):
-                        await _send_briefing_pattern_images(context.application, int(chat_id), market)
-                        briefing.mark_issue_sent(state, iid, len(parts))
+                    delivered = await _send_briefing_sequence(
+                        context.application, int(chat_id), market, strength, rank, dxy, events, upcoming_events
+                    )
+                    briefing.mark_issue_sent(state, iid, delivered)
                     state["last_rank"] = [c for c, _ in rank]
                     state["last_strength_h1"] = closed_dt
                     state["last_strength_ts"] = time.time()
