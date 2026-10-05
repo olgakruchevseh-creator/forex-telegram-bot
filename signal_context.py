@@ -22,6 +22,7 @@ import zigzag_scanner
 import decision_journal
 import evidence_uncertainty_context
 import information_flow_context
+import evidence_reliability_context
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -313,6 +314,14 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 ctx["information_flow"] = information_flow_context.observe(pair, side, texts)
             except Exception:
                 log.exception("INFORMATION_FLOW_CONTEXT_SKIPPED pair=%s", pair)
+        # Layer 10: reliability/calibration-readiness synthesis. Passive telemetry only.
+        if getattr(cfg, "EVIDENCE_RELIABILITY_ENABLED", True):
+            try:
+                ctx["evidence_reliability"] = evidence_reliability_context.assess(
+                    ctx.get("evidence_uncertainty"), ctx.get("information_flow")
+                )
+            except Exception:
+                log.exception("EVIDENCE_RELIABILITY_CONTEXT_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
