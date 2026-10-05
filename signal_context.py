@@ -21,6 +21,7 @@ import market_regime
 import zigzag_scanner
 import decision_journal
 import evidence_uncertainty_context
+import information_flow_context
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -305,6 +306,13 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
         ctx = inspect(pair, side, market.get(pair) or {}, strength)
         if pair in pair_uncertainty:
             ctx["evidence_uncertainty"] = pair_uncertainty[pair]
+        # Layer 9: lagged information-flow telemetry. Observe-only; computed before
+        # learning the current batch, so it cannot use the present to explain itself.
+        if getattr(cfg, "INFORMATION_FLOW_ENABLED", True):
+            try:
+                ctx["information_flow"] = information_flow_context.observe(pair, side, texts)
+            except Exception:
+                log.exception("INFORMATION_FLOW_CONTEXT_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:

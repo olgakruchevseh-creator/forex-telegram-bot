@@ -966,3 +966,14 @@ STRUCTURAL_BREAK_COOLDOWN_WINDOWS = 1
 # Measures conflict, entropy, effective independent evidence and redundancy.
 # It never creates/vetoes LONG/SHORT and does not change any trading threshold.
 EVIDENCE_UNCERTAINTY_ENABLED = True
+
+# Layer 9 — Lagged Information Flow / Dependency Map (OBSERVE_ONLY).
+# Learns directional lagged dependencies between evidence families from past batches.
+# Never creates/vetoes LONG/SHORT and never changes scores or trading thresholds.
+INFORMATION_FLOW_ENABLED = True
+INFORMATION_FLOW_MIN_HISTORY = 20
+INFORMATION_FLOW_HISTORY_LIMIT = 240
+INFORMATION_FLOW_MIN_SUPPORT = 6
+INFORMATION_FLOW_STRONG_LIFT = 1.50
+INFORMATION_FLOW_STRONG_PHI = 0.30
+INFORMATION_FLOW_LOW_NOVELTY = 0.35
