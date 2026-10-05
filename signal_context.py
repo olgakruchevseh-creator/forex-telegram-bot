@@ -24,6 +24,7 @@ import evidence_uncertainty_context
 import information_flow_context
 import evidence_reliability_context
 import layer11_change_point_context
+import layer12_regime_memory
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -331,6 +332,12 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER11_CHANGE_POINT_SKIPPED pair=%s", pair)
+        # Layer 12: recurring-context memory. OBSERVE_ONLY; consumes Layer 11, never trades.
+        if getattr(cfg, "LAYER12_REGIME_MEMORY_ENABLED", True):
+            try:
+                ctx["regime_memory"] = layer12_regime_memory.assess(pair, ctx, ctx.get("change_point"))
+            except Exception:
+                log.exception("LAYER12_REGIME_MEMORY_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:

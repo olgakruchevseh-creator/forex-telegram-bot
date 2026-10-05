@@ -999,3 +999,12 @@ LAYER11_CONFIRM_DISTANCE = 1.90
 LAYER11_MIN_MEAN_SHIFT = 0.12
 LAYER11_CONFIRM_WINDOWS = 3
 LAYER11_ADAPT_WINDOWS = 6
+
+# Layer 12 — Recurring Context / Regime Memory (OBSERVE_ONLY).
+# Remembers stable evidence-context prototypes after Layer 11 changes.
+# Never creates/vetoes LONG/SHORT and never changes live thresholds.
+LAYER12_REGIME_MEMORY_ENABLED = True
+LAYER12_BOOTSTRAP_SNAPSHOTS = 12
+LAYER12_RECUR_SIMILARITY = 0.88
+LAYER12_NOVEL_CONFIRM_SNAPSHOTS = 4
+LAYER12_MAX_PROTOTYPES = 8
