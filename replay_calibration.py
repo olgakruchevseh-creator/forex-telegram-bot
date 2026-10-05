@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from analysis import closed_candles, atr
 import config as cfg
+import layer14_adaptive_confidence
 
 log=logging.getLogger('fxbot.replay_calibration')
 HORIZONS=(1,3,8)
@@ -140,7 +141,12 @@ def update(market:dict)->int:
         pair=rec.get('pair'); h1=(market.get(pair) or {}).get('H1') if pair else None
         result=_evaluate(rec,h1)
         if result:
-            _append(result); done[did]=result['evaluated_utc']; added+=1
+            _append(result)
+            try:
+                layer14_adaptive_confidence.ingest(rec, result)
+            except Exception:
+                log.exception('LAYER14_CALIBRATION_INGEST_SKIPPED decision_id=%s', did)
+            done[did]=result['evaluated_utc']; added+=1
     # bounded state: journal IDs are hashes; keep recent insertion order
     if len(done)>10000: state['done']=dict(list(done.items())[-10000:])
     _save_json(_state(),state)
