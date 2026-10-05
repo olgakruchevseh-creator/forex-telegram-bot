@@ -23,6 +23,7 @@ import decision_journal
 import evidence_uncertainty_context
 import information_flow_context
 import evidence_reliability_context
+import layer11_change_point_context
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -322,6 +323,14 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("EVIDENCE_RELIABILITY_CONTEXT_SKIPPED pair=%s", pair)
+        # Layer 11: persistent concept-drift / change-point telemetry. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER11_CHANGE_POINT_ENABLED", True):
+            try:
+                ctx["change_point"] = layer11_change_point_context.assess(
+                    pair, ctx, ctx.get("evidence_reliability")
+                )
+            except Exception:
+                log.exception("LAYER11_CHANGE_POINT_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
