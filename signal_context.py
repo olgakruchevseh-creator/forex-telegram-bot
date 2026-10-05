@@ -25,6 +25,7 @@ import information_flow_context
 import evidence_reliability_context
 import layer11_change_point_context
 import layer12_regime_memory
+import layer13_drift_attribution
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -338,6 +339,14 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 ctx["regime_memory"] = layer12_regime_memory.assess(pair, ctx, ctx.get("change_point"))
             except Exception:
                 log.exception("LAYER12_REGIME_MEMORY_SKIPPED pair=%s", pair)
+        # Layer 13: drift attribution + sparse context-transition memory. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER13_DRIFT_ATTRIBUTION_ENABLED", True):
+            try:
+                ctx["drift_attribution"] = layer13_drift_attribution.assess(
+                    pair, ctx, ctx.get("change_point"), ctx.get("regime_memory")
+                )
+            except Exception:
+                log.exception("LAYER13_DRIFT_ATTRIBUTION_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
