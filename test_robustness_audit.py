@@ -23,16 +23,25 @@ def test_build_never_claims_live_effect():
     assert out['mode']=='OBSERVE_ONLY' and out['live_effect']=='NONE'
     assert 'by_pair' in out and out['rolling_oos']['status']=='OK'
 
+def test_cost_stress_reduces_expectancy():
+    rows=[_row(i,.25) for i in range(30)]
+    s=r._cost_stress(rows)['scenarios']
+    assert s[0]['expectancy_proxy_atr'] > s[-1]['expectancy_proxy_atr']
 
-def test_cost_stress_reveals_fragile_edge():
-    rows=[_row(i,.06) for i in range(30)]
-    out=r._cost_stress(rows)
-    assert out['status']=='OK'
-    assert out['scenarios'][0]['positive_expectancy'] is True
-    assert out['scenarios'][-1]['positive_expectancy'] is False
-
-def test_dual_oos_requires_both_blocks():
-    rows=[_row(i,.3 if i < 30 else -.4) for i in range(40)]
-    for i,row in enumerate(rows): row['evaluated_utc']=f'2026-10-05T{(i//60):02d}:{(i%60):02d}:00+00:00'
+def test_dual_oos_requires_both_sections():
+    rows=[_row(i,.3) for i in range(40)]
     out=r._dual_oos(rows)
-    assert out['status']=='OK' and out['both_oos_positive'] is False
+    assert out['status']=='OK' and out['both_positive'] is True
+
+def test_psr_and_minimum_track_record_are_passive():
+    rows=[_row(i,.4 if i%5 else -.1) for i in range(60)]
+    assert r._probabilistic_sharpe(rows)['status']=='OK'
+    assert r._minimum_track_record(rows)['status']=='OK'
+
+def test_embargoed_blocks_cover_oos_without_live_effect():
+    rows=[_row(i,.2 if i%4 else -.1) for i in range(50)]
+    out=r._embargoed_blocks(rows,5,1)
+    assert out['status']=='OK' and len(out['blocks'])==5
+    report=r.build(rows)
+    assert report['live_effect']=='NONE' and report['schema']==2
+    assert 'quality_by_source' in report

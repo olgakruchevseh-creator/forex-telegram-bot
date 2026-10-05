@@ -92,37 +92,6 @@ def _monte_carlo(rows, iterations=1000, seed=2601005):
             'terminal_proxy_atr_median':round(q(finals,.5),3),'terminal_proxy_atr_p95':round(q(finals,.95),3),
             'max_drawdown_proxy_atr_p95':round(q(dds,.95),3),'prob_terminal_positive':round(sum(v>0 for v in finals)/len(finals),3)}
 
-
-
-def _cost_stress(rows, costs_atr=(0.02, 0.05, 0.10, 0.15)):
-    """Passive sensitivity test: subtract hypothetical round-trip costs in ATR.
-
-    Costs are scenarios, not broker estimates. This prevents a small raw edge from
-    looking robust when it disappears under modest spread/slippage assumptions.
-    """
-    xs=[x for x in (_r_value(r) for r in rows) if x is not None]
-    if not xs: return {'status':'INSUFFICIENT_DATA','n':0,'scenarios':[]}
-    scenarios=[]
-    for cost in costs_atr:
-        net=[x-float(cost) for x in xs]
-        scenarios.append({'round_trip_cost_atr':round(float(cost),3),
-                          'net_expectancy_proxy_atr':round(sum(net)/len(net),4),
-                          'positive_expectancy':(sum(net)/len(net))>0})
-    return {'status':'OK','n':len(xs),'note':'Hypothetical round-trip cost scenarios; not broker fill data.',
-            'scenarios':scenarios}
-
-def _dual_oos(rows, train_min=20, test_size=10):
-    """Two contiguous OOS blocks, with no optimization and no live effect."""
-    ordered=sorted(rows,key=lambda r:str(r.get('evaluated_utc') or ''))
-    need=train_min+2*test_size
-    if len(ordered)<need:
-        return {'status':'INSUFFICIENT_DATA','n':len(ordered),'required':need}
-    train=ordered[:train_min]; oos1=ordered[train_min:train_min+test_size]; oos2=ordered[train_min+test_size:train_min+2*test_size]
-    m1=_metrics(oos1); m2=_metrics(oos2)
-    e1=m1.get('expectancy_proxy_atr'); e2=m2.get('expectancy_proxy_atr')
-    return {'status':'OK','train':_metrics(train),'oos1':m1,'oos2':m2,
-            'both_oos_positive':bool(e1 is not None and e2 is not None and e1>0 and e2>0)}
-
 def _groups(rows, key):
     g=defaultdict(list)
     for r in rows:
@@ -135,10 +104,111 @@ def build(rows):
     return {'schema':1,'mode':'OBSERVE_ONLY','updated_utc':datetime.now(timezone.utc).isoformat(timespec='seconds'),
       'metric_note':'Proxy metrics use 3h MFE_ATR - MAE_ATR, not broker P&L. No fees/slippage are invented without fill data.',
       'live_effect':'NONE','overall':_metrics(sent),'rolling_oos':_rolling_oos(sent),
-      'dual_oos':_dual_oos(sent),'cost_stress':_cost_stress(sent),
       'monte_carlo':_monte_carlo(sent,iterations),'by_pair':_groups(sent,'pair'),'by_source':_groups(sent,'source'),'by_regime':_groups(sent,'regime')}
 
 def update():
     if not getattr(cfg,'ROBUSTNESS_AUDIT_ENABLED',True): return None
     report=build(_read_jsonl(_replay(),int(getattr(cfg,'ROBUSTNESS_REPLAY_LIMIT',12000))))
     _save(report); return report
+
+# --- Foreign-repository robustness extensions (OBSERVE_ONLY) ---
+def _proxy_values(rows):
+    return [x for x in (_r_value(r) for r in rows) if x is not None]
+
+def _cost_stress(rows, costs=(0.02,0.05,0.10,0.15)):
+    xs=_proxy_values(rows)
+    if not xs: return {'status':'INSUFFICIENT_DATA','n':0}
+    scenarios=[]
+    for cost in costs:
+        net=[x-float(cost) for x in xs]
+        scenarios.append({'cost_atr':float(cost),'expectancy_proxy_atr':round(sum(net)/len(net),4),
+                          'positive':(sum(net)/len(net))>0})
+    return {'status':'OK','n':len(xs),'scenarios':scenarios}
+
+def _dual_oos(rows, min_total=30):
+    ordered=sorted(rows,key=lambda r:str(r.get('evaluated_utc') or ''))
+    n=len(ordered)
+    if n<min_total:return {'status':'INSUFFICIENT_DATA','n':n}
+    cut1=max(1,int(n*.60)); cut2=max(cut1+1,int(n*.80))
+    a=_metrics(ordered[cut1:cut2]); b=_metrics(ordered[cut2:])
+    vals=[a.get('expectancy_proxy_atr'),b.get('expectancy_proxy_atr')]
+    return {'status':'OK','train_n':cut1,'oos_1':a,'oos_2':b,
+            'both_positive':all(v is not None and v>0 for v in vals)}
+
+def _moments(xs):
+    n=len(xs)
+    if n<3:return None
+    mean=sum(xs)/n; m2=sum((x-mean)**2 for x in xs)/n
+    if m2<=0:return None
+    sd=math.sqrt(m2); skew=sum(((x-mean)/sd)**3 for x in xs)/n
+    kurt=sum(((x-mean)/sd)**4 for x in xs)/n
+    return mean,sd,skew,kurt
+
+def _probabilistic_sharpe(rows, benchmark=0.0):
+    """PSR-style confidence for the replay proxy; diagnostic only, not broker Sharpe."""
+    xs=_proxy_values(rows); n=len(xs); mom=_moments(xs)
+    if n<8 or mom is None:return {'status':'INSUFFICIENT_DATA','n':n}
+    mean,sd,skew,kurt=mom; sr=mean/sd
+    denom=max(1e-12,1-skew*sr+((kurt-1)/4.0)*(sr**2))
+    z=(sr-float(benchmark))*math.sqrt(max(1,n-1))/math.sqrt(denom)
+    prob=0.5*(1+math.erf(z/math.sqrt(2)))
+    return {'status':'OK','n':n,'sharpe_per_observation_proxy':round(sr,4),
+            'benchmark':float(benchmark),'prob_edge_above_benchmark':round(max(0,min(1,prob)),4)}
+
+def _minimum_track_record(rows, confidence=0.95, benchmark=0.0):
+    """Approximate observations required before trusting positive proxy edge."""
+    xs=_proxy_values(rows); n=len(xs); mom=_moments(xs)
+    if n<3 or mom is None:return {'status':'INSUFFICIENT_DATA','n':n}
+    mean,sd,skew,kurt=mom; sr=mean/sd
+    if sr<=benchmark:return {'status':'NO_POSITIVE_EDGE','n':n,'required_n':None}
+    # one-sided normal critical values; 95% is the default audit threshold.
+    z=1.6448536269514722 if confidence>=.95 else 1.2815515655446004
+    adj=max(1e-12,1-skew*sr+((kurt-1)/4.0)*(sr**2))
+    required=int(math.ceil(1+(z*math.sqrt(adj)/max(1e-12,sr-benchmark))**2))
+    return {'status':'OK','n':n,'confidence':confidence,'required_n':required,
+            'enough_history':n>=required}
+
+def _embargoed_blocks(rows, blocks=5, embargo=1):
+    """Leakage-resistant descriptive OOS blocks with a gap around boundaries."""
+    ordered=sorted(rows,key=lambda r:str(r.get('evaluated_utc') or ''))
+    n=len(ordered)
+    if n<max(20,blocks*4):return {'status':'INSUFFICIENT_DATA','n':n}
+    size=max(1,n//blocks); out=[]
+    for i in range(blocks):
+        lo=i*size; hi=n if i==blocks-1 else min(n,(i+1)*size)
+        test=ordered[lo:hi]
+        train=ordered[:max(0,lo-embargo)]+ordered[min(n,hi+embargo):]
+        out.append({'block':i+1,'train_n':len(train),'test_n':len(test),
+                    'test_expectancy':_metrics(test).get('expectancy_proxy_atr')})
+    pos=sum(1 for b in out if (b.get('test_expectancy') or 0)>0)
+    return {'status':'OK','embargo_observations':embargo,'blocks':out,
+            'positive_block_rate':round(pos/len(out),3)}
+
+def _quality_groups(rows,key):
+    g=defaultdict(list)
+    for row in rows:g[str(row.get(key) or '—')].append(row)
+    out={}
+    for name,items in sorted(g.items()):
+        psr=_probabilistic_sharpe(items); mtrl=_minimum_track_record(items)
+        p=psr.get('prob_edge_above_benchmark'); enough=mtrl.get('enough_history')
+        if enough is not True: verdict='НЕДОСТАТОЧНО_ИСТОРИИ'
+        elif p is not None and p>=.95: verdict='СТАТИСТИЧЕСКИ_УСТОЙЧИВО'
+        elif p is not None and p<.60: verdict='СЛАБОЕ_ПОДТВЕРЖДЕНИЕ'
+        else: verdict='НАБЛЮДАТЬ'
+        out[name]={'verdict':verdict,'psr_proxy':psr,'minimum_track_record':mtrl}
+    return out
+
+_original_build=build
+def build(rows):
+    report=_original_build(rows); sent=[r for r in rows if r.get('status')=='SENT']
+    report['schema']=2
+    report['cost_stress']=_cost_stress(sent)
+    report['dual_oos']=_dual_oos(sent)
+    report['probabilistic_sharpe_proxy']=_probabilistic_sharpe(sent)
+    report['minimum_track_record']=_minimum_track_record(sent)
+    report['embargoed_oos_blocks']=_embargoed_blocks(sent)
+    report['quality_by_source']=_quality_groups(sent,'source')
+    report['quality_by_pair']=_quality_groups(sent,'pair')
+    report['quality_by_regime']=_quality_groups(sent,'regime')
+    report['statistical_note']='PSR/MTRL use the replay ATR proxy, not broker returns; all outputs are OBSERVE_ONLY diagnostics.'
+    return report
