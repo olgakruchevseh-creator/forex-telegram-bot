@@ -1426,8 +1426,10 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 text = text.rstrip() + "\n\n" + cpi_note
             source_image = _source_image_for(text, source_text)
             await _deliver_trade_card(context.application, int(chat_id), text, source_image)
-            if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
-                patterns.mark_card_delivered(text)
+            if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in source_text:
+                # Pattern state/cache is keyed by the original detector text. The
+                # displayed primary may be enriched/combined by signal_context/CPI.
+                patterns.mark_card_delivered(source_text)
             # Unified delivery acknowledgement: confirmed facts stay PENDING until
             # the exact Telegram card has been delivered successfully.
             for _module in (liquidity_sweep, breaker_block, smart_money_62_26, daily_high_low, retest_confirmation, ats_reversal_point):

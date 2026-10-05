@@ -31,8 +31,8 @@ CANDLE_PATTERN_NAMES = {
     "Пинцет снизу", "Пинцет сверху",
 }
 
-# Карточки живут только в памяти одного сканирования. Текст остаётся прежним,
-# поэтому общий ранжировщик и Навигатор не зависят от наличия картинки.
+# Карточки рендерятся из замороженных свечей. Для PENDING-событий кэш
+# восстанавливается на каждом скане, чтобы отложенная доставка не теряла картинку.
 _PENDING_CARDS: dict[str, tuple[str, Pattern, dict]] = {}
 
 
@@ -969,7 +969,17 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             news_note, penalty = _pattern_news_context(symbol, now_utc, pattern_events)
             for p in candidates:
                 key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
-                if key in sent or key in pending_keys:
+                if key in sent:
+                    continue
+                if key in pending_keys:
+                    # PENDING survives between scan cycles / Railway restarts, while the
+                    # in-memory chart cache does not. Rebuild the exact chart card from
+                    # current immutable closed candles so a delayed/retried Telegram
+                    # delivery still carries its image.
+                    pending_item = next((item for item in pending.values()
+                                         if isinstance(item, dict) and item.get("key") == key), None)
+                    if pending_item and pending_item.get("text"):
+                        _PENDING_CARDS[pending_item["text"]] = (symbol, p, freeze_by_tf(by_tf))
                     continue
                 residual = _residual_potential(p, by_tf)
                 if not residual.get("eligible", True):

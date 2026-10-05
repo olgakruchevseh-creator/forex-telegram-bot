@@ -196,12 +196,28 @@ def describe(ctx: WeeklyRhythmContext | None) -> str:
 
 _PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
 _DELIVERED: set[str] = set()
+_LAST_EVENT: dict[str, str] = {}
+
+def _event_kind(ctx: WeeklyRhythmContext) -> str:
+    """Stable Telegram event identity; confidence/candidate noise must not create a new alert."""
+    if ctx.invalidated:
+        return "СЦЕНАРИЙ_ОТМЕНЁН"
+    if ctx.extreme_confirmed:
+        return f"ЭКСТРЕМУМ_ПОДТВЕРЖДЁН:{ctx.extreme_candidate}:{ctx.expansion_side}"
+    if ctx.sweep_reclaim:
+        return f"SWEEP_RECLAIM:{ctx.sweep_reclaim}"
+    if ctx.phase == "НЕДЕЛЬНАЯ_ЭКСПАНСИЯ" and ctx.expansion_side:
+        return f"НЕДЕЛЬНАЯ_ЭКСПАНСИЯ:{ctx.expansion_side}"
+    if ctx.phase == "ДВИЖЕНИЕ_РЕАЛИЗОВАНО" and ctx.expansion_side:
+        return f"ДВИЖЕНИЕ_РЕАЛИЗОВАНО:{ctx.expansion_side}"
+    return ""
 
 def _event_key(symbol: str, ctx: WeeklyRhythmContext) -> str:
-    return f"{symbol}:{ctx.phase}:{ctx.expansion_side}:{ctx.extreme_candidate}:{ctx.sweep_reclaim}:{ctx.confidence_state}"
+    return f"{symbol}:{_event_kind(ctx)}"
 
 def _significant(ctx: WeeklyRhythmContext) -> bool:
-    return bool(ctx.extreme_confirmed or ctx.sweep_reclaim or ctx.phase in ("НЕДЕЛЬНАЯ_ЭКСПАНСИЯ","ДВИЖЕНИЕ_РЕАЛИЗОВАНО"))
+    # Telegram is event-driven. Candidate/confidence fluctuations stay internal.
+    return bool(_event_kind(ctx))
 
 def format_alert(symbol: str, ctx: WeeklyRhythmContext) -> str:
     side="ЛОНГ" if ctx.expansion_side>0 else "ШОРТ" if ctx.expansion_side<0 else "НАПРАВЛЕНИЕ НЕ ПОДТВЕРЖДЕНО"
@@ -225,8 +241,10 @@ def process_market(market: dict, strength: dict | None = None) -> list[str]:
     for symbol, by_tf in (market or {}).items():
         ctx=analyze_symbol(symbol,by_tf)
         if not ctx or not _significant(ctx): continue
+        kind=_event_kind(ctx)
         key=_event_key(symbol,ctx)
-        if key in _DELIVERED: continue
+        # The same stable event is never re-announced just because confidence/aux fields moved.
+        if _LAST_EVENT.get(symbol) == kind or key in _DELIVERED: continue
         text=format_alert(symbol,ctx)
         _PENDING_CARDS[text]=({"symbol":symbol,"ctx":ctx},freeze_by_tf(by_tf))
         out.append(text)
@@ -260,4 +278,7 @@ def image_for_alert(text: str):
 
 def mark_delivered(text: str) -> None:
     card=_PENDING_CARDS.pop(text,None)
-    if card:_DELIVERED.add(_event_key(card[0]["symbol"],card[0]["ctx"]))
+    if card:
+        symbol=card[0]["symbol"]; ctx=card[0]["ctx"]
+        _DELIVERED.add(_event_key(symbol,ctx))
+        _LAST_EVENT[symbol]=_event_kind(ctx)
