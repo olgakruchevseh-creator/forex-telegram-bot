@@ -1247,9 +1247,11 @@ def _lifecycle_message(item: dict, action: str, current: float, progress: int,
         if item.get("pullback_reversal_threat"):
             risk_bits.append("глубокое встречное движение + структурный конфликт: угроза разворота повышена")
         risk_text = (" Риск: " + "; ".join(risk_bits) + ".") if risk_bits else ""
+        depth_change = item.get("pullback_depth_change") or ""
+        memory_text = (f" Предыдущий завершённый откат → текущий: {depth_change}; это наблюдаемая последовательность, не прогноз следующего отката." if depth_change else "")
         fact = (
             f"По уже присланному {side} идёт откат {depth}: примерно {bars} H1-свечей, "
-            f"глубина {retrace}% последнего импульса / {pb_atr:.2f} ATR.{zone_text}{risk_text} "
+            f"глубина {retrace}% последнего импульса / {pb_atr:.2f} ATR.{zone_text}{risk_text}{memory_text} "
             f"По времени ориентир ещё около {left}–{max_h1} часов. "
             f"Пока подтверждённой отмены нет, исходный маршрут остаётся активным."
         )
@@ -1525,7 +1527,9 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                     depth_name, band = "СРЕДНИЙ", (0.382, 0.618)
                 else:
                     depth_name, band = "МЕЛКИЙ", (0.236, 0.382)
+                previous_depth = item.get("previous_pullback_depth")
                 item["pullback_depth"] = depth_name
+                item["pullback_depth_change"] = (f"{previous_depth} → {depth_name}" if previous_depth else "")
                 if impulse_size > 0:
                     if direction > 0:
                         z1, z2 = h1_best - impulse_size * band[1], h1_best - impulse_size * band[0]
@@ -1556,6 +1560,8 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
                 action = "PULLBACK_HOLD"
             elif item.get("pullback_open") and retrace <= recover_at:
                 item["pullback_open"] = False
+                item["previous_pullback_depth"] = item.get("pullback_depth")
+                item["previous_pullback_retrace"] = item.get("pullback_retrace")
                 action = "PULLBACK_DONE"
         if not action:
             continue

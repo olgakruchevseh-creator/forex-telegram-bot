@@ -4,7 +4,7 @@
 Кандидаты ведутся внутри; Telegram получает только подтверждённый разворот.
 """
 from __future__ import annotations
-import io, json, logging, os
+import io, json, logging, os, hashlib, statistics
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import config as cfg
@@ -20,6 +20,7 @@ _LAST_CHART_CARDS={}
 class Setup:
     id:str; symbol:str; side:str; extreme:float; trigger:float; created_dt:str
     age:int=0; last_dt:str=''; sent:bool=False; invalid:bool=False
+    wick_anomaly:float=0.0; rejection_class:str='ОБЫЧНЫЙ REJECTION'
 
 def _path():
     root=os.getenv('STATE_DIR','').strip()
@@ -46,12 +47,19 @@ def _candidate(symbol,h4,h1):
     body=abs(c.close-c.open)
     buf=av*getattr(cfg,'ATS_REVERSAL_SWEEP_ATR',.08)
     wick_need=max(body*getattr(cfg,'ATS_REVERSAL_WICK_BODY_RATIO',1.25),av*.18)
+    # Kangaroo-style context: compare the rejection wick with the normal H1 wick
+    # distribution.  It is a quality feature only, never a standalone signal.
+    sample=h1[-int(getattr(cfg,'ATS_REVERSAL_WICK_CONTEXT_BARS',20))-1:-1]
+    prior_wicks=[]
+    for b in sample:
+        prior_wicks.extend((b.high-max(b.open,b.close), min(b.open,b.close)-b.low))
+    typical_wick=statistics.median([w for w in prior_wicks if w>=0]) if prior_wicks else 0.0
     look=int(getattr(cfg,'ATS_REVERSAL_TRIGGER_LOOKBACK',5)); prior=h1[-look-1:-1]
-    side=None; extreme=trigger=0.0
+    side=None; extreme=trigger=0.0; selected_wick=0.0
     if c.high>max(highs)+buf and c.close<max(highs) and wick_up>=wick_need:
-        side='SHORT'; extreme=c.high; trigger=min(x.low for x in prior)
+        side='SHORT'; extreme=c.high; trigger=min(x.low for x in prior); selected_wick=wick_up
     elif c.low<min(lows)-buf and c.close>min(lows) and wick_dn>=wick_need:
-        side='LONG'; extreme=c.low; trigger=max(x.high for x in prior)
+        side='LONG'; extreme=c.low; trigger=max(x.high for x in prior); selected_wick=wick_dn
     if not side:return None
     # Разворот должен иметь смысл относительно H4: не принимаем сигнал,
     # если H4 уже движется в новую сторону — это скорее продолжение, не reversal point.
@@ -59,7 +67,10 @@ def _candidate(symbol,h4,h1):
     if _bias('H4',h4)==wanted:return None
     precision=3 if 'JPY' in symbol else 5
     sid=f'{symbol}|{side}|{c.dt}|{extreme:.{precision}f}'
-    return Setup(sid,symbol,side,extreme,trigger,c.dt,last_dt=c.dt)
+    anomaly=(selected_wick/typical_wick) if typical_wick>0 else 0.0
+    strong_at=float(getattr(cfg,'ATS_REVERSAL_WICK_ANOMALY_RATIO',1.8))
+    rejection='ЭКСТРЕМАЛЬНЫЙ KANGAROO REJECTION' if anomaly>=strong_at else ('СИЛЬНЫЙ REJECTION' if anomaly>=1.25 else 'ОБЫЧНЫЙ REJECTION')
+    return Setup(sid,symbol,side,extreme,trigger,c.dt,last_dt=c.dt,wick_anomaly=round(anomaly,2),rejection_class=rejection)
 
 def _confirm(s,h4,h1,m15,m5,strength):
     if s.sent or s.invalid or not m15:return None
@@ -79,10 +90,11 @@ def _confirm(s,h4,h1,m15,m5,strength):
     if m5 and _bias('M5',m5)==-wanted:return None
     base,quote=split_pair(s.symbol); gap=strength.get(base,0)-strength.get(quote,0)
     strength_ok=gap>=0 if wanted>0 else gap<=0
-    score=76 + (6 if strength_ok else 0) + (5 if _bias('H1',h1)==wanted else 0) + (4 if _bias('H4',h4)==0 else 0)
+    rejection_bonus=3 if s.rejection_class.startswith('ЭКСТРЕМАЛЬНЫЙ') else (1 if s.rejection_class.startswith('СИЛЬНЫЙ') else 0)
+    score=76 + (6 if strength_ok else 0) + (5 if _bias('H1',h1)==wanted else 0) + (4 if _bias('H4',h4)==0 else 0) + rejection_bonus
     score=min(94,score); conf=max(70,min(91,score-4))
     # delivery commit is deferred until Telegram acknowledgement
-    return {'symbol':s.symbol,'side':s.side,'extreme':s.extreme,'trigger':micro,'close':c.close,'dt':c.dt,'quality':score,'confidence':conf,'gap':gap,'strength_ok':strength_ok,'tf':'M15'}
+    return {'symbol':s.symbol,'side':s.side,'extreme':s.extreme,'trigger':micro,'close':c.close,'dt':c.dt,'quality':score,'confidence':conf,'gap':gap,'strength_ok':strength_ok,'tf':'M15','wick_anomaly':s.wick_anomaly,'rejection_class':s.rejection_class}
 
 def _price(sym,x): return f'{x:.3f}' if 'JPY' in sym else f'{x:.5f}'
 def _format(e):
@@ -92,6 +104,7 @@ def _format(e):
       f"Экстремум разворота: {_price(e['symbol'],e['extreme'])}",
       f"Подтверждение: закрытая {e['tf']}-свеча + слом микроструктуры",
       f"Цена подтверждения: {_price(e['symbol'],e['close'])}",
+      f"Хвост H1: {e.get('rejection_class','ОБЫЧНЫЙ REJECTION')} · {float(e.get('wick_anomaly') or 0):.2f}× типичного хвоста",
       f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",f"Вероятность: {e['confidence']}%",'',
       '✅ Факт: цена сняла предыдущий H1-экстремум, вернулась за него и затем закрытой M15-свечой подтвердила смену локальной структуры.',
       'ℹ️ ATS не создаёт сигнал принудительно: без подтверждённого разворота карточка не отправляется.'
