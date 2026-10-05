@@ -798,9 +798,12 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
         return lines
     lines.append(f"Цена: {dxy.price:.2f}")
     lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
-    lines.append(f"Направление: {_ru_display(_dir_word(effective_dxy_bias(dxy)))} · структурное")
+    dxy_direction = _dir_word(effective_dxy_bias(dxy))
+    dxy_icon = "🟢" if dxy_direction == "LONG" else ("🔴" if dxy_direction == "SHORT" else "⚪")
+    lines.append(f"Направление: {dxy_icon} {_ru_display(dxy_direction)} · структурное")
     impulse = "LONG" if dxy.change_pct > 0 else ("SHORT" if dxy.change_pct < 0 else "НЕЙТРАЛЬНО")
-    lines.append(f"Текущий импульс закрытой H1: {_ru_display(impulse)}")
+    impulse_icon = "🟢" if impulse == "LONG" else ("🔴" if impulse == "SHORT" else "⚪")
+    lines.append(f"Текущий импульс закрытой H1: {impulse_icon} {_ru_display(impulse)}")
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
     lines.append(f"ADX: {dxy.adx:.0f}")
@@ -1066,7 +1069,7 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
         tech=technical_pair_side(b)
         if not tech:
             lines.append(
-                f"{b.symbol}: нет направленного прогноза · согласие {b.agree} · состояние {b.state}"
+                f"{b.symbol}: ⚪ нет направленного прогноза · согласие {b.agree} · состояние {b.state}"
             )
             continue
         direction=1 if tech=="LONG" else -1
@@ -1076,7 +1079,8 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
         score += divergence_context.score_delta(div,direction)*2
         score=max(45,min(82,int(round(score))))
         note=(f" · {div.kind}" if div and div.confirmed else "")
-        lines.append(f"{b.symbol}: вероятное направление {_ru_display(tech)} · {score}% · текущая разница силы {b.gap:+.2f}{note}")
+        tech_icon = "🟢" if tech == "LONG" else "🔴"
+        lines.append(f"{b.symbol}: вероятное направление {tech_icon} {_ru_display(tech)} · {score}% · текущая разница силы {b.gap:+.2f}{note}")
     if len(lines)==3: lines.append("Нет подтверждённого прогнозного направления")
     lines.append("Это вероятностная оценка следующей сессии, а не гарантированное направление.")
     return lines
