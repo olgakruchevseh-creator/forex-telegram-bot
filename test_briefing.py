@@ -878,3 +878,23 @@ class TestDxy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BriefingVisualPairHeaderTests(unittest.TestCase):
+    def test_pair_header_and_direction_are_visually_explicit(self):
+        b = briefing.PairBrief(
+            symbol="EUR/USD", stack=None, d1="LONG", h4="LONG", h1="LONG", m15="LONG",
+            zigzag="структура вверх", agree="3/3", agree_n=3, gap=.25,
+            state="ТРЕНД LONG", side="LONG", score=10, news_near=False,
+        )
+        text = "\n".join(briefing.format_board([b]))
+        self.assertIn("━━━ 💱 EUR/USD ━━━", text)
+        self.assertIn("🟢 НАПРАВЛЕНИЕ: ЛОНГ", text)
+
+    def test_unconfirmed_session_direction_is_neutral_not_wait(self):
+        b = briefing.PairBrief(
+            symbol="USD/CAD", stack=None, d1="RANGE", h4="RANGE", h1="RANGE", m15="RANGE",
+            zigzag="структура смешанная", agree="0/3", agree_n=0, gap=0.0,
+            state="RANGE", side=None, score=0, news_near=False,
+        )
+        text = "\n".join(briefing.format_board([b]))
+        self.assertIn("⚪ НАПРАВЛЕНИЕ: НЕЙТРАЛЬНО", text)

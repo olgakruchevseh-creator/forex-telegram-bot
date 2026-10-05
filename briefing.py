@@ -923,7 +923,14 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             force = f"{quote} сильнее {base} на {abs(b.gap):.2f}"
         else:
             force = f"сила почти равная ({b.gap:+.2f})"
-        lines.append(b.symbol)
+        # Отдельный крупный визуальный заголовок пары. Telegram не умеет менять
+        # размер шрифта в plain-text caption, поэтому используем верхний регистр
+        # и рамку-разделитель: пара не теряется между аналитическими строками.
+        lines.append(f"━━━ 💱 {b.symbol.upper()} ━━━")
+        direction = b.side or session_pair_side(b)
+        direction_icon = "🟢" if direction == "LONG" else ("🔴" if direction == "SHORT" else "⚪")
+        direction_text = _ru_display(direction) if direction else "НЕЙТРАЛЬНО"
+        lines.append(f"{direction_icon} НАПРАВЛЕНИЕ: {direction_text}")
         lines.append(f"W1 {_ru_display(b.w1)} · D1 {_ru_display(b.d1)} · H4 {_ru_display(b.h4)} · H1 {_ru_display(b.h1)} · M15 {_ru_display(b.m15)} · M5 {_ru_display(b.m5)}")
         zz_icon = "🟢" if b.zigzag_h4_side > 0 else ("🔴" if b.zigzag_h4_side < 0 else "🟡")
         position_upper = (b.position or "").upper()
