@@ -1,25 +1,27 @@
-"""Read-only registry of decision-critical numeric parameters.
+"""Полный read-only снимок числовых параметров принятия решений.
 
-OBSERVE_ONLY: exposes the active numbers to journal/reports so calibration can be
-reproduced later. It never mutates config and never participates in a verdict.
+OBSERVE_ONLY: ничего не меняет и не участвует в verdict; нужен только для
+воспроизводимой калибровки и сравнения недель.
 """
 from __future__ import annotations
 import config as cfg
 
-_KEYS = (
-    'ATR_PERIOD','MASTER_MIN_QUALITY','MASTER_STRENGTH_MIN_GAP',
-    'KILLER_SCORE_THRESHOLD','KILLER_MIN_FAMILIES',
-    'SIGNAL_INITIAL_MAX_PROGRESS_PCT','CONTEXT_PULLBACK_MAX_PROGRESS_PCT',
-    'SIGNAL_PULLBACK_MIN_RETRACE_PCT','SIGNAL_PULLBACK_DEEP_PCT',
-    'SIGNAL_PULLBACK_DONE_RECOVER_PCT','SIGNAL_PULLBACK_MIN_H1_BARS',
-    'SIGNAL_PULLBACK_EQUIVALENT_MOVE_ATR','SIGNAL_MIN_ROUTE_ATR',
-    'SIGNAL_MIN_FINAL_ROUTE_ATR','SIGNAL_MIN_TR1_DISTANCE_ATR',
-    'SIGNAL_MAX_TREND_MATURITY_ATR','KILLER_NEWS_BLOCK_BEFORE_MINUTES',
-    'KILLER_NEWS_BLOCK_AFTER_MINUTES','PATTERN_MIN_QUALITY','PATTERN_MIN_CONFIDENCE',
-)
+def _numeric(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+def _flatten(prefix, value, out):
+    if _numeric(value):
+        out[prefix] = value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _flatten(f"{prefix}.{key}", item, out)
+    elif isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            if _numeric(item): out[f"{prefix}[{i}]"] = item
 
 def snapshot() -> dict:
-    out={'schema':int(getattr(cfg,'NUMERICAL_CALIBRATION_SCHEMA',1))}
-    for key in _KEYS:
-        if hasattr(cfg,key): out[key]=getattr(cfg,key)
+    out = {"schema": int(getattr(cfg, "NUMERICAL_CALIBRATION_SCHEMA", 2))}
+    for key in sorted(k for k in dir(cfg) if k.isupper() and not k.startswith("__")):
+        try: _flatten(key, getattr(cfg, key), out)
+        except Exception: continue
     return out

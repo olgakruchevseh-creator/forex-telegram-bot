@@ -5,6 +5,9 @@ liquidity sweep/reclaim and the existing structure/regime facts into one lifecyc
 It does not emit Telegram cards, create an evidence family or vote independently.
 """
 from __future__ import annotations
+import json
+import os
+from pathlib import Path
 from dataclasses import dataclass
 import io
 
@@ -239,61 +242,76 @@ def describe(ctx: WeeklyRhythmContext | None) -> str:
 
 
 _PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
-_DELIVERED: set[str] = set()
-_LAST_EVENT: dict[str, str] = {}
 
-def _event_kind(ctx: WeeklyRhythmContext) -> str:
-    """Stable Telegram event identity; confidence/candidate noise must not create a new alert."""
-    # Never announce an invalidation unless there was an actual confirmed direction before it.
-    if ctx.invalidated and ctx.expansion_side:
-        return f"СЦЕНАРИЙ_ОТМЕНЁН:{ctx.expansion_side}"
+def _delivery_path() -> Path:
+    root=os.getenv("STATE_DIR", "").strip()
+    return (Path(root) if root else Path(__file__).resolve().parent) / "weekly_rhythm_delivery.json"
+
+def _load_delivery() -> dict:
+    try:
+        data=json.loads(_delivery_path().read_text(encoding="utf-8"))
+        return data if isinstance(data,dict) else {}
+    except Exception:
+        return {}
+
+def _save_delivery(data: dict) -> None:
+    try:
+        path=_delivery_path(); path.parent.mkdir(parents=True,exist_ok=True)
+        tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8"); tmp.replace(path)
+    except Exception:
+        log.exception("Не удалось сохранить состояние Ритма недели")
+
+def _confirmed_side(ctx: WeeklyRhythmContext) -> int:
+    return int(ctx.expansion_side or 0)
+
+def _event_kind(ctx: WeeklyRhythmContext, previous_side: int = 0) -> str:
+    """Стабильное событие. Отмена использует последнее подтверждённое направление."""
+    if ctx.invalidated and previous_side:
+        return f"СЦЕНАРИЙ_ОТМЕНЁН:{previous_side}"
     if ctx.extreme_confirmed and ctx.expansion_side:
         return f"ЭКСТРЕМУМ_ПОДТВЕРЖДЁН:{ctx.extreme_candidate}:{ctx.expansion_side}"
-    # Sweep/reclaim stays internal until it produces a confirmed weekly direction.
-
     if ctx.phase == "НЕДЕЛЬНАЯ_ЭКСПАНСИЯ" and ctx.expansion_side:
         return f"НЕДЕЛЬНАЯ_ЭКСПАНСИЯ:{ctx.expansion_side}"
     if ctx.phase == "ДВИЖЕНИЕ_РЕАЛИЗОВАНО" and ctx.expansion_side:
         return f"ДВИЖЕНИЕ_РЕАЛИЗОВАНО:{ctx.expansion_side}"
     return ""
 
-def _event_key(symbol: str, ctx: WeeklyRhythmContext) -> str:
-    return f"{symbol}:{_event_kind(ctx)}"
+def _event_key(symbol: str, kind: str) -> str:
+    return f"{symbol}:{kind}"
 
 def _significant(ctx: WeeklyRhythmContext) -> bool:
-    # Telegram is event-driven. Candidate/confidence fluctuations stay internal.
-    return bool(_event_kind(ctx))
+    """Совместимость тестов: без предыдущего подтверждения отмена остаётся тихой."""
+    return bool(_event_kind(ctx, 0))
 
-def format_alert(symbol: str, ctx: WeeklyRhythmContext) -> str:
-    side="ЛОНГ" if ctx.expansion_side>0 else "ШОРТ" if ctx.expansion_side<0 else "НАПРАВЛЕНИЕ НЕ ПОДТВЕРЖДЕНО"
+def format_alert(symbol: str, ctx: WeeklyRhythmContext, previous_side: int = 0) -> str:
+    display_side=ctx.expansion_side or (previous_side if ctx.invalidated else 0)
+    side="ЛОНГ" if display_side>0 else "ШОРТ" if display_side<0 else "НАПРАВЛЕНИЕ НЕ ПОДТВЕРЖДЕНО"
+    phase="СЦЕНАРИЙ ОТМЕНЁН" if ctx.invalidated and previous_side else ctx.phase
     return "\n".join([
-        "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ",
-        "━━━━━━━━━━━━━━━━━━",
-        f"Пара: {symbol}", f"Фаза: {ctx.phase}", f"Направление: {side}",
-        f"Модель недели: {ctx.rhythm_model or 'формируется'}",
-        f"День экстремума: {ctx.extreme_day or 'ещё не подтверждён'}",
+        "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ", "━━━━━━━━━━━━━━━━━━",
+        f"Пара: {symbol}", f"Фаза: {phase}", f"Направление: {side}",
+        f"Модель недели: {ctx.rhythm_model or 'формируется'}", f"День экстремума: {ctx.extreme_day or 'ещё не подтверждён'}",
         f"Уверенность контекста: {ctx.confidence}/100 · {ctx.confidence_state}",
         f"Weekly Open: {ctx.weekly_open:.5f}", f"WH / WL: {ctx.weekly_high:.5f} / {ctx.weekly_low:.5f}",
-        f"Положение в недельном диапазоне: {ctx.week_position*100:.0f}%",
-        f"H4: {ctx.h4_pd} · D1: {ctx.d1_pd}",
-        f"Sweep/возврат: {ctx.sweep_reclaim or 'нет подтверждения'}",
-        f"Структура: {ctx.structure_state} · Режим: {ctx.regime}",
-        f"Реализация недельного движения: {ctx.realization*100:.0f}%",
-        f"Штраф за конфликты: {ctx.conflict_penalty}",
-        "Факт: это недельный контекст, а не самостоятельный сигнал на вход.",
+        f"Положение в недельном диапазоне: {ctx.week_position*100:.0f}%", f"H4: {ctx.h4_pd} · D1: {ctx.d1_pd}",
+        f"Снятие ликвидности/возврат: {ctx.sweep_reclaim or 'нет подтверждения'}",
+        f"Структура: {ctx.structure_state} · Режим: {ctx.regime}", f"Реализация недельного движения: {ctx.realization*100:.0f}%",
+        f"Штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст, а не самостоятельный сигнал на вход.",
     ])
 
 def process_market(market: dict, strength: dict | None = None) -> list[str]:
+    state=_load_delivery(); delivered=set(state.get("delivered") or []); last=state.get("last_event") or {}; confirmed=state.get("confirmed_side") or {}
     out=[]
     for symbol, by_tf in (market or {}).items():
         ctx=analyze_symbol(symbol,by_tf)
-        if not ctx or not _significant(ctx): continue
-        kind=_event_kind(ctx)
-        key=_event_key(symbol,ctx)
-        # The same stable event is never re-announced just because confidence/aux fields moved.
-        if _LAST_EVENT.get(symbol) == kind or key in _DELIVERED: continue
-        text=format_alert(symbol,ctx)
-        _PENDING_CARDS[text]=({"symbol":symbol,"ctx":ctx},freeze_by_tf(by_tf))
+        if not ctx: continue
+        previous=int(confirmed.get(symbol,0) or 0)
+        kind=_event_kind(ctx,previous)
+        if not kind: continue
+        key=_event_key(symbol,kind)
+        if last.get(symbol)==kind or key in delivered: continue
+        text=format_alert(symbol,ctx,previous)
+        _PENDING_CARDS[text]=({"symbol":symbol,"ctx":ctx,"kind":kind,"previous_side":previous},freeze_by_tf(by_tf))
         out.append(text)
     return out
 
@@ -325,7 +343,10 @@ def image_for_alert(text: str):
 
 def mark_delivered(text: str) -> None:
     card=_PENDING_CARDS.pop(text,None)
-    if card:
-        symbol=card[0]["symbol"]; ctx=card[0]["ctx"]
-        _DELIVERED.add(_event_key(symbol,ctx))
-        _LAST_EVENT[symbol]=_event_kind(ctx)
+    if not card: return
+    event=card[0]; symbol=event["symbol"]; ctx=event["ctx"]; kind=event.get("kind") or _event_kind(ctx,event.get("previous_side",0))
+    state=_load_delivery(); delivered=set(state.get("delivered") or []); delivered.add(_event_key(symbol,kind))
+    state["delivered"]=sorted(delivered)[-500:]; state.setdefault("last_event",{})[symbol]=kind
+    if ctx.expansion_side: state.setdefault("confirmed_side",{})[symbol]=int(ctx.expansion_side)
+    elif ctx.invalidated: state.setdefault("confirmed_side",{}).pop(symbol,None)
+    _save_delivery(state)

@@ -1059,3 +1059,23 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     state["observed"] = observed
     _save(state)
     return messages
+
+
+def briefing_htf_card(symbol: str, by_tf: dict):
+    """Read-only: лучшая подтверждённая HTF-фигура для сессионного брифинга.
+
+    Не трогает pending/sent lifecycle обычного сканера, поэтому отдельные
+    внутридневные уведомления продолжают работать независимо.
+    """
+    if not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
+        return None
+    priority = {"W1": 0, "D1": 1, "H4": 2, "H1": 3}
+    found = [p for p in scan_symbol(symbol, by_tf) if p.tf in priority]
+    if not found:
+        return None
+    found.sort(key=lambda p: (priority[p.tf], -p.quality, -p.confidence))
+    p = found[0]
+    image = render_pattern_chart(symbol, p, by_tf)
+    side = "ЛОНГ" if p.side == "LONG" else "ШОРТ"
+    caption = f"🧩 {symbol} · {p.tf} · {p.name}\nНаправление фигуры: {side} · качество {p.quality}/100 · вероятность {p.confidence}%"
+    return {"image": image, "caption": caption, "tf": p.tf, "pattern": p.name}

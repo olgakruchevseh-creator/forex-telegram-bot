@@ -483,8 +483,9 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             log.exception("Сборка текста /briefing")
             text = format_strength(rank, last_closed_h1_dt(h1_series(market)))
             text += "\n\nПолная доска пар сейчас недоступна."
-        for part in briefing.split_telegram(text):
+        for part in briefing.split_telegram(localize_telegram(text)):
             await update.message.reply_text(part)
+        await _send_briefing_pattern_images(context.application, int(update.effective_chat.id), market)
     except Exception:
         log.exception("Ошибка /briefing")
         await update.message.reply_text(
@@ -816,6 +817,23 @@ def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pa
     return chosen
 
 
+async def _send_briefing_pattern_images(app: Application, chat_id: int, market: dict) -> None:
+    """Отдельные HTF-карточки брифинга; не потребляют lifecycle обычных pattern alerts."""
+    if patterns is None or not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
+        return
+    media=[]
+    for symbol in getattr(cfg, "PAIRS", []):
+        try:
+            card=patterns.briefing_htf_card(symbol, (market or {}).get(symbol) or {})
+            if not card: continue
+            card["image"].seek(0)
+            media.append(InputMediaPhoto(media=card["image"], caption=localize_telegram(card["caption"])))
+        except Exception:
+            log.exception("PATTERN_BRIEFING_IMAGE_FAILED pair=%s", symbol)
+    if media:
+        await app.bot.send_media_group(chat_id=int(chat_id), media=media[:10])
+
+
 async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Выход до чтения API-ключа и запросов: в выходные нет расхода кредитов.
     if not market_schedule.automatic_jobs_allowed():
@@ -973,6 +991,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         await send(context.application, int(chat_id), part)
                         briefing.mark_part_delivered(state, iid, idx, len(parts))
                     if len(briefing.delivered_parts(state, iid)) >= len(parts):
+                        await _send_briefing_pattern_images(context.application, int(chat_id), market)
                         briefing.mark_issue_sent(state, iid, len(parts))
                     state["last_rank"] = [c for c, _ in rank]
                     state["last_strength_h1"] = closed_dt

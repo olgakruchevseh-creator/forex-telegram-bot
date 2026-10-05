@@ -948,3 +948,6 @@ ICT_ROUTE_UNRECLAIMED_SOURCE_IS_CONFLICT = True
 # FVG remains imbalance/PD-array context and is never promoted to a stop-liquidity pool.
 LIQUIDITY_BREAK_ACCEPTANCE_ENABLED = True
 LIQUIDITY_BREAK_RETEST_ENABLED = True
+
+# Текущее направление сессии: H1/M15 должны подтверждаться относительной силой.
+BRIEFING_SESSION_MIN_STRENGTH_GAP = 0.03

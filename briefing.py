@@ -394,13 +394,31 @@ def _briefing_context(symbol: str, by_tf: dict, side: Optional[str], strength: O
     support=sum(v>0 for v in groups); against=sum(v<0 for v in groups)
     return support-against, support, against
 
+def session_pair_side(brief: PairBrief) -> Optional[str]:
+    """Текущее направление сессии: свежие H1/M15 + сила, H4 только как veto.
+
+    D1 остаётся старшим контекстом и не может заставить брифинг показывать
+    устаревшее направление текущей сессии.
+    """
+    h4 = _tf_bias(brief.stack, "H4")
+    h1 = _tf_bias(brief.stack, "H1")
+    m15 = _tf_bias(brief.stack, "M15")
+    if not h1 or not m15 or h1 != m15:
+        return None
+    side = "LONG" if h1 > 0 else "SHORT"
+    min_gap = float(getattr(cfg, "BRIEFING_SESSION_MIN_STRENGTH_GAP", 0.03))
+    if side == "LONG" and brief.gap < min_gap:
+        return None
+    if side == "SHORT" and brief.gap > -min_gap:
+        return None
+    # H4 против свежей H1/M15 = переход, а не подтверждённое направление сессии.
+    if h4 and h4 != h1:
+        return None
+    return side
+
+
 def pair_side(brief: PairBrief) -> Optional[str]:
-    side = technical_pair_side(brief)
-    if side == "LONG" and brief.gap > 0:
-        return side
-    if side == "SHORT" and brief.gap < 0:
-        return side
-    return None
+    return session_pair_side(brief)
 
 
 def leader_confidence(brief: PairBrief) -> int:
@@ -939,6 +957,8 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         if technical_side and b.zigzag_h4_side and b.zigzag_h4_side != _side_int(technical_side):
             agree_label += " · ⚠️ Зигзаг H4 против"
         lines.append(f"Согласие D1/H4/H1: {agree_label}")
+        session_side = session_pair_side(b)
+        lines.append(f"Направление текущей сессии: {_ru_display(session_side) if session_side else 'НЕ ПОДТВЕРЖДЕНО'}")
         relation = b.strength_relation or _strength_relation(b.gap, technical_pair_side(b))
         lines.append(f"Сила: {force} · {relation}")
         if b.context_support or b.context_against:
@@ -1147,7 +1167,7 @@ def format_news_warning(
             [
                 "🇺🇸 DXY",
                 f"Цена: {dxy.price:.2f}",
-                f"Направление: {_dir_word(dxy.bias)}",
+                f"Направление: {_ru_display(_dir_word(dxy.bias))}",
                 f"ADX: {dxy.adx:.0f}",
                 dxy_context(score, dxy),
                 "",
