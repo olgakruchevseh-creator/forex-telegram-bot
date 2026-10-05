@@ -42,3 +42,21 @@ def test_weekly_rhythm_chart_is_real_png(monkeypatch):
     x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
     image=w.render_chart({'symbol':'EUR/USD','ctx':x},{'H4':h4})
     assert image is not None and image.read(8)==b'\x89PNG\r\n\x1a\n'
+
+def test_unconfirmed_or_invalidated_context_is_silent(monkeypatch):
+    start=datetime(2026,9,21,tzinfo=timezone.utc)
+    h4=bars(start,70,240); h1=bars(start,280,60); d1=bars(start,14,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':0,'state':'FORMING'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'RANGE'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x.expansion_side == 0
+    assert w._event_kind(x) == ''
+    assert not w._significant(x)
+
+def test_weekday_model_is_context_not_forced(monkeypatch):
+    start=datetime(2026,9,21,tzinfo=timezone.utc)
+    h4=bars(start,70,240); h1=bars(start,280,60); d1=bars(start,14,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':1,'state':'CONFIRMED'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'TREND'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x.rhythm_model in {'','РАННИЙ_ЭКСТРЕМУМ_ПОНЕДЕЛЬНИК','РАННИЙ_ЭКСТРЕМУМ_ВТОРНИК','РАЗВОРОТ_СЕРЕДИНЫ_НЕДЕЛИ','ПОЗДНИЙ_ЭКСТРЕМУМ_ЧЕТВЕРГ','НЕТИПИЧНОЕ_ОКНО'}

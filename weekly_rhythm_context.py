@@ -33,6 +33,8 @@ class WeeklyRhythmContext:
     expansion_side: int
     extreme_candidate: str
     extreme_confirmed: bool
+    extreme_day: str
+    rhythm_model: str
     sweep_reclaim: str
     realization: float
     target: float | None
@@ -138,17 +140,57 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     expansion_side=raw_side if raw_side and confidence>=min_conf and not invalidated else 0
     confidence_state="ПОДТВЕРЖДЕНО" if expansion_side else ("ОТМЕНЕНО" if invalidated else "КАНДИДАТ")
 
-    # A weekly extreme is first a candidate; confirmation needs reclaim + opposite structural delivery.
+    # Weekly rhythm: identify WHEN the current weekly extreme formed.  The weekday is
+    # context, never a forced forecast.  Tue/Wed/Thu are common formation windows, but
+    # confirmation still requires price delivery away from the extreme + HTF location + structure.
     candidate=""
+    extreme_day=""
+    rhythm_model=""
     recent_n=max(1,int(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_RECENT_H4",6)))
     recent=current[-recent_n:]
-    if recent:
-        if min(c.low for c in recent)<=wl and px>=wl+reject: candidate="LOW"
-        if max(c.high for c in recent)>=wh and px<=wh-reject:
-            # If both occurred in a tiny early range, keep the edge furthest from price.
-            if not candidate or (wh-px)>(px-wl): candidate="HIGH"
-    confirmed=(candidate=="LOW" and sweep=="SSL_RECLAIM" and sside>0 and sstate=="SHIFT_CONFIRMED") or \
-              (candidate=="HIGH" and sweep=="BSL_RECLAIM" and sside<0 and sstate=="SHIFT_CONFIRMED")
+    low_bar=min(current,key=lambda c: float(c.low))
+    high_bar=max(current,key=lambda c: float(c.high))
+    low_dt=_dt(low_bar.dt); high_dt=_dt(high_bar.dt)
+    low_age=max(0,(last_dt-low_dt).total_seconds()/3600.0) if low_dt else 999
+    high_age=max(0,(last_dt-high_dt).total_seconds()/3600.0) if high_dt else 999
+    away_atr=float(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_AWAY_ATR",0.35))*max(av,1e-12)
+    low_departed=px >= wl + away_atr
+    high_departed=px <= wh - away_atr
+    max_age=float(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_MAX_AGE_HOURS",72))
+
+    # Candidate is retained internally.  Merely printing a fresh WH/WL is not an event.
+    if low_age <= max_age and low_departed: candidate="LOW"
+    if high_age <= max_age and high_departed:
+        if not candidate or (wh-px)>(px-wl): candidate="HIGH"
+
+    ext_dt=low_dt if candidate=="LOW" else high_dt if candidate=="HIGH" else None
+    if ext_dt:
+        extreme_day=names[ext_dt.isocalendar().weekday-1]
+        ed=ext_dt.isocalendar().weekday
+        if ed==1: rhythm_model="РАННИЙ_ЭКСТРЕМУМ_ВТОРНИК"
+        elif ed==2: rhythm_model="РАЗВОРОТ_СЕРЕДИНЫ_НЕДЕЛИ"
+        elif ed==3: rhythm_model="ПОЗДНИЙ_ЭКСТРЕМУМ_ЧЕТВЕРГ"
+        elif ed==0: rhythm_model="РАННИЙ_ЭКСТРЕМУМ_ПОНЕДЕЛЬНИК"
+        else: rhythm_model="НЕТИПИЧНОЕ_ОКНО"
+
+    # Screenshot logic: an extreme can be confirmed either by an external liquidity reclaim
+    # OR by a genuine departure from the weekly extreme while H4 is in the correct half of
+    # its dealing range.  In both cases structural delivery in the new direction is mandatory.
+    low_location=h4pd in ("DISCOUNT","EQUILIBRIUM")
+    high_location=h4pd in ("PREMIUM","EQUILIBRIUM")
+    low_reclaim=(sweep=="SSL_RECLAIM") or (low_departed and low_location)
+    high_reclaim=(sweep=="BSL_RECLAIM") or (high_departed and high_location)
+    strong_structure=sstate in ("CONFIRMED","SHIFT_CONFIRMED")
+    confirmed=(candidate=="LOW" and low_reclaim and sside>0 and strong_structure) or \
+              (candidate=="HIGH" and high_reclaim and sside<0 and strong_structure)
+
+    # A confirmed weekly extreme is itself the directional rhythm.  This is context, not entry.
+    if confirmed:
+        extreme_side=1 if candidate=="LOW" else -1
+        if confidence >= int(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_MIN_CONFIDENCE",58)):
+            expansion_side=extreme_side
+            confidence_state="ПОДТВЕРЖДЕНО"
+            invalidated=False
 
     if weekday<=1 and realization < float(getattr(cfg,"WEEKLY_RHYTHM_EXPANSION_REALIZATION",0.55)):
         phase="НАЧАЛО_НЕДЕЛИ"
@@ -162,6 +204,8 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
         phase="ПОИСК_ЭКСТРЕМУМА"
     if realization>=float(getattr(cfg,"WEEKLY_RHYTHM_MATURE_REALIZATION",0.90)) and phase=="НЕДЕЛЬНАЯ_ЭКСПАНСИЯ":
         phase="ДВИЖЕНИЕ_РЕАЛИЗОВАНО"
+    if weekday==4 and expansion_side and realization>=float(getattr(cfg,"WEEKLY_RHYTHM_FRIDAY_MATURE_REALIZATION",0.70)):
+        phase="ПЯТНИЦА_ПОДВЕДЕНИЕ_ИТОГА"
 
     target=None; target_name=""
     if expansion_side>0:
@@ -173,7 +217,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
 
     return WeeklyRhythmContext(weekday,names[weekday-1],wo,wh,wl,px,pos,
         h4pd, d1pd,
-        phase,expansion_side,candidate,bool(confirmed),sweep,realization,target,target_name,sstate,regime,
+        phase,expansion_side,candidate,bool(confirmed),extreme_day,rhythm_model,sweep,realization,target,target_name,sstate,regime,
         confidence,confidence_state,penalty,invalidated)
 
 
@@ -200,12 +244,13 @@ _LAST_EVENT: dict[str, str] = {}
 
 def _event_kind(ctx: WeeklyRhythmContext) -> str:
     """Stable Telegram event identity; confidence/candidate noise must not create a new alert."""
-    if ctx.invalidated:
-        return "СЦЕНАРИЙ_ОТМЕНЁН"
-    if ctx.extreme_confirmed:
+    # Never announce an invalidation unless there was an actual confirmed direction before it.
+    if ctx.invalidated and ctx.expansion_side:
+        return f"СЦЕНАРИЙ_ОТМЕНЁН:{ctx.expansion_side}"
+    if ctx.extreme_confirmed and ctx.expansion_side:
         return f"ЭКСТРЕМУМ_ПОДТВЕРЖДЁН:{ctx.extreme_candidate}:{ctx.expansion_side}"
-    if ctx.sweep_reclaim:
-        return f"SWEEP_RECLAIM:{ctx.sweep_reclaim}"
+    # Sweep/reclaim stays internal until it produces a confirmed weekly direction.
+
     if ctx.phase == "НЕДЕЛЬНАЯ_ЭКСПАНСИЯ" and ctx.expansion_side:
         return f"НЕДЕЛЬНАЯ_ЭКСПАНСИЯ:{ctx.expansion_side}"
     if ctx.phase == "ДВИЖЕНИЕ_РЕАЛИЗОВАНО" and ctx.expansion_side:
@@ -225,6 +270,8 @@ def format_alert(symbol: str, ctx: WeeklyRhythmContext) -> str:
         "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ",
         "━━━━━━━━━━━━━━━━━━",
         f"Пара: {symbol}", f"Фаза: {ctx.phase}", f"Направление: {side}",
+        f"Модель недели: {ctx.rhythm_model or 'формируется'}",
+        f"День экстремума: {ctx.extreme_day or 'ещё не подтверждён'}",
         f"Уверенность контекста: {ctx.confidence}/100 · {ctx.confidence_state}",
         f"Weekly Open: {ctx.weekly_open:.5f}", f"WH / WL: {ctx.weekly_high:.5f} / {ctx.weekly_low:.5f}",
         f"Положение в недельном диапазоне: {ctx.week_position*100:.0f}%",
