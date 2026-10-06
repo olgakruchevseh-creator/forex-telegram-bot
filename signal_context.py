@@ -42,6 +42,7 @@ import layer26_mathematical_coherence
 import layer27_uncertainty_budget
 import layer28_decision_margin
 import layer29_support_geometry
+import layer30_stack_consistency
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -514,6 +515,18 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER29_SUPPORT_GEOMETRY_SKIPPED pair=%s", pair)
+        # Layer 30: cross-layer mathematical consistency diagnostics. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER30_STACK_CONSISTENCY_ENABLED", True):
+            try:
+                ctx["stack_consistency"] = layer30_stack_consistency.assess(
+                    pair, ctx.get("mathematical_core"), ctx.get("mathematical_stability"),
+                    ctx.get("mathematical_confidence"), ctx.get("mathematical_resilience"),
+                    ctx.get("information_value"), ctx.get("mathematical_coherence"),
+                    ctx.get("uncertainty_budget"), ctx.get("decision_margin"),
+                    ctx.get("support_geometry")
+                )
+            except Exception:
+                log.exception("LAYER30_STACK_CONSISTENCY_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
