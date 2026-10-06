@@ -27,6 +27,7 @@ import layer11_change_point_context
 import layer12_regime_memory
 import layer13_drift_attribution
 import layer14_adaptive_confidence
+import layer15_event_sequence
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -354,6 +355,14 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 ctx["adaptive_confidence"] = layer14_adaptive_confidence.assess(pair, ctx)
             except Exception:
                 log.exception("LAYER14_ADAPTIVE_CONFIDENCE_SKIPPED pair=%s", pair)
+        # Layer 15: ordered event/setup lifecycle. OBSERVE_ONLY; no new vote or signal.
+        if getattr(cfg, "LAYER15_EVENT_SEQUENCE_ENABLED", True):
+            try:
+                ctx["event_sequence"] = layer15_event_sequence.assess(
+                    pair, side, texts, market.get(pair) or {}, ctx
+                )
+            except Exception:
+                log.exception("LAYER15_EVENT_SEQUENCE_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
