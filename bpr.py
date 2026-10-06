@@ -12,6 +12,7 @@ import io, json, logging, os
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 import ohlc_movement
 from zone_reaction_confirmation import confirm_zone_reaction
 from analysis import Candle, atr, closed_candles
@@ -155,6 +156,7 @@ def _reaction(zone: BPRZone, bars: list[Candle], by_tf: dict) -> tuple[str, dict
 
 
 def format_message(zone: BPRZone, side: str, meta: dict) -> str:
+    module_evidence_bus.publish('BPR', zone, side=side, **meta)
     quality = max(74, min(96, int(round(72 + zone.width_atr*18 + max(0, meta['score']-50)*.22))))
     confidence = max(70, min(92, quality-4))
     return "\n".join([

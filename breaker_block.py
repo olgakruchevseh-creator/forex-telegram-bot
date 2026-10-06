@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
@@ -144,6 +145,7 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(e: dict) -> str:
+    module_evidence_bus.publish('BREAKER', e)
     role = "сопротивление" if e["side"] == "SHORT" else "поддержку"
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", f"🔄 BREAKER BLOCK ПОДТВЕРЖДЁН — {e['side']}", "━━━━━━━━━━━━━━━━━━", "",

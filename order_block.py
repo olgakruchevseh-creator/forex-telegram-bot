@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 import ohlc_movement
 import mitigation_block
 import zone_reaction_confirmation as zrc
@@ -216,6 +217,7 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(event: dict) -> str:
+    module_evidence_bus.publish('ORDER_BLOCK', event)
     fvg = "есть" if event["fvg"] else "не является обязательным"
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", f"🧱 РЕТЕСТ ORDER BLOCK — {event['side']}", "━━━━━━━━━━━━━━━━━━", "",

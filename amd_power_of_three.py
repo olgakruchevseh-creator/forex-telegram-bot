@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 import ohlc_movement
 import choch
 import mss
@@ -202,6 +203,7 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(event: dict) -> str:
+    module_evidence_bus.publish('AMD_PO3', event)
     icon = "🟢" if event["side"] == "LONG" else "🔴"
     swept = "нижней" if event["side"] == "LONG" else "верхней"
     opposite = "верхней" if event["side"] == "LONG" else "нижней"

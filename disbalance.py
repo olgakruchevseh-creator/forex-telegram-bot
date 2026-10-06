@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 import ohlc_movement
 import displacement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
@@ -165,6 +166,7 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(s: Signal) -> str:
+    module_evidence_bus.publish('FVG', s)
     meaning = "покупатели создали сильное смещение вверх" if s.side == "LONG" else "продавцы создали сильное смещение вниз"
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",

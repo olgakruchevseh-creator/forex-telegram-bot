@@ -12,6 +12,7 @@ import hashlib, io, json, logging, os
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 import amd_power_of_three
@@ -104,6 +105,7 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
 def _p(symbol: str, v: float) -> str: return f"{v:.3f}" if "JPY" in symbol else f"{v:.5f}"
 
 def format_message(e: dict) -> str:
+    module_evidence_bus.publish('CRT', e)
     icon = "🟢" if e["side"] == "LONG" else "🔴"
     swept = "LOW" if e["side"] == "LONG" else "HIGH"
     amd = "ПОДТВЕРЖДЕНО — AMD совпадает" if e["amd_match"] else "CRT подтверждён самостоятельно"

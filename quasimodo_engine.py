@@ -12,6 +12,7 @@ import io, json, os
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 import ohlc_movement
 from analysis import Candle, atr, closed_candles
 from chart_snapshot import freeze_by_tf
@@ -104,6 +105,7 @@ def _reaction(z,bars,by_tf):
     return {'dt':c.dt,'close':c.close,'guard':guard,'directional':directional,'net_atr':net,'score':score,'early':early}
 
 def format_message(z,meta):
+    module_evidence_bus.publish('QUASIMODO', z, **meta)
     side='LONG' if z.side>0 else 'SHORT'; quality=max(76,min(96,int(round(78+(z.displacement_atr-.7)*8+(meta['score']-55)*.15))))
     prob=max(70,min(92,quality-5))
     return '\n'.join([

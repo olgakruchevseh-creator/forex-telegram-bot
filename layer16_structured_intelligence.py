@@ -21,6 +21,7 @@ import mss
 import cisd
 import market_regime
 import premium_discount
+import module_evidence_bus
 
 
 def _side(v):
@@ -93,6 +94,15 @@ def assess(pair:str, side, by_tf:dict, ctx:dict|None=None)->dict:
             facts.append(_fact("REGIME","MARKET_REGIME",0,getattr(rg,"timeframe",""),
                 getattr(rg,"regime",getattr(rg,"state",str(rg)))))
     except Exception as e: errors.append("regime:"+type(e).__name__)
+
+    # 5) Specialist-module evidence bridge. Producers publish only already-confirmed
+    # events; Layer 16 never re-runs their detectors or mutates their lifecycle.
+    try:
+        for ev in module_evidence_bus.snapshot(pair, s):
+            extra={k:v for k,v in ev.items() if k not in {"family","event","side","timeframe","tf","state","pair"}}
+            facts.append(_fact(ev.get("family","SPECIALIST"), ev.get("event","MODULE_EVENT"),
+                ev.get("side",s), ev.get("timeframe",""), ev.get("state","CONFIRMED"), **extra))
+    except Exception as e: errors.append("module_evidence_bus:"+type(e).__name__)
 
     # Canonical ordered chain.  A family can contribute several lifecycle stages,
     # but duplicate identical events are collapsed deterministically.

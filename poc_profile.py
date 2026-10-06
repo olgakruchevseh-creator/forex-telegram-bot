@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config as cfg
+import module_evidence_bus
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.poc")
@@ -240,6 +241,7 @@ def _price(symbol: str, v: float) -> str:
 
 
 def format_message(e: dict) -> str:
+    module_evidence_bus.publish('POC', e)
     ref_name = e.get("value_reference", "POC")
     action = (f"возврат и закрепление выше {ref_name}" if e["side"] == "LONG"
               else f"отбой и закрепление ниже {ref_name}")
