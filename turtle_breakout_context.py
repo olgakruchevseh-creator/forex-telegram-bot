@@ -12,7 +12,7 @@ It never creates a Telegram signal and never counts as an independent KILLER fam
 All decisions use CLOSED candles only.
 """
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from analysis import atr, closed_candles
 import config as cfg
 import liquidity_map
@@ -45,6 +45,9 @@ class TurtleBreakoutContext:
     score: int=50
     reason: str=""
     family: str="TURTLE_BREAKOUT_CONTEXT"
+    delayed_failure: bool=False
+    failure_bars: int=0
+    body_break_seen: bool=False
     def as_dict(self): return asdict(self)
 
 def _side(direction):
@@ -79,7 +82,29 @@ def analyze_symbol(symbol, by_tf, direction):
     last=look[-1]; prev=look[-2]; prev2=look[-3]
     plus_one=bool(beyond(prev) and reclaim(last))
     immediate_failure=bool(reclaim(last))
-    trapped=bool((plus_one or immediate_failure) and attempts>=2)
+    # Multi-bar failed breakout: a BODY/CLOSE genuinely escaped the level, but
+    # price failed to build two-close acceptance and reclaimed within a short
+    # closed-candle window. This catches traps that are slower than Plus One
+    # without treating an old unrelated breakout as a current reversal.
+    failure_window=max(2,int(getattr(cfg,"TURTLE_FAILED_BREAK_MAX_BARS",4)))
+    recent_window=look[-(failure_window+1):]
+    last_break_rel=None
+    for j in range(len(recent_window)-1):
+        if beyond(recent_window[j]):
+            last_break_rel=j
+    body_break_seen=last_break_rel is not None
+    failure_bars=0
+    delayed_failure=False
+    if body_break_seen and reclaim(last):
+        failure_bars=(len(recent_window)-1)-last_break_rel
+        between=recent_window[last_break_rel+1:]
+        # Two closes beyond the level mean acceptance, not a trap.
+        max_run=run=0
+        for x in recent_window[last_break_rel:]:
+            run=run+1 if beyond(x) else 0
+            max_run=max(max_run,run)
+        delayed_failure=bool(2 <= failure_bars <= failure_window and max_run < 2)
+    trapped=bool((plus_one or immediate_failure or delayed_failure) and attempts>=2)
     mature=maturity>=int(getattr(cfg,"TURTLE_LEVEL_MATURITY_BARS",8)) or p.rank>=4
     acceptance_closes=int(beyond(last))+int(beyond(prev))
     accepted=bool(acceptance_closes>=2)
@@ -147,6 +172,9 @@ def analyze_symbol(symbol, by_tf, direction):
     elif reentry_ready:
         state="ПОВТОРНЫЙ RECLAIM ПОДТВЕРЖДЁН"; align=1 if d==natural else -1; score=88
         reason="повторный reclaim + свежий displacement разрешают повторную оценку"
+    elif delayed_failure:
+        state="МНОГОСВЕЧНЫЙ ЛОЖНЫЙ ПРОБОЙ"; align=1 if d==natural else -1; score=86 if mature else 78
+        reason=f"закрытие вышло за уровень, но acceptance не сформировался; возврат через {failure_bars} закрытые свечи"
     elif plus_one:
         state="TURTLE SOUP PLUS ONE"; align=1 if d==natural else -1; score=84 if mature else 76
         reason="после закрытия за уровнем следующая закрытая свеча вернулась обратно"
@@ -162,7 +190,8 @@ def analyze_symbol(symbol, by_tf, direction):
     else:
         state="ЗРЕЛЫЙ УРОВЕНЬ / ОЖИДАНИЕ" if mature else "УРОВЕНЬ / ОЖИДАНИЕ"; align=0; score=58 if mature else 52
         reason="контекст уровня сохранён; подтверждённого breakout lifecycle пока нет"
-    return TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,round(break_depth_atr,2),round(reclaim_body_atr,2),trap_quality,acceptance_closes,wyckoff_test,wyckoff_test_confirmed,first_attempt_failed,second_entry_ready,lifecycle_note,align,score,reason)
+    ctx=TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,round(break_depth_atr,2),round(reclaim_body_atr,2),trap_quality,acceptance_closes,wyckoff_test,wyckoff_test_confirmed,first_attempt_failed,second_entry_ready,lifecycle_note,align,score,reason)
+    return replace(ctx, delayed_failure=delayed_failure, failure_bars=failure_bars, body_break_seen=body_break_seen)
 
 def score_delta(ctx,direction):
     if not ctx:return 0
@@ -173,4 +202,4 @@ def describe(ctx):
     if not ctx.level:return f"Пробой/ложный пробой: {ctx.reason}"
     return (f"Пробой/ложный пробой: {ctx.state} · {ctx.source} {ctx.timeframe} · "
             f"тестов {ctx.attempts} · возвратов {ctx.reclaims} · зрелость {ctx.maturity_bars} бар · "
-            f"качество ловушки {ctx.trap_quality}/100 · глубина {ctx.break_depth_atr:.2f} ATR" + (f" · {ctx.lifecycle_note}." if ctx.lifecycle_note else "."))
+            f"качество ловушки {ctx.trap_quality}/100 · глубина {ctx.break_depth_atr:.2f} ATR" + (f" · возврат через {ctx.failure_bars} св." if ctx.delayed_failure else "") + (f" · {ctx.lifecycle_note}." if ctx.lifecycle_note else "."))

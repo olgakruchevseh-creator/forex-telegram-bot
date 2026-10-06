@@ -66,3 +66,23 @@ def test_turtle_plus_one_delayed_failure(monkeypatch):
     assert ctx is not None and ctx.plus_one is True
     assert ctx.alignment == 1
     assert ctx.state in ("TURTLE SOUP PLUS ONE","ПОВТОРНЫЙ RECLAIM ПОДТВЕРЖДЁН")
+
+def test_turtle_multibar_body_break_failure(monkeypatch):
+    import turtle_breakout_context as tb
+    from liquidity_map import LiquidityPool
+    bars=[]
+    for i in range(32):
+        p=1.1005 + (0.00002 if i%2 else 0)
+        bars.append(Candle(f"2026-10-01T{i%24:02d}:00:00",p,p+.0002,p-.0002,p))
+    level=1.1000
+    # Real close below the level, one indecisive bar, then reclaim on the third bar.
+    bars[-3]=Candle("2026-10-01T05:00:00",1.1002,1.1003,1.0993,1.0996)
+    bars[-2]=Candle("2026-10-01T06:00:00",1.0997,1.1003,1.0994,1.1002)
+    bars[-1]=Candle("2026-10-01T07:00:00",1.0998,1.1008,1.0995,1.1007)
+    pool=LiquidityPool("SSL",level,"Old Low H4","H4",4,"approached",.2)
+    monkeypatch.setattr(tb.liquidity_map,"build_map",lambda *a,**k:[pool])
+    ctx=tb.analyze_symbol("EUR/USD",{"H1":bars,"M15":bars},1)
+    assert ctx.delayed_failure is True
+    assert ctx.failure_bars == 2
+    assert ctx.state in ("МНОГОСВЕЧНЫЙ ЛОЖНЫЙ ПРОБОЙ", "SPRING/UPTHRUST — TEST ПОДТВЕРЖДЁН", "ВТОРАЯ ПОПЫТКА ПОСЛЕ ЛОЖНОГО ПРОБОЯ")
+    assert ctx.alignment == 1
