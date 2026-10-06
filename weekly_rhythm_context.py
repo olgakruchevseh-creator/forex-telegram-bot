@@ -68,6 +68,15 @@ class WeeklyRhythmContext:
     early_departure_atr: float = 0.0
     detection_lag_hours: float = 0.0
     missed_move_pct: float = 0.0
+    # Projection is downstream of confirmed weekly direction. It never participates
+    # in extreme detection or direction voting, so it cannot add confirmation lag.
+    projection_w1: float | None = None
+    projection_w2: float | None = None
+    projection_w3: float | None = None
+    projection_remaining_atr: float = 0.0
+    projection_depth: str = ""
+    projection_window: str = ""
+    projection_quality: int = 0
     family: str = "WEEKLY_CONTEXT"
 
 
@@ -346,13 +355,48 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
         candidates=[x for x in (pwl,wl) if x is not None and x<px]
         if candidates: target=max(candidates); target_name="PWL/WL"
 
+    # Weekly Projection Engine. This runs AFTER direction/extreme confirmation and is
+    # descriptive only. Robust weekly range supplies scale; ATR supplies local pace;
+    # structure/regime affect quality, not direction. Nearby external liquidity may
+    # snap a statistical target to a real market level without double-counting modules.
+    projection_w1=projection_w2=projection_w3=None
+    projection_remaining_atr=0.0; projection_depth=""; projection_window=""; projection_quality=0
+    if expansion_side in (-1,1) and baseline_range>0 and math_quality>=int(getattr(cfg,"WEEKLY_RHYTHM_PROJECTION_MIN_MATH_QUALITY",65)):
+        origin=wl if expansion_side>0 else wh
+        sign=1.0 if expansion_side>0 else -1.0
+        ratios=(float(getattr(cfg,"WEEKLY_RHYTHM_W1_RANGE",0.55)),
+                float(getattr(cfg,"WEEKLY_RHYTHM_W2_RANGE",0.85)),
+                float(getattr(cfg,"WEEKLY_RHYTHM_W3_RANGE",1.15)))
+        raw=[origin+sign*baseline_range*r for r in ratios]
+        external=[v for v in ((pwh,) if expansion_side>0 else (pwl,)) if v is not None and sign*(float(v)-origin)>0]
+        snap=float(getattr(cfg,"WEEKLY_RHYTHM_PROJECTION_SNAP_RANGE",0.12))*baseline_range
+        def _snap(v):
+            near=[float(x) for x in external if abs(float(x)-v)<=snap]
+            return min(near,key=lambda x:abs(x-v)) if near else v
+        vals=[_snap(v) for v in raw]
+        # Preserve monotonic W1 < W2 < W3 (or inverse for SHORT) after liquidity snapping.
+        if sign>0:
+            vals[1]=max(vals[1],vals[0]); vals[2]=max(vals[2],vals[1])
+        else:
+            vals[1]=min(vals[1],vals[0]); vals[2]=min(vals[2],vals[1])
+        projection_w1,projection_w2,projection_w3=vals
+        projection_remaining_atr=max(0.0,sign*(projection_w2-px)/max(av,1e-12))
+        projection_depth="МАЛАЯ" if projection_remaining_atr<0.45 else "СРЕДНЯЯ" if projection_remaining_atr<1.0 else "ГЛУБОКАЯ"
+        bars_needed=projection_remaining_atr/max(float(getattr(cfg,"WEEKLY_RHYTHM_PROJECTION_ATR_PER_H4",0.28)),0.05)
+        days=max(0.0,bars_needed*4.0/24.0)
+        if days<=0.7: projection_window="БЛИЖАЙШИЕ 4–16 Ч"
+        elif days<=1.6: projection_window="СЛЕДУЮЩИЕ 1–2 ДНЯ"
+        else: projection_window="ДО КОНЦА НЕДЕЛИ"
+        projection_quality=min(100,max(0,int(round(0.55*math_quality+0.35*confidence+(10 if regime in ("TREND","EXPANSION") else 0)))))
+
     return WeeklyRhythmContext(weekday,names[weekday-1],wo,wh,wl,px,pos,
         h4pd, d1pd,
         phase,expansion_side,candidate,bool(confirmed),extreme_day,rhythm_model,sweep,realization,target,target_name,sstate,regime,
         confidence,confidence_state,penalty,invalidated,baseline_range,range_ratio,range_z,weekly_trap,trap_quality,trap_side,acceptance_side,(low_departure_bars if candidate=="LOW" else high_departure_bars if candidate=="HIGH" else (low_departure_bars if early_candidate=="LOW" else high_departure_bars if early_candidate=="HIGH" else 0)),math_quality,
         early_candidate,early_candidate_day,(low_early_atr if early_candidate=="LOW" else high_early_atr if early_candidate=="HIGH" else 0.0),
         ((last_dt-(low_dt if (candidate or early_candidate)=="LOW" else high_dt)).total_seconds()/3600.0 if (candidate or early_candidate) and (low_dt if (candidate or early_candidate)=="LOW" else high_dt) else 0.0),
-        (min(100.0,100.0*((px-wl) if (candidate or early_candidate)=="LOW" else (wh-px))/max(width,1e-12)) if (candidate or early_candidate) else 0.0))
+        (min(100.0,100.0*((px-wl) if (candidate or early_candidate)=="LOW" else (wh-px))/max(width,1e-12)) if (candidate or early_candidate) else 0.0),
+        projection_w1,projection_w2,projection_w3,projection_remaining_atr,projection_depth,projection_window,projection_quality)
 
 
 def alignment(ctx: WeeklyRhythmContext | None, side: int) -> int:
@@ -433,7 +477,10 @@ def format_alert(symbol: str, ctx: WeeklyRhythmContext, previous_side: int = 0) 
         f"Недельная ловушка: {ctx.weekly_trap or 'не подтверждена'}" + (f" · качество {ctx.trap_quality}/100" if ctx.weekly_trap else ""),
         f"Устойчивость ухода от экстремума: {ctx.departure_bars} закрытых H4",
         f"Раннее обнаружение: {ctx.early_candidate or 'нет'}" + (f" · {ctx.early_departure_atr:.2f} ATR · задержка {ctx.detection_lag_hours:.1f} ч · уже пройдено {ctx.missed_move_pct:.0f}% диапазона" if ctx.early_candidate else ""),
-        f"Математическая полнота: {ctx.math_quality}/100 · штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст, а не самостоятельный сигнал на вход.",
+        *(([f"Проекция недели: W1 {ctx.projection_w1:.5f} · W2 {ctx.projection_w2:.5f} · W3 {ctx.projection_w3:.5f}",
+             f"Остаточный потенциал до W2: {ctx.projection_remaining_atr:.2f} ATR · глубина: {ctx.projection_depth}",
+             f"Вероятное окно развития: {ctx.projection_window} · качество проекции {ctx.projection_quality}/100"] if ctx.projection_w2 is not None else [])),
+        f"Математическая полнота: {ctx.math_quality}/100 · штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст и вероятностная проекция, а не самостоятельный сигнал на вход.",
         *(["⚠️ РАННИЙ КАНДИДАТ — НЕ ВХОД. Финальное H4/структурное подтверждение ещё не получено."] if getattr(ctx,"early_candidate","") and not ctx.extreme_candidate else []),
     ])
 

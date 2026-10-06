@@ -115,3 +115,25 @@ def test_early_event_is_explicitly_not_confirmed():
     text=w.format_alert('EUR/USD',x)
     assert 'РАННИЙ КАНДИДАТ — НЕ ВХОД' in text
     assert 'Направление: НАПРАВЛЕНИЕ НЕ ПОДТВЕРЖДЕНО' in text
+
+
+def test_projection_is_downstream_and_monotonic(monkeypatch):
+    start=datetime(2026,7,20,tzinfo=timezone.utc)
+    h4=bars(start,14*6*7,240); h1=bars(start,14*24*7,60); d1=bars(start,78,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':1,'state':'CONFIRMED'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'TREND'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x is not None
+    if x.projection_w2 is not None:
+        assert x.expansion_side in (-1,1)
+        if x.expansion_side>0: assert x.projection_w1 <= x.projection_w2 <= x.projection_w3
+        else: assert x.projection_w1 >= x.projection_w2 >= x.projection_w3
+        assert x.projection_remaining_atr >= 0
+        assert x.projection_depth in {'МАЛАЯ','СРЕДНЯЯ','ГЛУБОКАЯ'}
+        assert 0 <= x.projection_quality <= 100
+
+def test_projection_never_creates_direction():
+    x=w.WeeklyRhythmContext(2,'ВТ',1,1.01,.99,1,.5,'DISCOUNT','DISCOUNT','ПОИСК_ЭКСТРЕМУМА',0,'',False,'','', '',.2,None,'','FORMING','RANGE',40,'КАНДИДАТ',0,False,
+        projection_w1=1.01,projection_w2=1.02,projection_w3=1.03,projection_quality=80)
+    assert x.expansion_side == 0
+    assert w.alignment(x,1) == 0
