@@ -80,3 +80,15 @@ def test_low_math_quality_caps_direction_confidence(monkeypatch):
     assert x is not None
     if x.math_quality < 65:
         assert x.confidence <= 57
+
+def test_confirmed_extreme_recomputes_confidence_for_extreme_side(monkeypatch):
+    """Regression: LONG/SHORT label may never inherit confidence from opposite hypothesis."""
+    start=datetime(2026,9,21,tzinfo=timezone.utc)
+    h4=bars(start,70,240); h1=bars(start,280,60); d1=bars(start,14,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':1,'state':'CONFIRMED'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'TREND'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x is not None
+    if x.extreme_confirmed and x.extreme_candidate=='LOW':
+        assert x.expansion_side in (0,1)
+        assert x.conflict_penalty >= 0

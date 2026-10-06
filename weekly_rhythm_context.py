@@ -138,30 +138,32 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     open_side=1 if px>wo+reject else -1 if px<wo-reject else 0
 
     # Direction is deliberately conservative: Weekly Open alone never confirms it.
-    # Score independent context facts and subtract conflicts; this remains context, not a trade probability.
-    raw_side = sside if sside and sstate in ("CONFIRMED","SHIFT_CONFIRMED") else open_side
-    score = 0
-    penalty = 0
-    if raw_side:
-        if sside == raw_side and sstate in ("CONFIRMED","SHIFT_CONFIRMED"): score += 30
-        if open_side == raw_side: score += 12
-        elif open_side and open_side != raw_side: penalty += 18
-        h4pd=_pd(h4,int(getattr(cfg,"WEEKLY_RHYTHM_H4_PD_LOOKBACK",30)))
-        d1pd=_pd(d1,int(getattr(cfg,"WEEKLY_RHYTHM_D1_PD_LOOKBACK",20)))
-        favorable = "DISCOUNT" if raw_side > 0 else "PREMIUM"
-        adverse = "PREMIUM" if raw_side > 0 else "DISCOUNT"
+    # Score is side-specific. This matters when a confirmed weekly extreme changes the
+    # contextual side later: confidence must be recomputed for THAT side, never reused
+    # from the earlier raw_side.
+    h4pd=_pd(h4,int(getattr(cfg,"WEEKLY_RHYTHM_H4_PD_LOOKBACK",30)))
+    d1pd=_pd(d1,int(getattr(cfg,"WEEKLY_RHYTHM_D1_PD_LOOKBACK",20)))
+
+    def _score_side(side: int) -> tuple[int, int, int]:
+        if side not in (-1,1): return 0, 0, 0
+        score=0; side_penalty=0
+        if sside == side and sstate in ("CONFIRMED","SHIFT_CONFIRMED"): score += 30
+        elif sside and sstate in ("CONFIRMED","SHIFT_CONFIRMED") and sside != side: side_penalty += 30
+        if open_side == side: score += 12
+        elif open_side and open_side != side: side_penalty += 18
+        favorable="DISCOUNT" if side > 0 else "PREMIUM"
+        adverse="PREMIUM" if side > 0 else "DISCOUNT"
         if h4pd == favorable: score += 12
-        elif h4pd == adverse: penalty += 8
+        elif h4pd == adverse: side_penalty += 8
         if d1pd == favorable: score += 16
-        elif d1pd == adverse: penalty += 12
+        elif d1pd == adverse: side_penalty += 12
         if regime in ("TREND","EXPANSION"): score += 10
-        elif regime in ("RANGE","COMPRESSION"): penalty += 10
-        # Mature movement is useful context but a poor place to assert a fresh direction.
-        if realization >= float(getattr(cfg,"WEEKLY_RHYTHM_OVEREXTENDED_REALIZATION",1.15)): penalty += 12
-    else:
-        h4pd=_pd(h4,int(getattr(cfg,"WEEKLY_RHYTHM_H4_PD_LOOKBACK",30)))
-        d1pd=_pd(d1,int(getattr(cfg,"WEEKLY_RHYTHM_D1_PD_LOOKBACK",20)))
-    confidence=max(0,min(100,score-penalty+20 if raw_side else 0))
+        elif regime in ("RANGE","COMPRESSION"): side_penalty += 10
+        if realization >= float(getattr(cfg,"WEEKLY_RHYTHM_OVEREXTENDED_REALIZATION",1.15)): side_penalty += 12
+        return max(0,min(100,score-side_penalty+20)), score, side_penalty
+
+    raw_side = sside if sside and sstate in ("CONFIRMED","SHIFT_CONFIRMED") else open_side
+    confidence, score, penalty = _score_side(raw_side)
     min_conf=int(getattr(cfg,"WEEKLY_RHYTHM_DIRECTION_MIN_CONFIDENCE",68))
     invalidated=bool(raw_side and ((sside and open_side and sside != open_side and penalty >= 18) or confidence < int(getattr(cfg,"WEEKLY_RHYTHM_INVALIDATED_CONFIDENCE",35))))
     expansion_side=raw_side if raw_side and confidence>=min_conf and not invalidated else 0
@@ -214,10 +216,17 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     # A confirmed weekly extreme is itself the directional rhythm.  This is context, not entry.
     if confirmed:
         extreme_side=1 if candidate=="LOW" else -1
+        extreme_confidence, _, extreme_penalty = _score_side(extreme_side)
+        # Never attach confidence calculated for the opposite hypothesis.
+        confidence=extreme_confidence
+        penalty=extreme_penalty
         if confidence >= int(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_MIN_CONFIDENCE",58)):
             expansion_side=extreme_side
             confidence_state="ПОДТВЕРЖДЕНО"
             invalidated=False
+        else:
+            expansion_side=0
+            confidence_state="КАНДИДАТ"
 
     # Weekly trap lifecycle around the Mon-Tue accumulation range. A wick alone is
     # never enough: require a close outside and then a closed-H4 reclaim. Two closes
