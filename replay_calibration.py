@@ -11,6 +11,7 @@ from pathlib import Path
 from analysis import closed_candles, atr
 import config as cfg
 import layer14_adaptive_confidence
+import system_validation_brain
 
 log=logging.getLogger('fxbot.replay_calibration')
 HORIZONS=(1,3,8)
@@ -157,4 +158,8 @@ def update(market:dict)->int:
             try:outcomes.append(json.loads(line))
             except Exception:pass
     _save_json(_calibration(),_build_calibration(outcomes))
+    try:
+        system_validation_brain.update()
+    except Exception:
+        log.exception('SYSTEM_VALIDATION_BRAIN_SKIPPED')
     return added

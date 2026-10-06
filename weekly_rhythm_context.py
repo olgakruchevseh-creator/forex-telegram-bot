@@ -57,6 +57,9 @@ class WeeklyRhythmContext:
     range_z: float = 0.0
     weekly_trap: str = ""
     trap_quality: int = 0
+    trap_side: int = 0
+    acceptance_side: int = 0
+    departure_bars: int = 0
     math_quality: int = 0
     family: str = "WEEKLY_CONTEXT"
 
@@ -185,6 +188,16 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     away_atr=float(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_AWAY_ATR",0.35))*max(av,1e-12)
     low_departed=px >= wl + away_atr
     high_departed=px <= wh - away_atr
+    # Distance alone can be produced by one news candle. Require persistence after the
+    # extreme before it can participate in weekly-extreme confirmation.
+    min_departure_bars=max(1,int(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_MIN_DEPARTURE_H4",2)))
+    def _bars_after(extreme_dt):
+        if not extreme_dt:return 0
+        return sum(1 for c in current if (_dt(c.dt) and _dt(c.dt)>extreme_dt))
+    low_departure_bars=_bars_after(low_dt)
+    high_departure_bars=_bars_after(high_dt)
+    low_departed = low_departed and low_departure_bars >= min_departure_bars
+    high_departed = high_departed and high_departure_bars >= min_departure_bars
     max_age=float(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_MAX_AGE_HOURS",72))
 
     # Candidate is retained internally.  Merely printing a fresh WH/WL is not an event.
@@ -231,7 +244,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     # Weekly trap lifecycle around the Mon-Tue accumulation range. A wick alone is
     # never enough: require a close outside and then a closed-H4 reclaim. Two closes
     # outside mean acceptance, so the same move must not be mislabeled as a trap.
-    weekly_trap=""; trap_quality=0
+    weekly_trap=""; trap_quality=0; trap_side=0; acceptance_side=0
     mt=[c for c in current if (_dt(c.dt) and _dt(c.dt).isocalendar().weekday in (1,2))]
     if mt and weekday>=2:
         mt_hi=max(float(c.high) for c in mt); mt_lo=min(float(c.low) for c in mt)
@@ -251,12 +264,25 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
         dn_run=run_after(dn,lambda c: float(c.close)<mt_lo-tol)
         if up and up_run<2 and float(last.close)<mt_hi-tol:
             depth=max(float(c.high)-mt_hi for c in recent[max(0,up[-1]-1):])/max(av,1e-12)
-            weekly_trap="ЛОВУШКА_ВЫШЕ_MON_TUE"; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside<0 else 0))))
+            weekly_trap="ЛОВУШКА_ВЫШЕ_MON_TUE"; trap_side=-1; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside<0 else 0))))
         elif dn and dn_run<2 and float(last.close)>mt_lo+tol:
             depth=max(mt_lo-float(c.low) for c in recent[max(0,dn[-1]-1):])/max(av,1e-12)
-            weekly_trap="ЛОВУШКА_НИЖЕ_MON_TUE"; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside>0 else 0))))
+            weekly_trap="ЛОВУШКА_НИЖЕ_MON_TUE"; trap_side=1; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside>0 else 0))))
         elif up_run>=2 or dn_run>=2:
             weekly_trap="ПРОБОЙ_ПРИНЯТ"; trap_quality=0
+            acceptance_side=1 if up_run>=2 and up_run>=dn_run else -1
+
+    # Trap/acceptance are contextual consistency checks, not votes. A confirmed trap
+    # against the proposed weekly side prevents a false confirmation; accepted breakout
+    # in the opposite direction does the same. Matching context is intentionally not
+    # rewarded, avoiding double-counting liquidity/structure evidence.
+    context_conflict = (trap_side and expansion_side and trap_side != expansion_side) or \
+                       (acceptance_side and expansion_side and acceptance_side != expansion_side)
+    if context_conflict:
+        penalty += int(getattr(cfg,"WEEKLY_RHYTHM_TRAP_CONFLICT_PENALTY",18))
+        confidence=max(0, confidence-int(getattr(cfg,"WEEKLY_RHYTHM_TRAP_CONFLICT_PENALTY",18)))
+        if confidence < min_conf:
+            expansion_side=0; confidence_state="КАНДИДАТ"; confirmed=False
 
     # Mathematical health is explicit: history depth + robust baseline + ATR + HTF
     # location. Low math quality cannot silently masquerade as high confidence.
@@ -298,7 +324,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     return WeeklyRhythmContext(weekday,names[weekday-1],wo,wh,wl,px,pos,
         h4pd, d1pd,
         phase,expansion_side,candidate,bool(confirmed),extreme_day,rhythm_model,sweep,realization,target,target_name,sstate,regime,
-        confidence,confidence_state,penalty,invalidated,baseline_range,range_ratio,range_z,weekly_trap,trap_quality,math_quality)
+        confidence,confidence_state,penalty,invalidated,baseline_range,range_ratio,range_z,weekly_trap,trap_quality,trap_side,acceptance_side,(low_departure_bars if candidate=="LOW" else high_departure_bars if candidate=="HIGH" else 0),math_quality)
 
 
 def alignment(ctx: WeeklyRhythmContext | None, side: int) -> int:
@@ -375,6 +401,7 @@ def format_alert(symbol: str, ctx: WeeklyRhythmContext, previous_side: int = 0) 
         f"Структура: {ctx.structure_state} · Режим: {ctx.regime}", f"Реализация недельного движения: {ctx.realization*100:.0f}%",
         f"Нормальный недельный диапазон (median): {ctx.baseline_range:.5f} · текущий {ctx.range_ratio*100:.0f}% · robust z {ctx.range_z:+.2f}",
         f"Недельная ловушка: {ctx.weekly_trap or 'не подтверждена'}" + (f" · качество {ctx.trap_quality}/100" if ctx.weekly_trap else ""),
+        f"Устойчивость ухода от экстремума: {ctx.departure_bars} закрытых H4",
         f"Математическая полнота: {ctx.math_quality}/100 · штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст, а не самостоятельный сигнал на вход.",
     ])
 
