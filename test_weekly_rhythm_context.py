@@ -60,3 +60,23 @@ def test_weekday_model_is_context_not_forced(monkeypatch):
     monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'TREND'})())
     x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
     assert x.rhythm_model in {'','РАННИЙ_ЭКСТРЕМУМ_ПОНЕДЕЛЬНИК','РАННИЙ_ЭКСТРЕМУМ_ВТОРНИК','РАЗВОРОТ_СЕРЕДИНЫ_НЕДЕЛИ','ПОЗДНИЙ_ЭКСТРЕМУМ_ЧЕТВЕРГ','НЕТИПИЧНОЕ_ОКНО'}
+
+def test_robust_range_math_is_exposed(monkeypatch):
+    start=datetime(2026,7,20,tzinfo=timezone.utc)
+    h4=bars(start,14*6*7,240); h1=bars(start,14*24*7,60); d1=bars(start,78,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':1,'state':'CONFIRMED'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'TREND'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x.baseline_range > 0
+    assert x.range_ratio >= 0
+    assert 0 <= x.math_quality <= 100
+
+def test_low_math_quality_caps_direction_confidence(monkeypatch):
+    start=datetime(2026,9,21,tzinfo=timezone.utc)
+    h4=bars(start,10,240); h1=bars(start,40,60); d1=bars(start,8,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':1,'state':'CONFIRMED'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'TREND'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x is not None
+    if x.math_quality < 65:
+        assert x.confidence <= 57

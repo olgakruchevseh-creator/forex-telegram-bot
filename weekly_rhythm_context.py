@@ -10,6 +10,10 @@ import os
 from pathlib import Path
 from dataclasses import dataclass
 import io
+import statistics
+import logging
+
+log = logging.getLogger(__name__)
 
 from chart_snapshot import freeze_by_tf
 from datetime import datetime, timezone
@@ -48,6 +52,12 @@ class WeeklyRhythmContext:
     confidence_state: str
     conflict_penalty: int
     invalidated: bool
+    baseline_range: float = 0.0
+    range_ratio: float = 0.0
+    range_z: float = 0.0
+    weekly_trap: str = ""
+    trap_quality: int = 0
+    math_quality: int = 0
     family: str = "WEEKLY_CONTEXT"
 
 
@@ -100,7 +110,21 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     prev_week=[c for c in previous if _week_key(c)==prev_key] if prev_key else []
     pwh=max((c.high for c in prev_week),default=None); pwl=min((c.low for c in prev_week),default=None)
     prev_range=(pwh-pwl) if pwh is not None and pwl is not None and pwh>pwl else width
-    realization=min(2.0,width/max(prev_range,1e-12))
+
+    # Robust weekly range baseline. One previous week is too noisy (holiday/news weeks
+    # distort realization badly), therefore use completed-week median + MAD.  This is
+    # descriptive calibration only; it never creates direction.
+    completed=[]
+    for wk in sorted({_week_key(c) for c in previous if _week_key(c)}, reverse=True)[:int(getattr(cfg,"WEEKLY_RHYTHM_BASELINE_WEEKS",8))]:
+        wb=[c for c in previous if _week_key(c)==wk]
+        if wb:
+            r=max(float(c.high) for c in wb)-min(float(c.low) for c in wb)
+            if r>0: completed.append(r)
+    baseline_range=statistics.median(completed) if completed else prev_range
+    mad=statistics.median([abs(x-baseline_range) for x in completed]) if len(completed)>=3 else 0.0
+    range_ratio=width/max(baseline_range,1e-12)
+    range_z=(width-baseline_range)/max(1.4826*mad,baseline_range*.12,1e-12)
+    realization=min(2.0,range_ratio)
 
     av=atr(source[-min(40,len(source)):],14) if len(source)>=15 else width/max(1,len(current))
     reject=float(getattr(cfg,"WEEKLY_RHYTHM_RECLAIM_ATR",0.12))*max(av,1e-12)
@@ -195,6 +219,50 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
             confidence_state="ПОДТВЕРЖДЕНО"
             invalidated=False
 
+    # Weekly trap lifecycle around the Mon-Tue accumulation range. A wick alone is
+    # never enough: require a close outside and then a closed-H4 reclaim. Two closes
+    # outside mean acceptance, so the same move must not be mislabeled as a trap.
+    weekly_trap=""; trap_quality=0
+    mt=[c for c in current if (_dt(c.dt) and _dt(c.dt).isocalendar().weekday in (1,2))]
+    if mt and weekday>=2:
+        mt_hi=max(float(c.high) for c in mt); mt_lo=min(float(c.low) for c in mt)
+        tol=max(av,1e-12)*float(getattr(cfg,"WEEKLY_RHYTHM_TRAP_TOLERANCE_ATR",0.10))
+        recent=current[-max(3,int(getattr(cfg,"WEEKLY_RHYTHM_TRAP_LOOKBACK_H4",8))):]
+        up=[i for i,c in enumerate(recent[:-1]) if float(c.close)>mt_hi+tol]
+        dn=[i for i,c in enumerate(recent[:-1]) if float(c.close)<mt_lo-tol]
+        last=recent[-1]
+        def run_after(indices, pred):
+            if not indices:return 0
+            i=indices[-1]; run=0
+            for c in recent[i:]:
+                if pred(c): run+=1
+                else: break
+            return run
+        up_run=run_after(up,lambda c: float(c.close)>mt_hi+tol)
+        dn_run=run_after(dn,lambda c: float(c.close)<mt_lo-tol)
+        if up and up_run<2 and float(last.close)<mt_hi-tol:
+            depth=max(float(c.high)-mt_hi for c in recent[max(0,up[-1]-1):])/max(av,1e-12)
+            weekly_trap="ЛОВУШКА_ВЫШЕ_MON_TUE"; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside<0 else 0))))
+        elif dn and dn_run<2 and float(last.close)>mt_lo+tol:
+            depth=max(mt_lo-float(c.low) for c in recent[max(0,dn[-1]-1):])/max(av,1e-12)
+            weekly_trap="ЛОВУШКА_НИЖЕ_MON_TUE"; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside>0 else 0))))
+        elif up_run>=2 or dn_run>=2:
+            weekly_trap="ПРОБОЙ_ПРИНЯТ"; trap_quality=0
+
+    # Mathematical health is explicit: history depth + robust baseline + ATR + HTF
+    # location. Low math quality cannot silently masquerade as high confidence.
+    math_quality=0
+    math_quality += 30 if len(completed)>=6 else 20 if len(completed)>=3 else 8
+    math_quality += 25 if av and av>0 else 0
+    math_quality += 20 if h4pd!="UNKNOWN" else 0
+    math_quality += 20 if d1pd!="UNKNOWN" else 0
+    math_quality += 5 if len(current)>=4 else 0
+    math_quality=max(0,min(100,math_quality))
+    if math_quality < int(getattr(cfg,"WEEKLY_RHYTHM_MIN_MATH_QUALITY",65)):
+        confidence=min(confidence, int(getattr(cfg,"WEEKLY_RHYTHM_LOW_MATH_CONFIDENCE_CAP",57)))
+        if expansion_side and confidence < min_conf:
+            expansion_side=0; confidence_state="КАНДИДАТ"
+
     if weekday<=1 and realization < float(getattr(cfg,"WEEKLY_RHYTHM_EXPANSION_REALIZATION",0.55)):
         phase="НАЧАЛО_НЕДЕЛИ"
     elif confirmed:
@@ -221,7 +289,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     return WeeklyRhythmContext(weekday,names[weekday-1],wo,wh,wl,px,pos,
         h4pd, d1pd,
         phase,expansion_side,candidate,bool(confirmed),extreme_day,rhythm_model,sweep,realization,target,target_name,sstate,regime,
-        confidence,confidence_state,penalty,invalidated)
+        confidence,confidence_state,penalty,invalidated,baseline_range,range_ratio,range_z,weekly_trap,trap_quality,math_quality)
 
 
 def alignment(ctx: WeeklyRhythmContext | None, side: int) -> int:
@@ -238,7 +306,7 @@ def describe(ctx: WeeklyRhythmContext | None) -> str:
     target=f" · цель {ctx.target:.5f}" if ctx.target is not None else ""
     return (f"Ритм недели {ctx.day_name}: {ctx.phase} · {direction} · WO {ctx.weekly_open:.5f} · "
             f"WH/WL {ctx.weekly_high:.5f}/{ctx.weekly_low:.5f} · позиция {ctx.week_position*100:.0f}% · "
-            f"H4 {ctx.h4_pd} · D1 {ctx.d1_pd} · реализация {ctx.realization*100:.0f}% · уверенность {ctx.confidence}/100 ({ctx.confidence_state}){ext}{sweep}{target}")
+            f"H4 {ctx.h4_pd} · D1 {ctx.d1_pd} · реализация {ctx.realization*100:.0f}% · математика {ctx.math_quality}/100 · уверенность {ctx.confidence}/100 ({ctx.confidence_state}){ext}{sweep}{target}")
 
 
 _PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
@@ -296,7 +364,9 @@ def format_alert(symbol: str, ctx: WeeklyRhythmContext, previous_side: int = 0) 
         f"Положение в недельном диапазоне: {ctx.week_position*100:.0f}%", f"H4: {ctx.h4_pd} · D1: {ctx.d1_pd}",
         f"Снятие ликвидности/возврат: {ctx.sweep_reclaim or 'нет подтверждения'}",
         f"Структура: {ctx.structure_state} · Режим: {ctx.regime}", f"Реализация недельного движения: {ctx.realization*100:.0f}%",
-        f"Штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст, а не самостоятельный сигнал на вход.",
+        f"Нормальный недельный диапазон (median): {ctx.baseline_range:.5f} · текущий {ctx.range_ratio*100:.0f}% · robust z {ctx.range_z:+.2f}",
+        f"Недельная ловушка: {ctx.weekly_trap or 'не подтверждена'}" + (f" · качество {ctx.trap_quality}/100" if ctx.weekly_trap else ""),
+        f"Математическая полнота: {ctx.math_quality}/100 · штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст, а не самостоятельный сигнал на вход.",
     ])
 
 def process_market(market: dict, strength: dict | None = None) -> list[str]:
