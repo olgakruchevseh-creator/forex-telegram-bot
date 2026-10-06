@@ -45,6 +45,7 @@ import layer29_support_geometry
 import layer30_stack_consistency
 import layer31_joint_robustness
 import layer32_local_stability
+import layer33_dependency_audit
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -554,6 +555,19 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER32_LOCAL_STABILITY_SKIPPED pair=%s", pair)
+        # Layer 33: leave-one-out dependency audit of the mathematical stack. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER33_DEPENDENCY_AUDIT_ENABLED", True):
+            try:
+                ctx["dependency_audit"] = layer33_dependency_audit.assess(
+                    pair, ctx.get("mathematical_core"), ctx.get("mathematical_stability"),
+                    ctx.get("mathematical_confidence"), ctx.get("mathematical_resilience"),
+                    ctx.get("information_value"), ctx.get("mathematical_coherence"),
+                    ctx.get("uncertainty_budget"), ctx.get("decision_margin"),
+                    ctx.get("support_geometry"), ctx.get("stack_consistency"),
+                    ctx.get("joint_robustness"), ctx.get("local_stability")
+                )
+            except Exception:
+                log.exception("LAYER33_DEPENDENCY_AUDIT_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
