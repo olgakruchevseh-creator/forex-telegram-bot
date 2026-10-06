@@ -29,6 +29,7 @@ import layer13_drift_attribution
 import layer14_adaptive_confidence
 import layer15_event_sequence
 import layer16_structured_intelligence
+import layer17_market_state_graph
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -377,6 +378,14 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                     ctx["event_sequence"]["structured_sequence"] = ctx["structured_intelligence"].get("event_sequence", [])
             except Exception:
                 log.exception("LAYER16_STRUCTURED_INTELLIGENCE_SKIPPED pair=%s", pair)
+        # Layer 17: causal graph over canonical Layer 16 facts + Layer 15 order. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER17_MARKET_STATE_GRAPH_ENABLED", True):
+            try:
+                ctx["market_state_graph"] = layer17_market_state_graph.assess(
+                    pair, side, ctx.get("structured_intelligence"), ctx.get("event_sequence")
+                )
+            except Exception:
+                log.exception("LAYER17_MARKET_STATE_GRAPH_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
