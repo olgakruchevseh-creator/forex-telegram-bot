@@ -48,6 +48,16 @@ import layer32_local_stability
 import layer33_dependency_audit
 import layer34_recursive_echo_guard
 import layer35_complexity_budget
+import layer36_component_influence
+import layer37_pairwise_interaction
+import layer38_coalition_robustness
+import layer39_marginal_attribution
+import layer40_nonlinear_redundancy
+import layer41_residual_information
+import layer42_downside_tail
+import layer43_asymmetry
+import layer44_aggregator_agreement
+import layer45_final_mathematical_consensus
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -598,6 +608,40 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER35_COMPLEXITY_BUDGET_SKIPPED pair=%s", pair)
+        # Layers 36-44: terminal mathematical diagnostics over the primary
+        # coordinates. OBSERVE_ONLY: they are recorded in ctx/journal and cannot
+        # alter verdict, thresholds, direction or Telegram delivery.
+        terminal_args = (
+            pair, ctx.get("mathematical_core"), ctx.get("mathematical_stability"),
+            ctx.get("mathematical_confidence"), ctx.get("mathematical_resilience"),
+            ctx.get("information_value"), ctx.get("mathematical_coherence"),
+            ctx.get("uncertainty_budget"), ctx.get("decision_margin"),
+            ctx.get("support_geometry")
+        )
+        for key, module, enabled_name, log_name in (
+            ("component_influence", layer36_component_influence, "LAYER36_COMPONENT_INFLUENCE_ENABLED", "LAYER36_COMPONENT_INFLUENCE"),
+            ("pairwise_interaction", layer37_pairwise_interaction, "LAYER37_PAIRWISE_INTERACTION_ENABLED", "LAYER37_PAIRWISE_INTERACTION"),
+            ("coalition_robustness", layer38_coalition_robustness, "LAYER38_COALITION_ROBUSTNESS_ENABLED", "LAYER38_COALITION_ROBUSTNESS"),
+            ("marginal_attribution", layer39_marginal_attribution, "LAYER39_MARGINAL_ATTRIBUTION_ENABLED", "LAYER39_MARGINAL_ATTRIBUTION"),
+            ("nonlinear_redundancy", layer40_nonlinear_redundancy, "LAYER40_NONLINEAR_REDUNDANCY_ENABLED", "LAYER40_NONLINEAR_REDUNDANCY"),
+            ("residual_information", layer41_residual_information, "LAYER41_RESIDUAL_INFORMATION_ENABLED", "LAYER41_RESIDUAL_INFORMATION"),
+            ("downside_tail", layer42_downside_tail, "LAYER42_DOWNSIDE_TAIL_ENABLED", "LAYER42_DOWNSIDE_TAIL"),
+            ("asymmetry", layer43_asymmetry, "LAYER43_ASYMMETRY_ENABLED", "LAYER43_ASYMMETRY"),
+            ("aggregator_agreement", layer44_aggregator_agreement, "LAYER44_AGGREGATOR_AGREEMENT_ENABLED", "LAYER44_AGGREGATOR_AGREEMENT"),
+        ):
+            if getattr(cfg, enabled_name, True):
+                try:
+                    ctx[key] = module.assess(*terminal_args)
+                except Exception:
+                    log.exception("%s_SKIPPED pair=%%s" % log_name, pair)
+        # Layer 45: final consensus consumes the Layer 44 aggregator audit.
+        if getattr(cfg, "LAYER45_FINAL_CONSENSUS_ENABLED", True):
+            try:
+                ctx["final_mathematical_consensus"] = layer45_final_mathematical_consensus.assess(
+                    *terminal_args, ctx.get("aggregator_agreement")
+                )
+            except Exception:
+                log.exception("LAYER45_FINAL_CONSENSUS_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
