@@ -11,7 +11,7 @@ import auction_context
 import turtle_breakout_context
 import pattern_failure_context
 
-_FALSE_TURTLE={"ЛОЖНЫЙ ПРОБОЙ / RECLAIM","ЛОВУШКА ПРОБОЯ","TURTLE SOUP PLUS ONE","ПОВТОРНЫЙ RECLAIM ПОДТВЕРЖДЁН"}
+_FALSE_TURTLE={"ЛОЖНЫЙ ПРОБОЙ / RECLAIM","ЛОВУШКА ПРОБОЯ","TURTLE SOUP PLUS ONE","ПОВТОРНЫЙ RECLAIM ПОДТВЕРЖДЁН","ПРОВАЛ ПРИНЯТОГО КАЧЕСТВЕННОГО ПРОБОЯ"}
 
 def _same_false_break(inside_ctx, auction_ctx, turtle_ctx, direction:int)->bool:
     votes=0

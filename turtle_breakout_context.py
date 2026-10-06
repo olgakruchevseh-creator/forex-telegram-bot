@@ -48,6 +48,14 @@ class TurtleBreakoutContext:
     delayed_failure: bool=False
     failure_bars: int=0
     body_break_seen: bool=False
+    accepted_break_failure: bool=False
+    accepted_break_bars: int=0
+    adaptive_acceptance_bars: int=2
+    breakout_quality: int=0
+    breakout_progress_atr: float=0.0
+    efficiency_before: float=0.0
+    efficiency_after: float=0.0
+    efficiency_collapse: float=0.0
     def as_dict(self): return asdict(self)
 
 def _side(direction):
@@ -108,6 +116,60 @@ def analyze_symbol(symbol, by_tf, direction):
     mature=maturity>=int(getattr(cfg,"TURTLE_LEVEL_MATURITY_BARS",8)) or p.rank>=4
     acceptance_closes=int(beyond(last))+int(beyond(prev))
     accepted=bool(acceptance_closes>=2)
+
+    # Layer 48 — accepted-breakout failure.  This is intentionally NOT the same
+    # event as Turtle Soup/ordinary fakeout.  First the market must prove a
+    # genuine breakout with a multi-close acceptance run and useful progress;
+    # only later may a closed candle reclaim the old boundary.  Volatility
+    # adapts the acceptance requirement so two closes are not treated equally
+    # in quiet and fast regimes.  The layer remains descriptive context and
+    # never becomes an independent KILLER family.
+    atr_hist=[]
+    for k in range(max(14,len(h1)-32),len(h1)):
+        aa=atr(h1[:k+1],14)
+        if aa: atr_hist.append(float(aa))
+    med_atr=sorted(atr_hist)[len(atr_hist)//2] if atr_hist else av
+    vol_ratio=(av/med_atr) if med_atr else 1.0
+    base_accept=max(2,int(getattr(cfg,"TURTLE_ACCEPTED_BREAK_BASE_BARS",2)))
+    adaptive_acceptance_bars=max(2,min(4,int(round(base_accept*max(.75,min(1.75,vol_ratio))))))
+    accepted_break_failure=False; accepted_break_bars=0; breakout_quality=0
+    breakout_progress_atr=0.0; efficiency_before=0.0; efficiency_after=0.0; efficiency_collapse=0.0
+    accepted_lookback=max(8,int(getattr(cfg,"TURTLE_ACCEPTED_FAILURE_LOOKBACK_BARS",12)))
+    aw=look[-accepted_lookback:]
+    # Find the most recent completed run of accepted closes that ended before
+    # the current reclaim.  A run must have enough bars for the current vol.
+    runs=[]; rs=None
+    for i,x in enumerate(aw[:-1]):
+        if beyond(x):
+            if rs is None: rs=i
+        elif rs is not None:
+            runs.append((rs,i-1)); rs=None
+    if rs is not None: runs.append((rs,len(aw)-2))
+    good_runs=[r for r in runs if r[1]-r[0]+1>=adaptive_acceptance_bars]
+    if good_runs and reclaim(last):
+        a0,a1=good_runs[-1]; accepted_break_bars=a1-a0+1
+        seg=aw[a0:a1+1]
+        breakout_progress=max((level-x.low) if wanted=="SSL" else (x.high-level) for x in seg)
+        breakout_progress_atr=max(0.0,breakout_progress/av) if av else 0.0
+        bodies=[abs(x.close-x.open)/av for x in seg] if av else []
+        avg_body=sum(bodies)/len(bodies) if bodies else 0.0
+        breakout_quality=max(0,min(100,int(round(40 + min(25,breakout_progress_atr*22) + min(20,avg_body*24) + min(15,accepted_break_bars*4)))))
+        def _er(seq):
+            if len(seq)<3:return 0.0
+            path=sum(abs(float(seq[z].close)-float(seq[z-1].close)) for z in range(1,len(seq)))
+            net=abs(float(seq[-1].close)-float(seq[0].close))
+            return net/path if path>0 else 0.0
+        pre=aw[max(0,a0-3):a1+1]
+        post=aw[a1:min(len(aw),a1+5)] + [last]
+        efficiency_before=_er(pre); efficiency_after=_er(post)
+        efficiency_collapse=max(0.0,efficiency_before-efficiency_after)
+        min_progress=float(getattr(cfg,"TURTLE_ACCEPTED_FAILURE_MIN_PROGRESS_ATR",.35))
+        min_quality=int(getattr(cfg,"TURTLE_ACCEPTED_FAILURE_MIN_QUALITY",68))
+        # A high-quality accepted break that later loses its old boundary is the
+        # missing lifecycle state.  ER collapse strengthens the diagnosis but is
+        # not mandatory: the reclaim itself is hard evidence of lost acceptance.
+        accepted_break_failure=bool(breakout_progress_atr>=min_progress and breakout_quality>=min_quality)
+
     # Closed-candle quality of the trap: meaningful excursion through the level,
     # reclaim body, repeated interaction and level maturity. It is descriptive
     # context only and cannot create an independent family/signal.
@@ -160,9 +222,15 @@ def analyze_symbol(symbol, by_tf, direction):
     if second_entry_ready:
         lifecycle_note=(lifecycle_note+"; " if lifecycle_note else "")+"Brooks second entry подтверждён"
 
-    if invalidated:
+    if accepted_break_failure:
+        state="ПРОВАЛ ПРИНЯТОГО КАЧЕСТВЕННОГО ПРОБОЯ"; align=1 if d==natural else -1
+        score=92 if efficiency_collapse>=.20 else 89
+        reason=(f"пробой сначала получил acceptance ({accepted_break_bars} закр. свеч.), "
+                f"прошёл {breakout_progress_atr:.2f} ATR, затем потерял границу; "
+                f"эффективность {efficiency_before:.2f}→{efficiency_after:.2f}")
+    elif invalidated:
         state="ПРИНЯТИЕ ЦЕНЫ ЗА УРОВНЕМ"; align=-1 if d==natural else 1; score=28
-        reason="два закрытия подтверждают acceptance; reversal-гипотеза отменена"
+        reason=f"{adaptive_acceptance_bars} закрытия подтверждают текущий acceptance; reversal-гипотеза отменена"
     elif second_entry_ready:
         state="ВТОРАЯ ПОПЫТКА ПОСЛЕ ЛОЖНОГО ПРОБОЯ"; align=1 if d==natural else -1; score=89
         reason="reclaim удержан на Wyckoff test; первая попытка ослабла, вторая подтверждена displacement"
@@ -191,7 +259,11 @@ def analyze_symbol(symbol, by_tf, direction):
         state="ЗРЕЛЫЙ УРОВЕНЬ / ОЖИДАНИЕ" if mature else "УРОВЕНЬ / ОЖИДАНИЕ"; align=0; score=58 if mature else 52
         reason="контекст уровня сохранён; подтверждённого breakout lifecycle пока нет"
     ctx=TurtleBreakoutContext(True,d,state,level,p.source,p.timeframe,maturity,attempts,reclaims,plus_one,trapped,invalidated,reentry_ready,round(break_depth_atr,2),round(reclaim_body_atr,2),trap_quality,acceptance_closes,wyckoff_test,wyckoff_test_confirmed,first_attempt_failed,second_entry_ready,lifecycle_note,align,score,reason)
-    return replace(ctx, delayed_failure=delayed_failure, failure_bars=failure_bars, body_break_seen=body_break_seen)
+    return replace(ctx, delayed_failure=delayed_failure, failure_bars=failure_bars, body_break_seen=body_break_seen,
+                   accepted_break_failure=accepted_break_failure, accepted_break_bars=accepted_break_bars,
+                   adaptive_acceptance_bars=adaptive_acceptance_bars, breakout_quality=breakout_quality,
+                   breakout_progress_atr=round(breakout_progress_atr,3), efficiency_before=round(efficiency_before,3),
+                   efficiency_after=round(efficiency_after,3), efficiency_collapse=round(efficiency_collapse,3))
 
 def score_delta(ctx,direction):
     if not ctx:return 0
