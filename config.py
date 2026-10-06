@@ -1051,3 +1051,10 @@ LAYER19_EVIDENCE_INDEPENDENCE_ENABLED = True
 
 # Layer 20 — final decision-readiness synthesis (OBSERVE_ONLY)
 LAYER20_DECISION_READINESS_ENABLED = True
+
+# Layer 21 — Unified Mathematical Core (OBSERVE_ONLY)
+# Common coordinates for evidence, uncertainty, reliability and probability calibration.
+# Never changes live direction, probability, thresholds, vetoes or Telegram output.
+LAYER21_MATHEMATICAL_CORE_ENABLED = True
+LAYER21_TARGET_EFFECTIVE_FAMILIES = 3.0
+LAYER21_MIN_CALIBRATION_SAMPLES = 30

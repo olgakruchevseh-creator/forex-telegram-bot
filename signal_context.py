@@ -33,6 +33,7 @@ import layer17_market_state_graph
 import layer18_scenario_integrity
 import layer19_evidence_independence
 import layer20_decision_readiness
+import layer21_mathematical_core
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -417,6 +418,16 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER20_DECISION_READINESS_SKIPPED pair=%s", pair)
+        # Layer 21: unified mathematical coordinates. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER21_MATHEMATICAL_CORE_ENABLED", True):
+            try:
+                ctx["mathematical_core"] = layer21_mathematical_core.assess(
+                    pair, side, ctx.get("structured_intelligence"), ctx.get("scenario_integrity"),
+                    ctx.get("evidence_independence"), ctx.get("decision_readiness"),
+                    ctx.get("adaptive_confidence")
+                )
+            except Exception:
+                log.exception("LAYER21_MATHEMATICAL_CORE_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
