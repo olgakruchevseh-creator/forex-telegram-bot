@@ -38,6 +38,7 @@ import layer22_mathematical_stability
 import layer23_mathematical_confidence
 import layer24_mathematical_resilience
 import layer25_information_value
+import layer26_mathematical_coherence
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -468,6 +469,16 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER25_INFORMATION_VALUE_SKIPPED pair=%s", pair)
+        # Layer 26: cross-estimator mathematical coherence diagnostics. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER26_MATHEMATICAL_COHERENCE_ENABLED", True):
+            try:
+                ctx["mathematical_coherence"] = layer26_mathematical_coherence.assess(
+                    pair, ctx.get("mathematical_core"), ctx.get("mathematical_stability"),
+                    ctx.get("mathematical_confidence"), ctx.get("mathematical_resilience"),
+                    ctx.get("information_value")
+                )
+            except Exception:
+                log.exception("LAYER26_MATHEMATICAL_COHERENCE_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:

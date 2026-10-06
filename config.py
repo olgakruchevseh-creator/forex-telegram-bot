@@ -1077,3 +1077,8 @@ LAYER24_REFERENCE_MARGIN_PCT = 18.0
 # Measures novelty/diversity of mathematical evidence; never changes live trading.
 LAYER25_INFORMATION_VALUE_ENABLED = True
 LAYER25_TARGET_INFORMATION_MASS = 2.0
+
+# Layer 26 — Mathematical Coherence / Cross-Estimator Agreement (OBSERVE_ONLY)
+LAYER26_MATHEMATICAL_COHERENCE_ENABLED = True
+LAYER26_MAX_ESTIMATOR_GAP_PCT = 18.0
+LAYER26_MAX_SCORE_DISPERSION_PCT = 16.0
