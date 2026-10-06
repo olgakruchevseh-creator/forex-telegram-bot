@@ -39,6 +39,7 @@ import layer23_mathematical_confidence
 import layer24_mathematical_resilience
 import layer25_information_value
 import layer26_mathematical_coherence
+import layer27_uncertainty_budget
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -479,6 +480,16 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER26_MATHEMATICAL_COHERENCE_SKIPPED pair=%s", pair)
+        # Layer 27: residual mathematical uncertainty decomposition. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER27_UNCERTAINTY_BUDGET_ENABLED", True):
+            try:
+                ctx["uncertainty_budget"] = layer27_uncertainty_budget.assess(
+                    pair, ctx.get("mathematical_core"), ctx.get("mathematical_stability"),
+                    ctx.get("mathematical_confidence"), ctx.get("mathematical_resilience"),
+                    ctx.get("information_value"), ctx.get("mathematical_coherence")
+                )
+            except Exception:
+                log.exception("LAYER27_UNCERTAINTY_BUDGET_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
