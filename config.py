@@ -1222,3 +1222,7 @@ LAYER45_MAX_COORDINATE_MAD_PCT = 12.0
 LAYER45_CONTRADICTION_PENALTY = 0.18
 LAYER45_CONSENSUS_WARN_PCT = 68.0
 LAYER45_CONSENSUS_STRONG_PCT = 82.0
+
+# Briefing-only currency strength: minimum short-vs-long H1 score change shown as ↑/↓.
+# Trading modules keep using canonical STRENGTH_LOOKBACK above.
+BRIEFING_STRENGTH_TREND_EPS = 0.025

@@ -626,13 +626,57 @@ def dxy_context(usd_score: float, dxy: Optional[IndexView]) -> str:
 
 
 def strength_pct(rank: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Robust 0..100 display scale without forcing every basket to 0/100.
+
+    The old min/max normalization made an almost-flat basket look maximally
+    polarized.  The display is now centred on 50 and scaled by the basket's
+    robust dispersion. Trading logic continues to use the raw strength scores.
+    """
     if not rank:
         return []
-    vals = [s for _, s in rank]
-    lo, hi = min(vals), max(vals)
-    if hi - lo < 1e-12:
-        return [(c, 50.0) for c, _ in rank]
-    return [(c, (s - lo) / (hi - lo) * 100.0) for c, s in rank]
+    vals = [float(s) for _, s in rank]
+    centre = sum(vals) / len(vals)
+    deviations = sorted(abs(v - centre) for v in vals)
+    median_dev = deviations[len(deviations) // 2] if deviations else 0.0
+    scale = max(0.035, median_dev * 3.0)
+    out = []
+    for cur, score in rank:
+        z = (float(score) - centre) / scale
+        pct = 50.0 + 50.0 * math.tanh(z)
+        out.append((cur, max(0.0, min(100.0, pct))))
+    return out
+
+
+def briefing_strength_profile(market: dict, fallback: dict[str, float]) -> tuple[dict[str, float], dict[str, str]]:
+    """Stable H1 currency-strength view for the briefing only.
+
+    Blends 1/4/12/24 closed-H1 horizons. Short horizons retain session
+    responsiveness while 12/24H prevent one burst from dominating the table.
+    This does not replace the project's canonical 4H basket used by trading.
+    """
+    h1 = {symbol: ((market.get(symbol) or {}).get('H1') or []) for symbol in cfg.PAIRS}
+    horizons = ((1, 0.15), (4, 0.35), (12, 0.30), (24, 0.20))
+    components = []
+    for lookback, weight in horizons:
+        if any(len(closed_candles(v)) > lookback for v in h1.values()):
+            components.append((currency_strength(h1, lookback), weight))
+    if not components:
+        return dict(fallback or {}), {c: '—' for c in cfg.CURRENCIES}
+    total_w = sum(w for _, w in components) or 1.0
+    blended = {c: sum(part.get(c, 0.0) * w for part, w in components) / total_w for c in cfg.CURRENCIES}
+    # Direction of strength itself: compare short 1/4H blend with 12/24H baseline.
+    short = components[0][0] if components else blended
+    if len(components) > 1:
+        short = {c: components[0][0].get(c, 0.0) * 0.30 + components[1][0].get(c, 0.0) * 0.70 for c in cfg.CURRENCIES}
+    long_parts = components[2:] if len(components) >= 3 else components[-1:]
+    long_w = sum(w for _, w in long_parts) or 1.0
+    baseline = {c: sum(part.get(c, 0.0) * w for part, w in long_parts) / long_w for c in cfg.CURRENCIES}
+    eps = float(getattr(cfg, 'BRIEFING_STRENGTH_TREND_EPS', 0.025))
+    dynamics = {}
+    for c in cfg.CURRENCIES:
+        delta = short.get(c, 0.0) - baseline.get(c, 0.0)
+        dynamics[c] = '↑' if delta >= eps else ('↓' if delta <= -eps else '→')
+    return blended, dynamics
 
 
 def build_pair_briefs(
@@ -775,14 +819,16 @@ def pick_leaders(briefs: list[PairBrief]) -> list[PairBrief]:
     return chosen
 
 
-def format_strength_block(rank: list[tuple[str, float]]) -> list[str]:
+def format_strength_block(rank: list[tuple[str, float]], dynamics: Optional[dict[str, str]] = None) -> list[str]:
     lines = ["💱 СИЛА ВАЛЮТ", ""]
     pct = strength_pct(rank)
     if not pct:
         lines.append("нет данных по закрытой H1")
         return lines
     for i, (cur, sc) in enumerate(pct, 1):
-        lines.append(f"{i}. {cur} {sc:.0f}%")
+        arrow = (dynamics or {}).get(cur, "")
+        suffix = f" {arrow}" if arrow else ""
+        lines.append(f"{i}. {cur} {sc:.0f}%{suffix}")
     strong, weak = pct[0], pct[-1]
     lines.append("")
     lines.append(f"💪 Самая сильная: {strong[0]} ({strong[1]:.0f}%)")
@@ -1108,9 +1154,12 @@ def build_briefing_text(
         "",
     ]
     try:
-        lines.extend(format_strength_block(rank))
+        briefing_strength, strength_dynamics = briefing_strength_profile(market, strength)
+        briefing_rank = rank_currencies(briefing_strength)
+        lines.extend(format_strength_block(briefing_rank, strength_dynamics))
     except Exception:
         log.exception("блок силы")
+        lines.extend(format_strength_block(rank))
     try:
         lines.extend(format_dxy_block(dxy, usd))
     except Exception:
