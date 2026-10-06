@@ -1071,3 +1071,9 @@ LAYER23_WEIGHT_STRESS_PCT = 15.0
 # Layer 24 — Mathematical Resilience & Margin (OBSERVE_ONLY)
 LAYER24_MATHEMATICAL_RESILIENCE_ENABLED = True
 LAYER24_REFERENCE_MARGIN_PCT = 18.0
+
+
+# Layer 25 — Evidence Information Value (OBSERVE_ONLY)
+# Measures novelty/diversity of mathematical evidence; never changes live trading.
+LAYER25_INFORMATION_VALUE_ENABLED = True
+LAYER25_TARGET_INFORMATION_MASS = 2.0

@@ -37,6 +37,7 @@ import layer21_mathematical_core
 import layer22_mathematical_stability
 import layer23_mathematical_confidence
 import layer24_mathematical_resilience
+import layer25_information_value
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -457,6 +458,16 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER24_MATHEMATICAL_RESILIENCE_SKIPPED pair=%s", pair)
+        # Layer 25: information value / evidence novelty diagnostics. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER25_INFORMATION_VALUE_ENABLED", True):
+            try:
+                ctx["information_value"] = layer25_information_value.assess(
+                    pair, side, ctx.get("structured_intelligence"), ctx.get("mathematical_core"),
+                    ctx.get("mathematical_stability"), ctx.get("mathematical_confidence"),
+                    ctx.get("mathematical_resilience")
+                )
+            except Exception:
+                log.exception("LAYER25_INFORMATION_VALUE_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
