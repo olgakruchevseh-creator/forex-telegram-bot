@@ -58,6 +58,7 @@ import layer42_downside_tail
 import layer43_asymmetry
 import layer44_aggregator_agreement
 import layer45_final_mathematical_consensus
+import mathematical_consensus_bridge
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -642,6 +643,9 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER45_FINAL_CONSENSUS_SKIPPED pair=%s", pair)
+        # Stable passive bridge for journal/replay. It deliberately cannot alter
+        # the trading verdict, thresholds, direction, probability or Telegram delivery.
+        ctx["mathematical_consensus_summary"] = mathematical_consensus_bridge.summarize(ctx)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:

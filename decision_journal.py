@@ -117,6 +117,10 @@ def _calibration_metrics(text, by_tf, direction, ctx):
   'pullback_entry_risk':(ctx or {}).get('pullback_entry_risk'),
   'pullback_stop_risk':(ctx or {}).get('pullback_stop_risk'),
   'pullback_reversal_threat':(ctx or {}).get('pullback_reversal_threat'),
+  # Terminal Layers 21-45 remain OBSERVE_ONLY. Persist their normalized final
+  # conclusion so replay can test whether it has predictive value before any
+  # future decision authority is considered.
+  'mathematical_consensus':(ctx or {}).get('mathematical_consensus_summary') or {},
  }
 
 def _base(text,market,strength,status,reason='',allies=None,ctx=None):
