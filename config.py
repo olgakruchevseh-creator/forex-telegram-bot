@@ -1042,3 +1042,6 @@ LAYER16_STRUCTURED_INTELLIGENCE_ENABLED = True
 
 # Layer 17 — causal market-state graph. OBSERVE_ONLY.
 LAYER17_MARKET_STATE_GRAPH_ENABLED = True
+
+# Layer 18 — scenario integrity / causal reasoning. OBSERVE_ONLY.
+LAYER18_SCENARIO_INTEGRITY_ENABLED = True

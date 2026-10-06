@@ -30,6 +30,7 @@ import layer14_adaptive_confidence
 import layer15_event_sequence
 import layer16_structured_intelligence
 import layer17_market_state_graph
+import layer18_scenario_integrity
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -386,6 +387,15 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER17_MARKET_STATE_GRAPH_SKIPPED pair=%s", pair)
+        # Layer 18: causal scenario-integrity audit over Layer 17. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER18_SCENARIO_INTEGRITY_ENABLED", True):
+            try:
+                ctx["scenario_integrity"] = layer18_scenario_integrity.assess(
+                    pair, side, ctx.get("market_state_graph"),
+                    ctx.get("structured_intelligence"), ctx.get("event_sequence")
+                )
+            except Exception:
+                log.exception("LAYER18_SCENARIO_INTEGRITY_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
