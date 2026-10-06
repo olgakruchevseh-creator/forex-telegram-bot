@@ -1045,3 +1045,9 @@ LAYER17_MARKET_STATE_GRAPH_ENABLED = True
 
 # Layer 18 — scenario integrity / causal reasoning. OBSERVE_ONLY.
 LAYER18_SCENARIO_INTEGRITY_ENABLED = True
+
+# Layer 19 — evidence independence / correlated-family audit (OBSERVE_ONLY)
+LAYER19_EVIDENCE_INDEPENDENCE_ENABLED = True
+
+# Layer 20 — final decision-readiness synthesis (OBSERVE_ONLY)
+LAYER20_DECISION_READINESS_ENABLED = True

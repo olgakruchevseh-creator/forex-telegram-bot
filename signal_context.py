@@ -31,6 +31,8 @@ import layer15_event_sequence
 import layer16_structured_intelligence
 import layer17_market_state_graph
 import layer18_scenario_integrity
+import layer19_evidence_independence
+import layer20_decision_readiness
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -396,6 +398,25 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER18_SCENARIO_INTEGRITY_SKIPPED pair=%s", pair)
+        # Layer 19: audit independent-vs-correlated evidence families. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER19_EVIDENCE_INDEPENDENCE_ENABLED", True):
+            try:
+                ctx["evidence_independence"] = layer19_evidence_independence.assess(
+                    pair, side, ctx.get("structured_intelligence"), ctx.get("market_state_graph"),
+                    ctx.get("scenario_integrity")
+                )
+            except Exception:
+                log.exception("LAYER19_EVIDENCE_INDEPENDENCE_SKIPPED pair=%s", pair)
+        # Layer 20: final diagnostic synthesis of the brain stack. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER20_DECISION_READINESS_ENABLED", True):
+            try:
+                ctx["decision_readiness"] = layer20_decision_readiness.assess(
+                    pair, side, ctx.get("event_sequence"), ctx.get("structured_intelligence"),
+                    ctx.get("market_state_graph"), ctx.get("scenario_integrity"),
+                    ctx.get("evidence_independence")
+                )
+            except Exception:
+                log.exception("LAYER20_DECISION_READINESS_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
