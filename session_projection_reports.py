@@ -312,6 +312,13 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
             window_line = f"Окно Pivot в этой сессии: через {result['bars_low']}–{hi} закрытых H1"
         confirms = ", ".join(result.get("smc_confirmations") or []) or "нет свежего подтверждения"
         cautions = ", ".join(result.get("smc_cautions") or []) or "нет"
+        zq = result.get("zone_quality") or {}
+        if zq.get("confirmed"):
+            zone_quality_line = (f"Качество Pivot-зоны: {int(zq.get('score', 50))}% · "
+                                 f"исторических касаний {int(zq.get('touches', 0))} · "
+                                 f"пробоев {int(zq.get('violations', 0))}")
+        else:
+            zone_quality_line = "Качество Pivot-зоны: новая/неподтверждённая область · без штрафа направления"
 
         # Echo + Pivot — последовательный сценарий, а не два конкурирующих сигнала.
         echo = echo_projection.analyze(
@@ -349,6 +356,7 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
             f"Ожидаемая зона {kind}: {result['zone_low']:.{decimals}f}–{result['zone_high']:.{decimals}f}",
             window_line,
             f"Сверка с ZigZag D1/H4/H1: {result.get('zigzag_check', 'нет данных')}{conflict}",
+            zone_quality_line,
             f"SMC-подтверждения: {confirms}",
             f"SMC-предупреждения: {cautions}",
             f"Вероятность первичного движения к Pivot: {probability}%",

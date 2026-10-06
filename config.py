@@ -203,6 +203,8 @@ NEXT_PIVOT_MIN_SAMPLES = 8
 NEXT_PIVOT_MIN_PROBABILITY = 65
 NEXT_PIVOT_MIN_ZONE_ATR = 0.25
 NEXT_PIVOT_NEAR_ATR = 0.55
+NEXT_PIVOT_ZONE_TOUCH_ATR = 0.35
+NEXT_PIVOT_ZONE_RECENCY_BARS = 96
 # Ранний локальный сценарий: только завершённый AMD, подтверждённые M15/M5
 # и ещё не более 45% уже пройденного структурного маршрута.
 LOCAL_AMD_EARLY_ENABLED = True

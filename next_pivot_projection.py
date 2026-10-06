@@ -80,6 +80,51 @@ def _projection_swings(tf: str, bars: list) -> list[Swing]:
     return points[-80:]
 
 
+def _zone_quality(bars: list, points: list[Swing], zone_low: float, zone_high: float,
+                  target_kind: str, av: float) -> dict:
+    """Score whether the projected Pivot overlaps a historically respected area.
+
+    This is deliberately direction-neutral: it can only adjust confidence in the
+    already projected zone. Recent confirmed swing touches count more than old
+    ones; repeated closes through the far side of the area reduce its quality.
+    """
+    if not bars or not points or av <= 0:
+        return {"score": 50, "adjust": 0, "touches": 0, "violations": 0,
+                "recency": 0.0, "confirmed": False}
+    middle = (zone_low + zone_high) / 2
+    tolerance = max((zone_high-zone_low) * .60, av * float(getattr(cfg, "NEXT_PIVOT_ZONE_TOUCH_ATR", .35)))
+    last_index = len(bars)-1
+    decay_bars = max(24.0, float(getattr(cfg, "NEXT_PIVOT_ZONE_RECENCY_BARS", 96)))
+    relevant = []
+    for point in points[:-1]:  # current origin is not historical confirmation of the target zone
+        if point.kind != target_kind or abs(point.price-middle) > tolerance:
+            continue
+        age = max(0, last_index-point.index)
+        relevant.append(math.exp(-age/decay_bars))
+    touches = len(relevant)
+    recency = max(relevant, default=0.0)
+
+    # A resistance-like high zone loses quality after repeated closes above it;
+    # a support-like low zone loses quality after repeated closes below it.
+    lookback = bars[-min(len(bars), int(decay_bars*1.5)):]
+    buffer = av * .12
+    if target_kind == "high":
+        violations = sum(1 for b in lookback if b.close > zone_high + buffer)
+    else:
+        violations = sum(1 for b in lookback if b.close < zone_low - buffer)
+
+    if touches == 0:
+        return {"score": 50, "adjust": 0, "touches": 0, "violations": violations,
+                "recency": 0.0, "confirmed": False}
+    weighted = sum(relevant)
+    raw = 50 + min(28, weighted*13) + min(10, touches*2) - min(28, violations*4)
+    score = max(15, min(90, int(round(raw))))
+    # Bounded evidence group: zone history must never choose/flip direction.
+    adjust = max(-8, min(8, int(round((score-50)/5))))
+    return {"score": score, "adjust": adjust, "touches": touches,
+            "violations": violations, "recency": round(recency, 3), "confirmed": True}
+
+
 def _tf_projection(tf: str, raw: list) -> dict | None:
     bars = closed_candles(raw or [], TF_MINUTES[tf])
     if len(bars) < 35:
@@ -128,11 +173,13 @@ def _tf_projection(tf: str, raw: list) -> dict | None:
     margin = av*float(getattr(cfg, "NEXT_PIVOT_NEAR_ATR", .55))
     distance = max(0.0, zone_low-current) if direction > 0 else max(0.0, current-zone_high)
     approaching = current <= zone_high+margin if direction > 0 else current >= zone_low-margin
+    zone_quality = _zone_quality(bars, points, zone_low, zone_high, target_kind, av)
+    probability = max(30, min(94, probability + int(zone_quality["adjust"])))
     return {
         "tf": tf, "side": "LONG" if direction > 0 else "SHORT",
         "kind": target_kind, "structure": structure, "zone_low": zone_low, "zone_high": zone_high,
         "bars_low": bars_low, "bars_high": bars_high, "samples": len(ratios),
-        "probability": probability,
+        "probability": probability, "zone_quality": zone_quality,
         "near": approaching and distance <= margin,
         "distance_atr": round(distance/av, 2) if av else 0.0,
         "pivot_dt": bars[origin.index].dt, "current": current,
@@ -218,6 +265,8 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
             "closed_h1": bars[-1].dt, "estimated": True,
             "main_score": probability, "flat_score": max(25, 100-probability),
             "reaction_score": max(20, 80-probability),
+            "zone_quality": {"score": 50, "adjust": 0, "touches": 0, "violations": 0,
+                             "recency": 0.0, "confirmed": False},
         }
     result["_strength"] = strength or {}
     try:

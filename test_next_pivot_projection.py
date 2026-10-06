@@ -161,3 +161,22 @@ def test_session_chart_can_show_news_layer(monkeypatch):
     result["news_markers"] = [{"time": "14:30", "currency": "USD", "impact": "HIGH"}]
     image = projection.render_chart(result, {"H1": wave_bars(80)})
     assert image.read(8) == b"\x89PNG\r\n\x1a\n"
+
+
+def test_zone_quality_rewards_recent_repeated_pivots():
+    bars = wave_bars(120)
+    points = [projection.Swing(40, 1.1050, "high"), projection.Swing(70, 1.1051, "high"),
+              projection.Swing(95, 1.1049, "high"), projection.Swing(110, 1.1000, "low")]
+    q = projection._zone_quality(bars, points, 1.1047, 1.1053, "high", .001)
+    assert q["confirmed"] is True
+    assert q["touches"] == 3
+    assert q["score"] > 50
+    assert q["adjust"] > 0
+
+
+def test_zone_quality_never_changes_direction_and_new_zone_is_neutral():
+    bars = wave_bars(80)
+    points = [projection.Swing(30, 1.0900, "high"), projection.Swing(60, 1.0800, "low")]
+    q = projection._zone_quality(bars, points, 1.1300, 1.1310, "high", .001)
+    assert q["confirmed"] is False
+    assert q["adjust"] == 0
