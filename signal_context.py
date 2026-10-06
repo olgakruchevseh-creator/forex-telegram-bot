@@ -28,6 +28,7 @@ import layer12_regime_memory
 import layer13_drift_attribution
 import layer14_adaptive_confidence
 import layer15_event_sequence
+import layer16_structured_intelligence
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -363,6 +364,19 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER15_EVENT_SEQUENCE_SKIPPED pair=%s", pair)
+        # Layer 16: direct structured expert states. OBSERVE_ONLY; no vote/veto/signal.
+        if getattr(cfg, "LAYER16_STRUCTURED_INTELLIGENCE_ENABLED", True):
+            try:
+                ctx["structured_intelligence"] = layer16_structured_intelligence.assess(
+                    pair, side, market.get(pair) or {}, ctx
+                )
+                # Layer 15 remains backward compatible, but downstream consumers can
+                # now use direct facts instead of parsing Telegram text.
+                if isinstance(ctx.get("event_sequence"), dict):
+                    ctx["event_sequence"]["structured_facts"] = ctx["structured_intelligence"].get("facts", [])
+                    ctx["event_sequence"]["structured_sequence"] = ctx["structured_intelligence"].get("event_sequence", [])
+            except Exception:
+                log.exception("LAYER16_STRUCTURED_INTELLIGENCE_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
