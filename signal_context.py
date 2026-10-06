@@ -36,6 +36,7 @@ import layer20_decision_readiness
 import layer21_mathematical_core
 import layer22_mathematical_stability
 import layer23_mathematical_confidence
+import layer24_mathematical_resilience
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -447,6 +448,15 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER23_MATHEMATICAL_CONFIDENCE_SKIPPED pair=%s", pair)
+        # Layer 24: perturbation / timeframe-conflict resilience diagnostics. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER24_MATHEMATICAL_RESILIENCE_ENABLED", True):
+            try:
+                ctx["mathematical_resilience"] = layer24_mathematical_resilience.assess(
+                    pair, side, ctx.get("structured_intelligence"), ctx.get("mathematical_core"),
+                    ctx.get("mathematical_stability"), ctx.get("mathematical_confidence")
+                )
+            except Exception:
+                log.exception("LAYER24_MATHEMATICAL_RESILIENCE_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
