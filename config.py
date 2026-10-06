@@ -1227,3 +1227,14 @@ LAYER45_CONSENSUS_STRONG_PCT = 82.0
 # Briefing-only currency strength: minimum short-vs-long H1 score change shown as ↑/↓.
 # Trading modules keep using canonical STRENGTH_LOOKBACK above.
 BRIEFING_STRENGTH_TREND_EPS = 0.025
+
+# Trap intelligence extension (2026-10-06). Internal context only; no standalone alerts.
+# Thresholds are intentionally conservative and operate on CLOSED H1 candles.
+GIANT_EXHAUSTION_ENABLED = True
+GIANT_EXHAUSTION_MIN_RANGE_ATR = 1.55
+GIANT_EXHAUSTION_MIN_BODY_ATR = 1.05
+GIANT_EXHAUSTION_MIN_PRIOR_RUN_ATR = 0.75
+GIANT_EXHAUSTION_MAX_FOLLOW_THROUGH_ATR = 0.18
+OUTSIDE_DOUBLE_TRAP_ENABLED = True
+OUTSIDE_DOUBLE_TRAP_MIN_RANGE_ATR = 0.85
+OUTSIDE_DOUBLE_TRAP_CONFIRM_BODY_ATR = 0.20

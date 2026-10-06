@@ -7,6 +7,7 @@ Three-Line-Break principle, Kagi/ATR meaningful reversal и disparity/extension.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import config as cfg
 from analysis import atr, closed_candles, analyze_tf
 
 _TF_MIN={"W1":10080,"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
@@ -23,6 +24,8 @@ class CandleContext:
     meaningful_reversal:bool
     extended:bool
     facts:tuple[str,...]
+    double_trap_state:str="NONE"
+    double_trap_direction:int=0
 
 def _rng(c): return max(float(c.high)-float(c.low),1e-12)
 def _body(c): return abs(float(c.close)-float(c.open))
@@ -33,7 +36,7 @@ def analyze_symbol(symbol:str, by_tf:dict, direction:int, source_tf:str="H1") ->
     tf=source_tf if source_tf in _TF_MIN else "H1"
     b=closed_candles((by_tf or {}).get(tf) or [],_TF_MIN[tf])
     if len(b)<8:
-        return CandleContext(direction,50,0,False,False,False,False,False,False,("недостаточно закрытых свечей",))
+        return CandleContext(direction,50,0,False,False,False,False,False,False,("недостаточно закрытых свечей",),"NONE",0)
     c,p=b[-1],b[-2]; av=atr(b,14) or _rng(c); facts=[]; raw=0
 
     # 1/2. Candle Context + Wick/Sweep/Reclaim: прокол предыдущего экстремума
@@ -78,6 +81,36 @@ def analyze_symbol(symbol:str, by_tf:dict, direction:int, source_tf:str="H1") ->
     extended=extension>=1.65
     if extended: raw-=10; facts.append("цена чрезмерно растянута от локального равновесия")
 
+    # Outside Double Trap lifecycle. An outside H1 that takes BOTH sides is not
+    # directional by itself. Only the next CLOSED candle can resolve it. This
+    # prevents a two-sided liquidity event from being counted as an instant signal.
+    double_trap_state="NONE"; double_trap_direction=0
+    prev2=b[-3]; outside=p.high>prev2.high and p.low<prev2.low
+    meaningful_outside=getattr(cfg,"OUTSIDE_DOUBLE_TRAP_ENABLED",True) and outside and _rng(p)>=av*float(getattr(cfg,"OUTSIDE_DOUBLE_TRAP_MIN_RANGE_ATR",.85))
+    if meaningful_outside:
+        if c.close>p.high and _body(c)>=av*float(getattr(cfg,"OUTSIDE_DOUBLE_TRAP_CONFIRM_BODY_ATR",.20)):
+            double_trap_state="RESOLVED"; double_trap_direction=1
+        elif c.close<p.low and _body(c)>=av*float(getattr(cfg,"OUTSIDE_DOUBLE_TRAP_CONFIRM_BODY_ATR",.20)):
+            double_trap_state="RESOLVED"; double_trap_direction=-1
+        elif c.high<=p.high and c.low>=p.low:
+            double_trap_state="PENDING"
+        else:
+            double_trap_state="INVALIDATED"
+        if double_trap_state=="RESOLVED":
+            if double_trap_direction==direction:
+                raw+=6; facts.append("двухсторонняя ловушка разрешилась закрытием по направлению")
+            else:
+                raw-=6; facts.append("двухсторонняя ловушка разрешилась против направления")
+        elif double_trap_state=="PENDING":
+            facts.append("двухсторонняя ловушка пока нейтральна — ждёт закрытого подтверждения")
+
+    # If the CURRENT closed candle is itself the outside trap, expose it only as
+    # PENDING. There is deliberately no score change until another H1 closes.
+    current_outside=getattr(cfg,"OUTSIDE_DOUBLE_TRAP_ENABLED",True) and c.high>p.high and c.low<p.low and _rng(c)>=av*float(getattr(cfg,"OUTSIDE_DOUBLE_TRAP_MIN_RANGE_ATR",.85))
+    if current_outside:
+        double_trap_state="PENDING"; double_trap_direction=0
+        facts.append("текущая H1 сняла обе стороны — направление ещё не подтверждено")
+
     # HTF context: свечные факты сильнее, когда не спорят с D1/H4/H1.
     votes=[]
     for htf in ("D1","H4","H1"):
@@ -89,7 +122,7 @@ def analyze_symbol(symbol:str, by_tf:dict, direction:int, source_tf:str="H1") ->
     raw += min(8,aligned*3)-min(8,opposite*4)
     score=max(0,min(100,50+raw))
     delta=max(-6,min(6,round((score-50)/8)))
-    return CandleContext(direction,score,delta,wick_reclaim,pattern_failure,balance_shift,three_line_break,meaningful_reversal,extended,tuple(facts) or ("нейтральный свечной контекст",))
+    return CandleContext(direction,score,delta,wick_reclaim,pattern_failure,balance_shift,three_line_break,meaningful_reversal,extended,tuple(facts) or ("нейтральный свечной контекст",),double_trap_state,double_trap_direction)
 
 def score_delta(ctx:CandleContext|None, direction:int)->int:
     return int(ctx.delta) if ctx and ctx.direction==(1 if direction>0 else -1) else 0
