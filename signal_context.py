@@ -47,6 +47,7 @@ import layer31_joint_robustness
 import layer32_local_stability
 import layer33_dependency_audit
 import layer34_recursive_echo_guard
+import layer35_complexity_budget
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -583,6 +584,20 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER34_RECURSIVE_ECHO_GUARD_SKIPPED pair=%s", pair)
+        # Layer 35: marginal diagnostic value versus mathematical complexity. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER35_COMPLEXITY_BUDGET_ENABLED", True):
+            try:
+                ctx["complexity_budget"] = layer35_complexity_budget.assess(
+                    pair, ctx.get("mathematical_core"), ctx.get("mathematical_stability"),
+                    ctx.get("mathematical_confidence"), ctx.get("mathematical_resilience"),
+                    ctx.get("information_value"), ctx.get("mathematical_coherence"),
+                    ctx.get("uncertainty_budget"), ctx.get("decision_margin"),
+                    ctx.get("support_geometry"), ctx.get("stack_consistency"),
+                    ctx.get("joint_robustness"), ctx.get("local_stability"),
+                    ctx.get("dependency_audit"), ctx.get("recursive_echo_guard")
+                )
+            except Exception:
+                log.exception("LAYER35_COMPLEXITY_BUDGET_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
