@@ -1,0 +1,6 @@
+# Layer 39 — Coalition Marginal Attribution / Shapley-style Audit (OBSERVE_ONLY)
+# Exact marginal attribution across the primary-coordinate subset lattice; no live effect.
+LAYER39_MARGINAL_ATTRIBUTION_ENABLED = True
+LAYER39_DOMINANCE_SHARE_WARN_PCT = 24.0
+LAYER39_DOMINANCE_SHARE_HIGH_PCT = 34.0
+LAYER39_MIN_EFFECTIVE_ATTRIBUTION_RATIO = 0.68
