@@ -92,3 +92,26 @@ def test_confirmed_extreme_recomputes_confidence_for_extreme_side(monkeypatch):
     if x.extreme_confirmed and x.extreme_candidate=='LOW':
         assert x.expansion_side in (0,1)
         assert x.conflict_penalty >= 0
+
+def test_early_candidate_is_observational_only(monkeypatch):
+    start=datetime(2026,9,21,tzinfo=timezone.utc)
+    h4=bars(start,18,240); h1=bars(start,72,60); d1=bars(start-timedelta(days=20),28,1440)
+    # Force no structural confirmation: early detection must never invent direction.
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':0,'state':'FORMING'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'RANGE'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x is not None
+    if x.early_candidate:
+        assert x.expansion_side == 0
+        assert not x.extreme_confirmed
+        assert x.detection_lag_hours >= 0
+        assert 0 <= x.missed_move_pct <= 100
+
+
+def test_early_event_is_explicitly_not_confirmed():
+    x=w.WeeklyRhythmContext(2,'ВТ',1,1.01,.99,1,.5,'DISCOUNT','DISCOUNT','ПОИСК_ЭКСТРЕМУМА',0,'',False,'','', '',.2,None,'','FORMING','RANGE',40,'КАНДИДАТ',0,False,
+        early_candidate='LOW', early_candidate_day='ПН', early_departure_atr=.20, detection_lag_hours=4, missed_move_pct=12)
+    assert w._event_kind(x)=='РАННИЙ_КАНДИДАТ:LOW'
+    text=w.format_alert('EUR/USD',x)
+    assert 'РАННИЙ КАНДИДАТ — НЕ ВХОД' in text
+    assert 'Направление: НАПРАВЛЕНИЕ НЕ ПОДТВЕРЖДЕНО' in text

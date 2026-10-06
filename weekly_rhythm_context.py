@@ -61,6 +61,13 @@ class WeeklyRhythmContext:
     acceptance_side: int = 0
     departure_bars: int = 0
     math_quality: int = 0
+    # Anti-lag telemetry. Early candidate is observational only: it never sets
+    # expansion_side, never votes, and never weakens strict extreme confirmation.
+    early_candidate: str = ""
+    early_candidate_day: str = ""
+    early_departure_atr: float = 0.0
+    detection_lag_hours: float = 0.0
+    missed_move_pct: float = 0.0
     family: str = "WEEKLY_CONTEXT"
 
 
@@ -200,6 +207,24 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     high_departed = high_departed and high_departure_bars >= min_departure_bars
     max_age=float(getattr(cfg,"WEEKLY_RHYTHM_EXTREME_MAX_AGE_HOURS",72))
 
+    # Anti-lag stage: detect a plausible weekly extreme one closed H4 earlier, with a
+    # smaller ATR departure. This is telemetry/context ONLY. It cannot set direction,
+    # confidence to confirmed, or participate in Master Direction/KILLER voting.
+    early_candidate=""; early_candidate_day=""; early_departure_atr=0.0
+    early_age_limit=float(getattr(cfg,"WEEKLY_RHYTHM_EARLY_MAX_AGE_HOURS",48))
+    early_away_atr=float(getattr(cfg,"WEEKLY_RHYTHM_EARLY_AWAY_ATR",0.18))
+    early_min_bars=max(1,int(getattr(cfg,"WEEKLY_RHYTHM_EARLY_MIN_DEPARTURE_H4",1)))
+    low_early_atr=max(0.0,(px-wl)/max(av,1e-12))
+    high_early_atr=max(0.0,(wh-px)/max(av,1e-12))
+    low_early=(low_age<=early_age_limit and low_departure_bars>=early_min_bars and
+               low_early_atr>=early_away_atr and h4pd in ("DISCOUNT","EQUILIBRIUM"))
+    high_early=(high_age<=early_age_limit and high_departure_bars>=early_min_bars and
+                high_early_atr>=early_away_atr and h4pd in ("PREMIUM","EQUILIBRIUM"))
+    if low_early: early_candidate="LOW"
+    if high_early and (not early_candidate or high_early_atr>low_early_atr): early_candidate="HIGH"
+    early_dt=low_dt if early_candidate=="LOW" else high_dt if early_candidate=="HIGH" else None
+    if early_dt: early_candidate_day=names[early_dt.isocalendar().weekday-1]
+
     # Candidate is retained internally.  Merely printing a fresh WH/WL is not an event.
     if low_age <= max_age and low_departed: candidate="LOW"
     if high_age <= max_age and high_departed:
@@ -324,7 +349,10 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     return WeeklyRhythmContext(weekday,names[weekday-1],wo,wh,wl,px,pos,
         h4pd, d1pd,
         phase,expansion_side,candidate,bool(confirmed),extreme_day,rhythm_model,sweep,realization,target,target_name,sstate,regime,
-        confidence,confidence_state,penalty,invalidated,baseline_range,range_ratio,range_z,weekly_trap,trap_quality,trap_side,acceptance_side,(low_departure_bars if candidate=="LOW" else high_departure_bars if candidate=="HIGH" else 0),math_quality)
+        confidence,confidence_state,penalty,invalidated,baseline_range,range_ratio,range_z,weekly_trap,trap_quality,trap_side,acceptance_side,(low_departure_bars if candidate=="LOW" else high_departure_bars if candidate=="HIGH" else (low_departure_bars if early_candidate=="LOW" else high_departure_bars if early_candidate=="HIGH" else 0)),math_quality,
+        early_candidate,early_candidate_day,(low_early_atr if early_candidate=="LOW" else high_early_atr if early_candidate=="HIGH" else 0.0),
+        ((last_dt-(low_dt if (candidate or early_candidate)=="LOW" else high_dt)).total_seconds()/3600.0 if (candidate or early_candidate) and (low_dt if (candidate or early_candidate)=="LOW" else high_dt) else 0.0),
+        (min(100.0,100.0*((px-wl) if (candidate or early_candidate)=="LOW" else (wh-px))/max(width,1e-12)) if (candidate or early_candidate) else 0.0))
 
 
 def alignment(ctx: WeeklyRhythmContext | None, side: int) -> int:
@@ -373,6 +401,8 @@ def _event_kind(ctx: WeeklyRhythmContext, previous_side: int = 0) -> str:
         return f"СЦЕНАРИЙ_ОТМЕНЁН:{previous_side}"
     if ctx.extreme_confirmed and ctx.expansion_side:
         return f"ЭКСТРЕМУМ_ПОДТВЕРЖДЁН:{ctx.extreme_candidate}:{ctx.expansion_side}"
+    if getattr(ctx,"early_candidate","") and not ctx.extreme_candidate:
+        return f"РАННИЙ_КАНДИДАТ:{ctx.early_candidate}"
     if ctx.phase == "НЕДЕЛЬНАЯ_ЭКСПАНСИЯ" and ctx.expansion_side:
         return f"НЕДЕЛЬНАЯ_ЭКСПАНСИЯ:{ctx.expansion_side}"
     if ctx.phase == "ДВИЖЕНИЕ_РЕАЛИЗОВАНО" and ctx.expansion_side:
@@ -402,7 +432,9 @@ def format_alert(symbol: str, ctx: WeeklyRhythmContext, previous_side: int = 0) 
         f"Нормальный недельный диапазон (median): {ctx.baseline_range:.5f} · текущий {ctx.range_ratio*100:.0f}% · robust z {ctx.range_z:+.2f}",
         f"Недельная ловушка: {ctx.weekly_trap or 'не подтверждена'}" + (f" · качество {ctx.trap_quality}/100" if ctx.weekly_trap else ""),
         f"Устойчивость ухода от экстремума: {ctx.departure_bars} закрытых H4",
+        f"Раннее обнаружение: {ctx.early_candidate or 'нет'}" + (f" · {ctx.early_departure_atr:.2f} ATR · задержка {ctx.detection_lag_hours:.1f} ч · уже пройдено {ctx.missed_move_pct:.0f}% диапазона" if ctx.early_candidate else ""),
         f"Математическая полнота: {ctx.math_quality}/100 · штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст, а не самостоятельный сигнал на вход.",
+        *(["⚠️ РАННИЙ КАНДИДАТ — НЕ ВХОД. Финальное H4/структурное подтверждение ещё не получено."] if getattr(ctx,"early_candidate","") and not ctx.extreme_candidate else []),
     ])
 
 def process_market(market: dict, strength: dict | None = None) -> list[str]:
