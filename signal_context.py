@@ -40,6 +40,7 @@ import layer24_mathematical_resilience
 import layer25_information_value
 import layer26_mathematical_coherence
 import layer27_uncertainty_budget
+import layer28_decision_margin
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -490,6 +491,17 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
                 )
             except Exception:
                 log.exception("LAYER27_UNCERTAINTY_BUDGET_SKIPPED pair=%s", pair)
+        # Layer 28: mathematical distance-to-boundary / joint-shock margin. OBSERVE_ONLY.
+        if getattr(cfg, "LAYER28_DECISION_MARGIN_ENABLED", True):
+            try:
+                ctx["decision_margin"] = layer28_decision_margin.assess(
+                    pair, ctx.get("mathematical_core"), ctx.get("mathematical_stability"),
+                    ctx.get("mathematical_confidence"), ctx.get("mathematical_resilience"),
+                    ctx.get("information_value"), ctx.get("mathematical_coherence"),
+                    ctx.get("uncertainty_budget")
+                )
+            except Exception:
+                log.exception("LAYER28_DECISION_MARGIN_SKIPPED pair=%s", pair)
         ok, reason = verdict(ctx)
         # Passive audit trail: this call cannot alter the verdict or Telegram flow.
         try:
