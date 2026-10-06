@@ -578,7 +578,7 @@ def fetch_index(api_key: str, symbol: str, interval: str = "1h", outputsize: int
 
 
 def analyze_index(symbol: str, candles: list[Candle]) -> IndexView:
-    closed = closed_candles(candles)
+    closed = closed_candles(candles, 60)
     if len(closed) < 21:
         return IndexView(symbol, 0.0, 0.0, "нет данных", "нет данных", 0.0, 0, False)
     view = analyze_tf("H1", "Час", closed)
@@ -1385,7 +1385,7 @@ def _pair_h1_closed(market: Optional[dict], symbol: str) -> list[Candle]:
     if not market:
         return []
     raw = (market.get(symbol) or {}).get("H1") or []
-    return closed_candles(raw)
+    return closed_candles(raw, 60)
 
 
 def build_synthetic_dxy_candles(by_symbol: dict[str, list[Candle]]) -> list[Candle]:
@@ -1610,7 +1610,7 @@ def _fetch_sek_h1(api_key: str, target_h1: str = "") -> list[Candle]:
     for attempt in range(1, 3):
         try:
             raw = fetch_index(api_key, symbol, "1h", 120)
-            closed = closed_candles(raw)
+            closed = closed_candles(raw, 60)
             if closed:
                 _SEK_CACHE["candles"] = closed
                 _SEK_CACHE["h1"] = normalize_h1_ts(closed[-1].dt)
