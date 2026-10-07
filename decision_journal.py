@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import config as cfg
 import market_state
 import numerical_parameter_registry
+import pair_character_matrix
 from analysis import closed_candles, atr
 
 log=logging.getLogger('fxbot.decision_journal')
@@ -75,6 +76,32 @@ def _families(sources):
   f=FAMILY.get(src,'other'); fam.setdefault(f,[]).append(src)
  return {'by_family':fam,'independent_family_count':len(fam),'source_count':len(sources),
          'correlated_source_count':sum(max(0,len(v)-1) for v in fam.values())}
+def _character_snapshot(pair, by_tf, strength, ctx):
+ # Delayed-calibration features only. They are sampled from already-closed H1
+ # data and never returned to the live decision path.
+ if not pair:
+  return {}
+ try:
+  p=pair_character_matrix.analyze(pair, by_tf or {}, strength or {})
+  if not p.get('ready'):
+   return {}
+  return {
+   'trend_persistence':p.get('trend_persistence'),
+   'mean_reversion':p.get('mean_reversion'),
+   'efficiency_ratio_blend':p.get('efficiency_ratio_blend'),
+   'autocorr_1':p.get('autocorr_1'),
+   'return_sign_entropy':p.get('return_sign_entropy'),
+   'hurst_centered':p.get('hurst_centered'),
+   'character_matrix_score':p.get('character_matrix_score'),
+   'trend_voice':p.get('trend_voice'),
+   'reversion_voice':p.get('reversion_voice'),
+   'h1_closed_at':((p.get('session') or '') and ((by_tf or {}).get('H1') or [])[-1].dt) if (by_tf or {}).get('H1') else None,
+   'layer45_summary':(ctx or {}).get('mathematical_consensus_summary') or {},
+   'observe_only':True,
+  }
+ except Exception:
+  log.exception('DECISION_JOURNAL_CHARACTER_SNAPSHOT_SKIPPED pair=%s',pair)
+  return {}
 def _append(rec):
  try:
   p=_path(); p.parent.mkdir(parents=True,exist_ok=True)
@@ -143,6 +170,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
   'confirmation_price':_price(text,['Подтверждение','Закрытие','close']),
   'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text,ctx),
   'tf_snapshot':_freshness(by_tf),'context_gate':ctx or {},'market_state':snap,
+  'character_features':(_character_snapshot(pair,by_tf,strength,ctx) if status=='SENT' and direction else {}),
   'calibration':_calibration_metrics(text,by_tf,direction,ctx) if getattr(cfg,'NUMERICAL_CALIBRATION_ENABLED',True) else {},
   'parameter_snapshot':numerical_parameter_registry.snapshot() if getattr(cfg,'NUMERICAL_CALIBRATION_ENABLED',True) else {},
   'strength_snapshot':{k:strength.get(k) for k in pair.split('/') if k in (strength or {})} if pair else {}}

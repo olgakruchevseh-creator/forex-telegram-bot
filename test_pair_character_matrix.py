@@ -137,3 +137,9 @@ def test_rms_vol_is_comparable_across_windows():
     assert r['realized_vol_12h_rms'] > 0
     assert r['realized_vol_24h'] > r['realized_vol_12h']
     assert abs(r['realized_vol_12h_rms'] - r['realized_vol_24h_rms']) / r['realized_vol_12h_rms'] < 0.35
+
+def test_character_audit_voices_are_explicit():
+    p = pcm.analyze('EUR/USD', {'H1': bars(True, 180)}, {})
+    assert p['trend_voice'] == 'KAUFMAN_ER_BLEND'
+    assert p['reversion_voice'] == 'NEGATIVE_AC1_TIMES_SIGN_ENTROPY'
+    assert 'возврат' in pcm.compact_text(p)

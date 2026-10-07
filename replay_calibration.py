@@ -114,6 +114,7 @@ def _evaluate(rec,h1):
       'pair':rec.get('pair'),'side':side,'source':rec.get('source'),'status':rec.get('status'),'reason':rec.get('reason',''),
       'session':rec.get('session'),'timeframe':rec.get('timeframe'),
       'quality':rec.get('quality'),'probability':rec.get('probability'),'regime':_regime(rec),'entry':entry,'atr_h1':round(a,7),
+      'character_features':rec.get('character_features') or {},
       'horizons_h1':horizons,'targets_hit_8h':hit,'target_hit_time':hit_time,'target_hit_minutes':hit_minutes,'efficiency_3h':round(efficiency,3),'timing_class':timing}
 
 def _build_calibration(outcomes):
@@ -130,8 +131,28 @@ def _build_calibration(outcomes):
         n=g['n']; summary[k]={'n':n,'avg_mfe_atr_3h':round(g['mfe']/n,3),'avg_mae_atr_3h':round(g['mae']/n,3),
           'avg_efficiency_3h':round(g['eff']/n,3),'tr1_hit_rate_8h':round(g['tr1']/g['tr1_known'],3) if g['tr1_known'] else None,
           'weak_followthrough_rate':round(g['weak']/n,3)}
+    # Probability-readiness cells are deliberately narrower than the legacy
+    # diagnostics above: module x pair x regime. No live probability is exposed
+    # before 20 closed outcomes; 100-200 is reported as the preferred trust zone.
+    cells=defaultdict(lambda:{'n':0,'tr1':0,'tr1_known':0})
+    for r in outcomes:
+        if r.get('status') != 'SENT':
+            continue
+        key='|'.join(str(x or '-') for x in (r.get('source'),r.get('pair'),r.get('regime')))
+        c=cells[key]; c['n']+=1; hits=r.get('targets_hit_8h') or {}
+        if 'TR1' in hits:
+            c['tr1_known']+=1; c['tr1']+=int(bool(hits['TR1']))
+    readiness={}
+    for k,c in cells.items():
+        n=c['n']; mature=n>=20; trusted=n>=100
+        readiness[k]={'n':n,'state':('TRUST_ZONE' if trusted else 'CALIBRATION_READY' if mature else 'OBSERVING'),
+                      'min_closed_outcomes':20,'preferred_trust_samples':[100,200],
+                      'calibrated_tr1_probability':(round(c['tr1']/c['tr1_known'],3) if mature and c['tr1_known'] else None),
+                      'trade_effect':False}
     return {'schema':1,'mode':'OBSERVE_ONLY','updated_utc':datetime.now(timezone.utc).isoformat(timespec='seconds'),
-            'note':'Calibration statistics never alter trading decisions automatically.','groups':summary}
+            'note':'Calibration statistics never alter trading decisions automatically.',
+            'probability_activation':'DISABLED_UNTIL_DELAYED_RELIABILITY_IS_STABLE',
+            'groups':summary,'module_pair_regime_cells':readiness}
 
 def update(market:dict)->int:
     """Evaluate mature journal records against current H1 history. Safe to call every scan."""
