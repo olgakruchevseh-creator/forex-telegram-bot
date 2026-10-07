@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 import config as cfg
 import ohlc_movement
+import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 from chart_snapshot import freeze_by_tf
 
@@ -72,29 +73,62 @@ def _candidate(symbol,h4,h1):
     rejection='ЭКСТРЕМАЛЬНЫЙ KANGAROO REJECTION' if anomaly>=strong_at else ('СИЛЬНЫЙ REJECTION' if anomaly>=1.25 else 'ОБЫЧНЫЙ REJECTION')
     return Setup(sid,symbol,side,extreme,trigger,c.dt,last_dt=c.dt,wick_anomaly=round(anomaly,2),rejection_class=rejection)
 
-def _confirm(s,h4,h1,m15,m5,strength):
-    if s.sent or s.invalid or not m15:return None
-    c=m15[-1]
+def _confirm(s,h4,h1,m15,m5,strength,by_tf=None):
+    """Confirm an ATS setup on a *later closed H1 candle*.
+
+    M15/M5 are auxiliary evidence only.  They may strengthen or veto a weak
+    microstructure picture, but can never independently release an ATS card.
+    """
+    if s.sent or s.invalid or len(h1) < 20:return None
+    c=h1[-1]
     if c.dt<=s.created_dt or c.dt==s.last_dt:return None
     s.last_dt=c.dt; s.age+=1
     av=atr(h1,14)
     if av<=0:return None
-    if s.age>getattr(cfg,'ATS_REVERSAL_MAX_M15_BARS',8): s.invalid=True; return None
+    max_h1=int(getattr(cfg,'ATS_REVERSAL_MAX_H1_BARS',2))
+    if s.age>max_h1: s.invalid=True; return None
     inv=av*getattr(cfg,'ATS_REVERSAL_INVALIDATION_ATR',.12)
-    if (s.side=='LONG' and c.close<s.extreme-inv) or (s.side=='SHORT' and c.close>s.extreme+inv): s.invalid=True; return None
+    if (s.side=='LONG' and c.close<s.extreme-inv) or (s.side=='SHORT' and c.close>s.extreme+inv):
+        s.invalid=True; return None
     wanted=1 if s.side=='LONG' else -1
-    micro=max(x.high for x in m15[-5:-1]) if wanted>0 else min(x.low for x in m15[-5:-1])
-    broken=(c.close>micro and c.close>c.open) if wanted>0 else (c.close<micro and c.close<c.open)
-    if not broken or abs(c.close-c.open)<av*getattr(cfg,'ATS_REVERSAL_CONFIRM_BODY_ATR',.12):return None
-    if _bias('M15',m15)!=wanted:return None
-    if m5 and _bias('M5',m5)==-wanted:return None
+
+    # H1 owns the structural confirmation.  Trigger is the internal H1 level
+    # frozen when the sweep candidate was created; a close through it prevents
+    # an intrabar M15 poke from becoming a standalone signal.
+    broken=(c.close>s.trigger and c.close>c.open) if wanted>0 else (c.close<s.trigger and c.close<c.open)
+    body_atr=abs(c.close-c.open)/av
+    if not broken or body_atr<getattr(cfg,'ATS_REVERSAL_CONFIRM_BODY_ATR',.12):return None
+    if _bias('H1',h1)!=wanted:return None
+
+    # M15/M5 are confirmation-only.  Require no explicit opposite micro bias;
+    # reward aligned M15, but never create direction from it.
+    m15_bias=_bias('M15',m15) if len(m15)>=25 else 0
+    m5_bias=_bias('M5',m5) if len(m5)>=25 else 0
+    if m15_bias==-wanted or m5_bias==-wanted:return None
+
+    # Reuse the project-wide pullback/range classifier so ATS cannot maintain a
+    # private definition of a correction.  This is context, not direction.
+    d1=_bars(by_tf or {},'D1') if by_tf else []
+    d1_bias=_bias('D1',d1) if d1 else 0
+    h4_bias=_bias('H4',h4)
+    pb=pullback_regime.classify(s.symbol,wanted,d1_bias,h4_bias,by_tf or {})
+
+    # Global anti-late geometry is mandatory for every new H1-confirmed entry.
+    early=ohlc_movement.early_entry_check(by_tf or {},wanted)
+    if not early.get('allow',True):return None
+
     base,quote=split_pair(s.symbol); gap=strength.get(base,0)-strength.get(quote,0)
     strength_ok=gap>=0 if wanted>0 else gap<=0
     rejection_bonus=3 if s.rejection_class.startswith('ЭКСТРЕМАЛЬНЫЙ') else (1 if s.rejection_class.startswith('СИЛЬНЫЙ') else 0)
-    score=76 + (6 if strength_ok else 0) + (5 if _bias('H1',h1)==wanted else 0) + (4 if _bias('H4',h4)==0 else 0) + rejection_bonus
+    micro_bonus=2 if m15_bias==wanted else 0
+    score=76 + (6 if strength_ok else 0) + 5 + (4 if h4_bias==0 else 0) + rejection_bonus + micro_bonus
     score=min(94,score); conf=max(70,min(91,score-4))
-    # delivery commit is deferred until Telegram acknowledgement
-    return {'symbol':s.symbol,'side':s.side,'extreme':s.extreme,'trigger':micro,'close':c.close,'dt':c.dt,'quality':score,'confidence':conf,'gap':gap,'strength_ok':strength_ok,'tf':'M15','wick_anomaly':s.wick_anomaly,'rejection_class':s.rejection_class}
+    return {'symbol':s.symbol,'side':s.side,'extreme':s.extreme,'trigger':s.trigger,'close':c.close,'dt':c.dt,
+            'quality':score,'confidence':conf,'gap':gap,'strength_ok':strength_ok,'tf':'H1',
+            'wick_anomaly':s.wick_anomaly,'rejection_class':s.rejection_class,
+            'pullback_mode':pb.mode,'pullback_bars':pb.bars,'pullback_move_atr':pb.move_atr,
+            'pullback_efficiency':pb.efficiency,'market_regime':pb.regime,
+            'm15_bias':m15_bias,'m5_bias':m5_bias,'early_reason':early.get('reason','ok')}
 
 def _price(sym,x): return f'{x:.3f}' if 'JPY' in sym else f'{x:.5f}'
 def _format(e):
@@ -102,11 +136,14 @@ def _format(e):
       '━━━━━━━━━━━━━━━━━━','🎯 ATS REVERSAL POINT — РАЗВОРОТ ПОДТВЕРЖДЁН','━━━━━━━━━━━━━━━━━━','',
       f"Пара: {e['symbol']}",f"Направление разворота: {e['side']}",
       f"Экстремум разворота: {_price(e['symbol'],e['extreme'])}",
-      f"Подтверждение: закрытая {e['tf']}-свеча + слом микроструктуры",
+      f"Подтверждение: закрытая {e['tf']}-свеча + слом внутренней H1-структуры",
       f"Цена подтверждения: {_price(e['symbol'],e['close'])}",
       f"Хвост H1: {e.get('rejection_class','ОБЫЧНЫЙ REJECTION')} · {float(e.get('wick_anomaly') or 0):.2f}× типичного хвоста",
+      f"Режим рынка: {e.get('market_regime','UNKNOWN')} · маршрут: {e.get('pullback_mode','LOCAL')}",
+      f"Геометрия возврата: {int(e.get('pullback_bars') or 0)} H1 · {float(e.get('pullback_move_atr') or 0):.2f} ATR · эффективность {float(e.get('pullback_efficiency') or 0):.0%}",
+      f"M15/M5: {'СОГЛАСОВАНО' if e.get('m15_bias') in (0, 1 if e['side']=='LONG' else -1) and e.get('m5_bias') in (0, 1 if e['side']=='LONG' else -1) else 'НЕЙТРАЛЬНО'} · только подтверждение",
       f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",f"Вероятность: {e['confidence']}%",'',
-      '✅ Факт: цена сняла предыдущий H1-экстремум, вернулась за него и затем закрытой M15-свечой подтвердила смену локальной структуры.',
+      '✅ Факт: цена сняла предыдущий H1-экстремум, вернулась за него и следующей закрытой H1-свечой подтвердила смену внутренней структуры.',
       'ℹ️ ATS не создаёт сигнал принудительно: без подтверждённого разворота карточка не отправляется.'
     ])
 
@@ -117,7 +154,7 @@ def process_market(market,strength):
         by_tf=market.get(symbol) or {}; h4,h1,m15,m5=(_bars(by_tf,t) for t in ('H4','H1','M15','M5'))
         for s in list(setups.values()):
           if s.symbol!=symbol or s.sent or s.invalid:continue
-          e=_confirm(s,h4,h1,m15,m5,strength)
+          e=_confirm(s,h4,h1,m15,m5,strength,by_tf)
           if e and not first:
             og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
             if not og.get('allow',True): continue
