@@ -395,7 +395,7 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
     result["reaction_score"] = max(0, 100 - result["main_score"] - result["flat_score"])
     try:
         import pair_character_matrix
-        result["pair_character"] = pair_character_matrix.analyze(symbol, by_tf, strength or {})
+        result["pair_character"] = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength or {}))
     except Exception:
         result["pair_character"] = {}
     return result

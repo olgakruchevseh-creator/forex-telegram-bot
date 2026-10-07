@@ -496,6 +496,9 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     character = bundle.get("pair_character") or {}
     if character:
         lines.append(pair_character_matrix.compact_text(character))
+        mx=(character.get('interaction_matrix') or {})
+        if mx.get('ready'):
+            lines.append(f"Матрица среды: {mx.get('score', 50):.0f}/100 · {mx.get('band', 'СМЕШАННО')}")
     pullback = bundle.get("pullback_consensus") or {}
     if pullback.get("text"):
         lines.append(str(pullback["text"]))
@@ -718,7 +721,7 @@ def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state:
             if not echo and not pivot:
                 continue
             zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
-            character = pair_character_matrix.analyze(symbol, by_tf, strength)
+            character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength))
             bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot, "zigzag": zz,
                       "pair_character": character,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}

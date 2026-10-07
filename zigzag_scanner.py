@@ -277,7 +277,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         duration_samples = min(10, len(completed_lengths))
     try:
         import pair_character_matrix
-        character = pair_character_matrix.analyze(symbol, by_tf, strength or {})
+        character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength or {}))
     except Exception:
         character = {}
     return {

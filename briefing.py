@@ -83,6 +83,8 @@ class PairBrief:
     context_support: int = 0
     context_against: int = 0
     strength_relation: str = ""
+    character_matrix_score: float = 50.0
+    character_matrix_band: str = "СМЕШАННО"
 
 
 def now_local() -> datetime:
@@ -749,6 +751,15 @@ def build_pair_briefs(
         )
         technical_side = technical_pair_side(brief)
         brief.strength_relation = _strength_relation(brief.gap, technical_side)
+        try:
+            import pair_character_matrix
+            pc = pair_character_matrix.analyze(symbol, market.get(symbol) or {}, strength)
+            regime_hint = "TREND" if "ТРЕНД" in brief.state else ("RANGE" if "RANGE" in brief.state or "СМЕШАН" in brief.state else None)
+            mx = pair_character_matrix.interaction_matrix(pc, regime_hint)
+            brief.character_matrix_score = float(mx.get("score", 50.0))
+            brief.character_matrix_band = str(mx.get("band", "СМЕШАННО"))
+        except Exception:
+            log.exception("Матрица характера для брифинга %s", symbol)
         ca, cs, cx = _briefing_context(symbol, market.get(symbol) or {}, technical_side, strength, events, now_utc)
         brief.context_alignment, brief.context_support, brief.context_against = ca, cs, cx
         brief.side = pair_side(brief)
@@ -1023,6 +1034,7 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         lines.append(f"Направление текущей сессии: {_ru_display(session_side) if session_side else 'НЕ ПОДТВЕРЖДЕНО'}")
         relation = b.strength_relation or _strength_relation(b.gap, technical_pair_side(b))
         lines.append(f"Сила: {force} · {relation}")
+        lines.append(f"Матрица среды: {b.character_matrix_score:.0f}/100 · {b.character_matrix_band}")
         if b.context_support or b.context_against:
             lines.append(f"Внутренний контекст: +{b.context_support} / -{b.context_against} групп подтверждения")
         lines.append(f"Состояние: {_ru_display(b.state)}")

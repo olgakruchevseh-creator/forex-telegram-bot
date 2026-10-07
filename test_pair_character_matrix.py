@@ -26,3 +26,10 @@ def test_trend_more_persistent_than_alternating():
     b=pcm.analyze('EUR/USD',{'H1':bars(False)}, {})
     assert a['trend_persistence'] > b['trend_persistence']
     assert b['mean_reversion'] > a['mean_reversion']
+
+def test_interaction_matrix_is_bounded_and_transparent():
+    p=pcm.analyze('EUR/USD',{'H1':bars(True)},{'EUR':.08,'USD':-.05})
+    m=pcm.interaction_matrix(p,'TREND')
+    assert m['ready'] and 0 <= m['score'] <= 100
+    assert abs(sum(m['weights'].values())-1.0) < 1e-9
+    assert set(m['components']) == {'pair_reliability','session_fit','regime_fit','cleanliness','strength_separation'}

@@ -162,3 +162,47 @@ def compact_text(p: dict) -> str:
             f"импульс {p['impulse']:.0f}/100 · шум {p['noise']:.0f}/100 · "
             f"ER24 {p.get('efficiency_ratio_24',0):.2f} · откат {p['pullback_atr']:.2f} ATR · "
             f"сессия {p.get('session_activity',0):.0f}/100")
+
+
+def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
+    """Direction-neutral pair×session×strength×regime composition.
+
+    This is a context score, not a trade score.  It answers whether the current
+    pair personality, current session activity and observed currency-strength
+    separation form a coherent environment.  It never creates/flips/vetoes a side.
+    """
+    if not profile or not profile.get('ready'):
+        return {'ready': False, 'score': 50.0, 'band': 'НЕЙТРАЛЬНО'}
+    trend=float(profile.get('trend_persistence') or 0)/100.0
+    impulse=float(profile.get('impulse') or 0)/100.0
+    noise=float(profile.get('noise') or 0)/100.0
+    sess=float(profile.get('session_activity') or 0)/100.0
+    reliability=float(profile.get('reliability') or 0)/100.0
+    # Strength values in the project are centred around zero.  Saturation at
+    # 0.12 prevents an exceptional reading from dominating the whole matrix.
+    strength=min(1.0, abs(float(profile.get('strength_gap') or 0))/0.12)
+    r=str(regime or '').upper()
+    if r in ('TREND','EXPANSION','BREAKOUT'):
+        regime_fit=.55*trend+.30*impulse+.15*(1-noise)
+    elif r in ('RANGE','COMPRESSION','BALANCE','ROTATION'):
+        regime_fit=.55*(1-trend)+.30*noise+.15*(1-impulse)
+    else:
+        regime_fit=.50
+    # Fixed transparent weights; sum=1.00.  Reliability receives the largest
+    # share because it already penalises unstable volatility/noise.
+    score=100*(.28*reliability+.22*sess+.18*regime_fit+.17*(1-noise)+.15*strength)
+    score=_clip(score)
+    if score >= 72: band='СИЛЬНОЕ СОГЛАСОВАНИЕ'
+    elif score >= 58: band='РАБОЧЕЕ СОГЛАСОВАНИЕ'
+    elif score >= 43: band='СМЕШАННО'
+    else: band='СЛАБОЕ СОГЛАСОВАНИЕ'
+    return {'ready':True,'score':round(score,1),'band':band,
+            'components':{'pair_reliability':round(100*reliability,1),
+                          'session_fit':round(100*sess,1),'regime_fit':round(100*regime_fit,1),
+                          'cleanliness':round(100*(1-noise),1),'strength_separation':round(100*strength,1)},
+            'weights':{'pair_reliability':.28,'session_fit':.22,'regime_fit':.18,'cleanliness':.17,'strength_separation':.15}}
+
+
+def attach_interaction(profile: dict, regime: str | None = None) -> dict:
+    if not profile: return profile
+    out=dict(profile); out['interaction_matrix']=interaction_matrix(out, regime); return out
