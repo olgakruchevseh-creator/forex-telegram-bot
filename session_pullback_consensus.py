@@ -63,7 +63,9 @@ def analyze(symbol: str, bundle: dict, by_tf: dict, previous: dict | None = None
 
     prev_stage = str((previous or {}).get("stage") or "NONE")
     # Completed is only legal after a remembered confirmed/finishing pullback.
+    prev_continuation = int((previous or {}).get("continuation") or 0)
     resumed = (prev_stage in ("ACTIVE", "FINISHING")
+               and prev_continuation == continuation
                and zigzag_side == continuation
                and shared.mode != "PULLBACK")
 
@@ -85,24 +87,32 @@ def analyze(symbol: str, bundle: dict, by_tf: dict, previous: dict | None = None
     if dl and dh:
         remaining = str(dl) if dl == dh else f"{dl}–{dh}"
 
+    # Say explicitly what price is doing NOW versus the senior/session thesis.
+    # This avoids ambiguous phrases such as “LONG, then pullback” when LONG is
+    # itself the counter-trend leg of a SHORT scenario.
     if stage == "POSSIBLE":
-        text = f"Откат: ВОЗМОЖЕН · {_word(correction)} · основной сценарий {_word(continuation)} сохраняется"
+        text = (f"Фаза: ВОЗМОЖЕН ОТКАТ · текущее движение {_word(correction)} против "
+                f"основного {_word(continuation)} · основной сценарий пока сохраняется")
     elif stage == "ACTIVE":
-        text = f"Откат: ИДЁТ · {_word(correction)} · глубина {_depth(shared.move_atr)}"
+        text = (f"Фаза: ОТКАТ ИДЁТ · сейчас {_word(correction)} против основного "
+                f"{_word(continuation)} · глубина {_depth(shared.move_atr)}")
+        if zone:
+            text += f" · возможная зона завершения {zone}"
+        text += f" · после завершения ожидается продолжение {_word(continuation)}"
+    elif stage == "FINISHING":
+        text = (f"Фаза: ОТКАТ ЗАВЕРШАЕТСЯ · сейчас {_word(correction)} против основного "
+                f"{_word(continuation)}")
         if zone:
             text += f" · зона завершения {zone}"
-        text += f" · затем продолжение {_word(continuation)}"
-    elif stage == "FINISHING":
-        text = f"Откат: ЗАВЕРШАЕТСЯ · {_word(correction)}"
-        if zone:
-            text += f" · зона {zone}"
         if remaining:
-            text += f" · угол ≈ {remaining} H1"
-        text += f" · далее {_word(continuation)}"
+            text += f" · вероятный угол ≈ {remaining} H1"
+        text += f" · далее ожидается продолжение {_word(continuation)}"
     elif stage == "COMPLETED":
-        text = f"Откат: ЗАВЕРШЁН · продолжение {_word(continuation)} подтверждается закрытой H1"
+        text = (f"Фаза: ОТКАТ ЗАВЕРШЁН · движение против {_word(continuation)} закончилось · "
+                f"продолжение основного {_word(continuation)} подтверждается закрытой H1")
     else:
-        text = f"Откат: НЕ ОБНАРУЖЕН · основной сценарий {_word(continuation)}"
+        text = (f"Фаза: ОТКАТ НЕ ОБНАРУЖЕН · текущее движение не подтверждено как коррекция · "
+                f"основной сценарий {_word(continuation)}")
 
     return {
         "stage": stage, "text": text, "continuation": continuation,
