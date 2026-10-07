@@ -4,6 +4,8 @@ from chart_snapshot import freeze_by_tf
 
 import json
 import logging
+import hashlib
+import statistics
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -43,6 +45,12 @@ class OrderBlock:
     retest_sent: bool = False
     invalid: bool = False
     invalidation_reason: str = ""
+    equilibrium: float = 0.0
+    width_atr: float = 0.0
+    thrust_atr: float = 0.0
+    participation_ratio: float | None = None
+    touch_count: int = 0
+    first_touch_dt: str = ""
 
 
 def _path() -> Path:
@@ -118,13 +126,38 @@ def newest_block(symbol: str, tf: str, bars: list[Candle]) -> OrderBlock | None:
     fvg = False
     if len(bars) >= 3:
         fvg = bars[-3].high < current.low if side == "LONG" else bars[-3].low > current.high
+    # Geometry/impulse diagnostics. Keep the historical full-candle zone for
+    # backward compatibility, but measure its CE (50%), width and actual thrust.
+    # This lets ranking prefer precise/fresh blocks without silently changing
+    # the established zone definition.
+    equilibrium = (origin.low + origin.high) / 2.0
+    width_atr = (origin.high - origin.low) / av
+    thrust_atr = abs(current.close - origin.close) / av
+    min_thrust = float(getattr(cfg, "ORDER_BLOCK_MIN_THRUST_ATR", .90))
+    if thrust_atr < min_thrust:
+        return None
+
+    # Optional provider-volume participation. Spot FX normally has no centralized
+    # volume; when volume is absent we leave this None and award no volume points.
+    participation_ratio = None
+    vols = [float(c.volume) for c in bars[-22:-2] if getattr(c, "volume", None) is not None and float(c.volume) > 0]
+    impulse_vols = [float(c.volume) for c in bars[-2:] if getattr(c, "volume", None) is not None and float(c.volume) > 0]
+    if len(vols) >= 8 and impulse_vols:
+        baseline = statistics.median(vols)
+        if baseline > 0:
+            participation_ratio = sum(impulse_vols) / len(impulse_vols) / baseline
+
     impulse_points = min(9, int(body/av*4))
-    quality = min(91, 70 + impulse_points + (6 if fvg else 0) + (4 if tf == "H4" else 2))
+    thrust_points = min(6, max(0, int((thrust_atr-min_thrust)*3)+2))
+    precision_points = 2 if width_atr <= float(getattr(cfg, "ORDER_BLOCK_PRECISE_WIDTH_ATR", .80)) else 0
+    volume_points = 0 if participation_ratio is None else min(3, max(0, int((participation_ratio-1.0)*3)))
+    quality = min(94, 67 + impulse_points + thrust_points + precision_points + volume_points + (6 if fvg else 0) + (4 if tf == "H4" else 2))
     precision = 3 if "JPY" in symbol else 5
     block_id = f"{symbol}|{tf}|{side}|{origin.dt}|{origin.low:.{precision}f}|{origin.high:.{precision}f}"
     return OrderBlock(
         block_id, symbol, tf, side, origin.low, origin.high, bos_level,
-        current.dt, quality, fvg=fvg, last_dt=current.dt,
+        current.dt, quality, fvg=fvg, last_dt=current.dt, equilibrium=equilibrium,
+        width_atr=width_atr, thrust_atr=thrust_atr, participation_ratio=participation_ratio,
     )
 
 
@@ -148,6 +181,11 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
     block.last_h1_dt = current.dt
     block.last_dt = current.dt
     block.age += 1
+    touched_h1 = current.low <= block.high and current.high >= block.low
+    if touched_h1:
+        block.touch_count += 1
+        if not block.first_touch_dt:
+            block.first_touch_dt = current.dt
     av = atr(h1, 14)
     if av <= 0:
         return None
@@ -205,14 +243,24 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
     strength_ok, gap = _strength(block, strength)
     if not strength_ok:
         return None
-    block.retest_sent = True
-    quality = min(95, block.quality + 6 + min(5, int(body/av*3)) + min(4, int(abs(gap)*25)))
+    # Delivery is committed only after Telegram acknowledgement (mark_delivered).
+    # Repeated mitigation weakens freshness; do not count it as extra evidence.
+    freshness_penalty = max(0, block.touch_count - 1) * int(getattr(cfg, "ORDER_BLOCK_REPEAT_TOUCH_PENALTY", 3))
+    quality = min(95, max(0, block.quality + 6 + min(5, int(body/av*3)) + min(4, int(abs(gap)*25)) - freshness_penalty))
+    if block.side == "LONG":
+        penetration = max(0.0, min(1.0, (block.high-current.low) / max(block.high-block.low, 1e-12)))
+    else:
+        penetration = max(0.0, min(1.0, (current.high-block.low) / max(block.high-block.low, 1e-12)))
     return {
         "symbol": block.symbol, "side": block.side, "tf": block.tf,
         "low": block.low, "high": block.high, "bos_level": block.bos_level,
         "close": current.close, "fvg": block.fvg, "gap": gap,
         "quality": quality, "confidence": min(91, quality-4), "confirm_tf": confirm_tf,
         "reaction_path": reaction.path, "structure_confirmations": structural,
+        "block_id": block.block_id, "equilibrium": block.equilibrium or (block.low+block.high)/2.0,
+        "width_atr": block.width_atr, "thrust_atr": block.thrust_atr,
+        "participation_ratio": block.participation_ratio, "touch_count": block.touch_count,
+        "penetration": penetration,
     }
 
 
@@ -229,11 +277,15 @@ def format_message(event: dict) -> str:
         f"Таймфрейм блока: {event['tf']}",
         f"Зона Order Block: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"Пробитый уровень BOS: {_price(event['symbol'], event['bos_level'])}",
+        f"50% зоны (CE): {_price(event['symbol'], event.get('equilibrium', (event['low']+event['high'])/2))}",
+        f"Импульс от origin до BOS: {event.get('thrust_atr', 0):.2f} ATR · ширина блока {event.get('width_atr', 0):.2f} ATR",
+        f"Глубина mitigation: {event.get('penetration', 0)*100:.0f}% · касание №{event.get('touch_count', 1)}",
         f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
         f"Сопутствующий FVG: {fvg}",
         f"Реакция зоны: {event.get('reaction_path', 'подтверждена')}",
         f"LTF структура: {' / '.join(event.get('structure_confirmations') or [])}",
         "Подтверждение реакции: закрытая H1; M15 только подтверждает реакцию/структуру; H4 не противоречит",
+        *( [f"Участие provider-volume: {event['participation_ratio']:.2f}× медианы (контекст, не биржевой FX volume)"] if event.get("participation_ratio") is not None else [] ),
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%",
         *( [f"Mitigation Block: подтверждённый контекст · {event['mitigation_block']['tf']} · {event['mitigation_block']['reaction_path']} (то же семейство OB/MB, не отдельный голос)"] if event.get('mitigation_block') else [] ), "",
@@ -247,14 +299,16 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
     blocks = {k: OrderBlock(**v) for k, v in (state.get("blocks") or {}).items()}
-    messages = []
+    pending = state.setdefault("pending", {})
+    pending_block_ids = {v.get("block_id") for v in pending.values() if isinstance(v, dict)}
+    messages = [v["text"] for v in pending.values() if isinstance(v, dict) and v.get("text")]
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
             h1, h4, m15 = (_bars(by_tf, tf) for tf in ("H1", "H4", "M15"))
             confirmed = []
             for block in blocks.values():
-                if block.symbol != symbol or block.retest_sent or block.invalid:
+                if block.symbol != symbol or block.retest_sent or block.invalid or block.block_id in pending_block_ids:
                     continue
                 was_invalid = block.invalid
                 event = confirm_retest(block, h1, h4, m15, strength)
@@ -269,6 +323,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             if confirmed and not first:
                 best = max(confirmed, key=lambda e: (e["quality"], e["tf"] == "H4"))
                 message = format_message(best)
+                digest = hashlib.sha256(message.encode()).hexdigest()[:20]
+                pending[digest] = {"block_id": best["block_id"], "text": message}
+                pending_block_ids.add(best["block_id"])
                 messages.append(message)
                 _LAST_CHART_CARDS[message] = (best, freeze_by_tf(by_tf))
             for tf in SCAN_TFS:
@@ -284,6 +341,21 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["blocks"] = {b.block_id: asdict(b) for b in kept[-500:]}
     _save(state)
     return messages
+
+
+def mark_delivered(text: str) -> bool:
+    """Commit a confirmed OB only after the exact Telegram card was delivered."""
+    state = _load()
+    digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
+    item = (state.get("pending") or {}).pop(digest, None)
+    if not item:
+        return False
+    rec = (state.get("blocks") or {}).get(item.get("block_id"))
+    if rec:
+        rec["retest_sent"] = True
+    _save(state)
+    _LAST_CHART_CARDS.pop(text, None)
+    return True
 
 
 def pop_invalidated_blocks() -> list[dict]:

@@ -1474,7 +1474,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 patterns.mark_card_delivered(source_text)
             # Unified delivery acknowledgement: confirmed facts stay PENDING until
             # the exact Telegram card has been delivered successfully.
-            for _module in (liquidity_sweep, breaker_block, smart_money_62_26, daily_high_low, retest_confirmation, ats_reversal_point):
+            for _module in (liquidity_sweep, order_block, breaker_block, smart_money_62_26, daily_high_low, retest_confirmation, ats_reversal_point):
                 try:
                     _module.mark_delivered(source_text)
                 except Exception:
