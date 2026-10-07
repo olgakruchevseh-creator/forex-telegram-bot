@@ -1,18 +1,18 @@
-BOOK LIFECYCLE PATCH v102 — 2026-10-03
+TELEGRAM DECISION-FIRST PATCH — 2026-10-07
 
-Non-destructive merge для актуальной базы 2026-10-03T100558.613.
+Назначение:
+- решение ЛОНГ/ШОРТ + пара выводятся первой строкой;
+- ниже показываются основание, качество/TF, вход и TR1 (если присутствуют);
+- исходная полная карточка сохраняется ниже под «ДЕТАЛИ»;
+- торговая математика, пороги, фильтры, event-id и Navigator не изменяются;
+- брифинги и Echo+Next Pivot не переводятся в торговый формат.
 
-Добавлено:
-1. Wyckoff Spring/Upthrust Test как продолжение существующего Turtle/false-break lifecycle.
-2. Brooks Second Entry после неудачной первой попытки, только после удержанного test + displacement.
-3. Farley Pattern Failure lifecycle для уже существующих HTF структурных паттернов.
-4. Anti-duplicate: Pattern Failure не становится отдельным KILLER family; коррелированные positive confirmations схлопываются.
-5. Navigator получает Pattern Failure только как контекст горизонта.
+Файлы для замены/добавления:
+1. bot.py — ЗАМЕНИТЬ
+2. telegram_presentation.py — ДОБАВИТЬ
+3. test_telegram_presentation.py — ДОБАВИТЬ (тесты)
 
-Не изменено:
-- KILLER_SCORE_THRESHOLD (остаётся текущим значением базы, 84).
-- Пороги существующих сигнальных модулей.
-- Самостоятельные Telegram-сигналы не добавлены.
-- Existing Turtle/Street Smarts сохранён и расширен.
-
-Заменить/добавить файлы из этого ZIP в корень репозитория.
+Проверки:
+- новые presentation-тесты + locale: 5 passed
+- H1 Telegram gate + Echo/Pivot + Weekly Rhythm: 22 passed
+- py_compile bot.py telegram_presentation.py: OK

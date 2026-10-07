@@ -67,6 +67,7 @@ import daily_calibration_report
 import signal_context
 import session_projection_reports
 from telegram_locale import localize_telegram
+from telegram_presentation import format_trade_card
 try:
     import patterns
 except ImportError:
@@ -600,7 +601,7 @@ def _source_image_for(text: str, source_text: str):
 
 async def _deliver_trade_card(app: Application, chat_id: int, text: str, image=None) -> None:
     """Единственный выход торговой карточки в Telegram."""
-    display_text = localize_telegram(text)
+    display_text = format_trade_card(localize_telegram(text))
     if image is not None:
         if len(display_text) <= 1000:
             await app.bot.send_photo(chat_id=int(chat_id), photo=image, caption=display_text)
