@@ -479,7 +479,11 @@ DAILY_HIGH_LOW_ENABLED = True
 DAILY_HIGH_LOW_CHART_IMAGES_ENABLED = True
 DAILY_LEVEL_CHART_LOOKBACK = 60
 DAILY_LEVEL_BREAK_BUFFER_ATR = 0.08
-DAILY_LEVEL_TOUCH_ATR = 0.12
+# PDH/PDL geometry: require a real excursion beyond the level and a real close back inside.
+# Kept separate from breakout acceptance so sweep/reclaim can be calibrated independently.
+DAILY_LEVEL_SWEEP_BUFFER_ATR = 0.04
+DAILY_LEVEL_RECLAIM_BUFFER_ATR = 0.04
+DAILY_LEVEL_MAX_SWEEP_DEPTH_ATR = 0.65
 DAILY_LEVEL_MIN_CONFIRMATIONS = 2
 DAILY_LEVEL_MIN_STRENGTH_GAP = 0.05
 # PDH/PDL: previous-day external liquidity context for Master Direction.

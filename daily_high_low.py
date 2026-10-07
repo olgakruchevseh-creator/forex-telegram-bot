@@ -82,15 +82,18 @@ def analyze_pdh_pdl(by_tf: dict, candidate_side: int) -> PDContext | None:
     recent = hourly[-lookback:]
     # LONG confirmation: sell-side liquidity below PDL is swept and H1 reclaims PDL.
     # SHORT confirmation: buy-side liquidity above PDH is swept and H1 closes back below PDH.
+    sweep_buf = av * float(getattr(cfg, "DAILY_LEVEL_SWEEP_BUFFER_ATR", 0.04))
+    reclaim_buf = av * float(getattr(cfg, "DAILY_LEVEL_RECLAIM_BUFFER_ATR", 0.04))
+    max_sweep = av * float(getattr(cfg, "DAILY_LEVEL_MAX_SWEEP_DEPTH_ATR", 0.65))
     if candidate_side > 0:
         level, name = ref.low, "PDL"
-        swept = any(c.low < level for c in recent)
-        reclaimed = any(c.low < level and c.close > level for c in recent)
+        swept = any(sweep_buf <= (level-c.low) <= max_sweep for c in recent)
+        reclaimed = any(sweep_buf <= (level-c.low) <= max_sweep and c.close > level + reclaim_buf for c in recent)
         distance = abs(current.close - level) / av
     else:
         level, name = ref.high, "PDH"
-        swept = any(c.high > level for c in recent)
-        reclaimed = any(c.high > level and c.close < level for c in recent)
+        swept = any(sweep_buf <= (c.high-level) <= max_sweep for c in recent)
+        reclaimed = any(sweep_buf <= (c.high-level) <= max_sweep and c.close < level - reclaim_buf for c in recent)
         distance = abs(current.close - level) / av
     if reclaimed:
         return PDContext(1, name, level, swept, True, distance)
@@ -121,19 +124,25 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
     av = atr(hourly, 14)
     if av <= 0:
         return None
-    buffer = av * float(getattr(cfg, "DAILY_LEVEL_BREAK_BUFFER_ATR", 0.08))
-    touch = av * float(getattr(cfg, "DAILY_LEVEL_TOUCH_ATR", 0.12))
+    break_buffer = av * float(getattr(cfg, "DAILY_LEVEL_BREAK_BUFFER_ATR", 0.08))
+    sweep_buffer = av * float(getattr(cfg, "DAILY_LEVEL_SWEEP_BUFFER_ATR", 0.04))
+    reclaim_buffer = av * float(getattr(cfg, "DAILY_LEVEL_RECLAIM_BUFFER_ATR", 0.04))
+    max_sweep = av * float(getattr(cfg, "DAILY_LEVEL_MAX_SWEEP_DEPTH_ATR", 0.65))
     event = None
 
-    # Пробой требует перехода через уровень и направленного закрытия H1.
-    if prev.close <= reference.high + buffer < current.close and current.close > current.open:
+    # Geometry is deliberately asymmetric:
+    # * breakout = CLOSED H1 acceptance beyond the level by a volatility buffer;
+    # * sweep = an actual excursion THROUGH the level, followed by a buffered close back inside.
+    # A near-touch from the inside is never a liquidity sweep.
+    pdh_pen = current.high - reference.high
+    pdl_pen = reference.low - current.low
+    if prev.close <= reference.high + break_buffer < current.close and current.close > current.open:
         event = ("HIGH", "ПРОБОЙ PDH — МАКСИМУМА ПРЕДЫДУЩЕГО ДНЯ", "LONG", reference.high)
-    elif prev.close >= reference.low - buffer > current.close and current.close < current.open:
+    elif prev.close >= reference.low - break_buffer > current.close and current.close < current.open:
         event = ("LOW", "ПРОБОЙ PDL — МИНИМУМА ПРЕДЫДУЩЕГО ДНЯ", "SHORT", reference.low)
-    # Отбой требует касания уровня и возврата закрытия внутрь дневного диапазона.
-    elif current.high >= reference.high - touch and current.close < reference.high - buffer and current.close < current.open:
+    elif sweep_buffer <= pdh_pen <= max_sweep and current.close < reference.high - reclaim_buffer and current.close < current.open:
         event = ("HIGH", "СНЯТИЕ PDH И ВОЗВРАТ", "SHORT", reference.high)
-    elif current.low <= reference.low + touch and current.close > reference.low + buffer and current.close > current.open:
+    elif sweep_buffer <= pdl_pen <= max_sweep and current.close > reference.low + reclaim_buffer and current.close > current.open:
         event = ("LOW", "СНЯТИЕ PDL И ВОЗВРАТ", "LONG", reference.low)
     if not event:
         return None
@@ -150,7 +159,9 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
     # PDH/PDL event from Telegram. A mere wick still never qualifies above.
     strength_ok = _strength_ok(symbol, side, strength)
     body_atr = abs(current.close - current.open) / av
-    quality = min(94, 70 + confirmations * 5 + min(7, int(body_atr * 7)) + (3 if strength_ok else -3))
+    min_conf = max(0, int(getattr(cfg, "DAILY_LEVEL_MIN_CONFIRMATIONS", 2)))
+    confirmation_delta = max(-2, min(2, confirmations - min_conf))
+    quality = min(94, 72 + confirmation_delta * 3 + min(7, int(body_atr * 7)) + (3 if strength_ok else -3))
     og = ohlc_movement.guard_event(by_tf, side, quality)
     if og.get("weak_reversal"):
         return None
@@ -186,7 +197,10 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
         "day_high": reference.high,
         "day_low": reference.low,
         "confirmations": confirmations,
+        "min_confirmations": min_conf,
         "strength_ok": strength_ok,
+        "penetration_atr": max(0.0, (pdh_pen if level_kind == "HIGH" else pdl_pen) / av),
+        "reclaim_atr": abs(float(current.close) - float(level)) / av,
         "quality": quality,
         "confidence": confidence,
         "current_price": current_price,
@@ -214,7 +228,8 @@ def format_message(event: dict) -> str:
         f"Цена подтверждения: {_price(event['symbol'], event['confirm_close'])}",
         f"Текущая цена: {_price(event['symbol'], event['current_price'])}",
         f"TR1: {_price(event['symbol'], event['tr1'])}",
-        f"Контекст младших ТФ: {event['confirmations']}/3 · Currency Strength: {'поддерживает' if event.get('strength_ok') else 'не подтверждает'}",
+        f"Контекст TF: {event['confirmations']}/3 (ориентир ≥{event.get('min_confirmations', 2)}) · Currency Strength: {'поддерживает' if event.get('strength_ok') else 'не подтверждает'}",
+        f"Геометрия уровня: выход {event.get('penetration_atr', 0):.2f} ATR · дистанция закрытия {event.get('reclaim_atr', 0):.2f} ATR",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
         f"Факт: {action} Реакция подтверждена закрытой H1-свечой.",
     ])

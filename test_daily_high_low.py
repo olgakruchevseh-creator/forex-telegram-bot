@@ -70,6 +70,20 @@ class DailyHighLowTests(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertEqual((event["name"], event["side"]), ("СНЯТИЕ PDL И ВОЗВРАТ", "LONG"))
 
+    @patch.object(dhl, "_bias", return_value=-1)
+    def test_near_touch_inside_pdh_is_not_sweep(self, _bias):
+        by_tf = candles("LONG")
+        last = by_tf["H1"][-1]
+        by_tf["H1"][-1] = Candle(last.dt, 1.0997, 1.09995, 1.0988, 1.0990)
+        self.assertIsNone(dhl.detect_event("EUR/USD", by_tf, {"EUR": 0, "USD": .2}))
+
+    @patch.object(dhl, "_bias", return_value=-1)
+    def test_micro_pdh_overshoot_below_sweep_buffer_is_noise(self, _bias):
+        by_tf = candles("LONG")
+        last = by_tf["H1"][-1]
+        by_tf["H1"][-1] = Candle(last.dt, 1.0997, 1.100001, 1.0988, 1.0990)
+        self.assertIsNone(dhl.detect_event("EUR/USD", by_tf, {"EUR": 0, "USD": .2}))
+
     @patch.object(dhl, "detect_event")
     def test_bootstrap_is_silent(self, detect):
         detect.return_value = {"event_id": "one"}
