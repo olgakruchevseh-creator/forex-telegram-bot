@@ -423,6 +423,12 @@ def attach_interaction(profile: dict, regime: str | None = None, by_tf: dict | N
             out['hmm_regime']=h.as_dict()
             # Persist one row per closed H1 for later transition calibration.
             hmm_regime.record_observation(out['symbol'], by_tf, h, character=out, regime=regime)
+            # Final HMM V4: calibrated/reliability metadata only; never changes score/side/veto.
+            try:
+                import hmm_adaptive_context
+                out['hmm_adaptive']=hmm_adaptive_context.build(h, character=out, regime=regime).as_dict()
+            except Exception:
+                out['hmm_adaptive']={'status':'ERROR','live_effect':'NONE'}
         except Exception:
             out['hmm_regime']={'status':'ERROR','live_effect':'NONE'}
     return out

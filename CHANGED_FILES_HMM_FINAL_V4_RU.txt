@@ -1,0 +1,9 @@
+ЗАМЕНИТЬ 2 СУЩЕСТВУЮЩИХ:
+pair_character_matrix.py
+config.py
+
+ДОБАВИТЬ 4 НОВЫХ:
+hmm_adaptive_context.py
+test_hmm_adaptive_context.py
+HMM_FINAL_ADAPTIVE_LAYER_V4_RU.md
+CHANGED_FILES_HMM_FINAL_V4_RU.txt
