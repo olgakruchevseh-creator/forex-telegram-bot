@@ -838,11 +838,14 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         regime_label = "БОКОВИК" if regime_name == "RANGE" else "СЖАТИЕ / БОКОВИК"
         bias_label = "ВНИЗ" if side == "SHORT" else "ВВЕРХ"
         display_mode = f"{regime_label} · ЛОКАЛЬНЫЙ УКЛОН {bias_label}"
-    # H4 ZigZag is the structural parent of a source event.  If it points in
-    # the opposite direction, the current move is a pullback regardless of a
-    # generic route classifier. Never label such a move "main impulse".
+    # H4 ZigZag remains structural context, but it cannot promote a local
+    # reaction to PULLBACK by itself.  Only the shared route classifier may
+    # use that label after closed-H1 geometry confirms it.
     if source_accepted and zz_opposite and not nondirectional_regime:
-        display_mode = "ОТКАТ ПРОТИВ ОСНОВНОГО " + str(zz_value)
+        if route.get("mode") == "PULLBACK":
+            display_mode = "ПОДТВЕРЖДЁННЫЙ ОТКАТ ПРОТИВ ОСНОВНОГО " + str(zz_value)
+        else:
+            display_mode = "ЛОКАЛЬНАЯ РЕАКЦИЯ ПРОТИВ ОСНОВНОГО " + str(zz_value)
     if source_accepted:
         # HTF hierarchy: D1/H4 are structural parents. An opposite LTF event is
         # tracked as a local reaction/pullback and must never be presented as a
@@ -868,7 +871,9 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
             else:
                 navigator_status = "⚠️ ЛОКАЛЬНОЕ ДВИЖЕНИЕ ПРОТИВ HTF · РАЗВОРОТ НЕ ПОДТВЕРЖДЁН"
                 assessment = f"⚠️ локальное {side} принято на сопровождение, но D1/H4 имеют приоритет; смена старшего маршрута не подтверждена."
-                display_mode = "ОТКАТ / ЛОКАЛЬНАЯ РЕАКЦИЯ ПРОТИВ HTF"
+                display_mode = ("ПОДТВЕРЖДЁННЫЙ ОТКАТ ПРОТИВ HTF"
+                                if route.get("mode") == "PULLBACK"
+                                else "ЛОКАЛЬНАЯ РЕАКЦИЯ ПРОТИВ HTF")
         elif no_tf_confirmation:
             navigator_status = "🔴 ЛОКАЛЬНАЯ РЕАКЦИЯ · ОСНОВНОЙ МАРШРУТ НЕ ПОДТВЕРЖДЁН"
             assessment = (f"🔴 зафиксирована локальная реакция {side}, но закрытые "

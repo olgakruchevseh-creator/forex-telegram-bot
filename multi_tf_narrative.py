@@ -7,6 +7,7 @@ M15/M5 только за подтверждение тайминга. Кратк
 """
 from dataclasses import dataclass, asdict, field
 from analysis import closed_candles, analyze_tf
+import pullback_regime
 
 TF={'W1':10080,'D1':1440,'H4':240,'H1':60,'M15':15,'M5':5}
 WEIGHTS={'W1':5,'D1':4,'H4':3,'H1':2,'M15':1,'M5':1}
@@ -48,7 +49,13 @@ def analyze_symbol(symbol,by_tf,direction):
     # Каскадный конфликт требует противоположного H4/H1 и подтверждения M15/M5.
     # Один M5/M15 против старшего сценария = откат/тайминг, не разворот.
     cascade=views['H4']==-d and views['H1']==-d and trg_opp>=1
-    pullback=htf>=3 and trg==0 and trg_opp>=1 and not cascade
+    # M15/M5 opposition alone is timing conflict, not a pullback.  The shared
+    # classifier is the only authority allowed to promote a counter-route to
+    # PULLBACK, and it requires closed-H1 geometry (>=3 bars or ATR-equivalent).
+    pullback=False
+    if htf>=3 and trg==0 and trg_opp>=1 and not cascade:
+        counter = pullback_regime.classify(symbol, -d, views['D1'], views['H4'], by_tf)
+        pullback = counter.mode == 'PULLBACK'
 
     if cascade or (views['D1']==-d and views['H4']==-d and views['H1']==-d):
         state='CASCADE_CONFLICT'; alignment=-1

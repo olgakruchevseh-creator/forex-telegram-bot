@@ -116,7 +116,7 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
     h4_zz = _h4_zigzag(symbol, by_tf)
     gap = _strength_gap(symbol, strength)
     directed_gap = gap * direction
-    mode = movement_progress._movement_mode(direction, views.get("D1", 0), views.get("H4", 0))
+    mode = pullback_regime.classify(symbol, direction, views.get("D1", 0), views.get("H4", 0), by_tf).mode
     route = movement_progress.analyze_for_side(symbol, by_tf, strength, side)
     if not route:
         route = movement_progress.analyze_progress(symbol, by_tf, strength)
@@ -135,8 +135,6 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
             direction,
         )
     against_h4 = bool(h4_zz and h4_zz != direction)
-    if against_h4:
-        mode = "PULLBACK"
     return {
         "symbol": symbol,
         "side": side,
