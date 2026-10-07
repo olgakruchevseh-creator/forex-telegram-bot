@@ -17,6 +17,7 @@ import news as newsmod
 import next_pivot_projection
 import zigzag_scanner
 import session_pullback_consensus
+import pair_character_matrix
 from analysis import closed_candles, currency_strength
 
 log = logging.getLogger("fxbot.session_projections")
@@ -492,6 +493,9 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     period = str(bundle.get("period") or "")
     if period:
         lines.append(f"Период: {period}")
+    character = bundle.get("pair_character") or {}
+    if character:
+        lines.append(pair_character_matrix.compact_text(character))
     pullback = bundle.get("pullback_consensus") or {}
     if pullback.get("text"):
         lines.append(str(pullback["text"]))
@@ -714,7 +718,9 @@ def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state:
             if not echo and not pivot:
                 continue
             zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+            character = pair_character_matrix.analyze(symbol, by_tf, strength)
             bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot, "zigzag": zz,
+                      "pair_character": character,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}
             pb_states = state.setdefault("session_pullback_consensus", {})
             previous_pb = pb_states.get(symbol) or {}

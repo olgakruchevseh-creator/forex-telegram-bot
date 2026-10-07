@@ -17,6 +17,7 @@ import movement_progress
 import market_state
 import market_regime
 import pullback_regime
+import pair_character_matrix
 import zigzag_scanner
 import structure_context
 import precision_entry
@@ -824,6 +825,9 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         strength_line = f"• Разница силы {pair_label}: {raw_gap:+.2f} · 🟡 почти равная"
     strength_dynamic = _strength_dynamics_context(symbol, side, master.get("market") or {})
     strength_dynamic_line = f"• Динамика силы: {strength_dynamic['label']}"
+    character = pair_character_matrix.analyze(symbol, (master.get("market") or {}).get(symbol) or master.get("by_tf") or {}, {})
+    character_line = (f"• Характер пары: {character.get('label')} · тренд {character.get('trend_persistence', 0):.0f}/100 · "
+                      f"шум {character.get('noise', 0):.0f}/100" if character.get("ready") else "• Характер пары: статистика накапливается")
     adjustment = int(strength_dynamic.get("adjustment") or 0)
     if adjustment:
         master = dict(master)
@@ -928,6 +932,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         zz_line,
         strength_line,
         strength_dynamic_line,
+        character_line,
     ]
     if master.get("liquidity_context"):
         lines.append(f"• {master['liquidity_context']}")
