@@ -47,6 +47,7 @@ class Setup:
     last_dt: str = ""
     sent: bool = False
     invalid: bool = False
+    temporal_anchor_dt: str = ""
 
 
 def _path() -> Path:
@@ -126,9 +127,11 @@ def _find_setup(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[Candle
         if htf == 1 and sweep.low < prior_low-sweep_buf and sweep.close > prior_low:
             side, sweep_level, sweep_price = "LONG", prior_low, sweep.low
             mss_level = max(c.high for c in h1[max(0,j-6):j])
+            temporal_anchor = max(before, key=lambda x: x.high).dt
         elif htf == -1 and sweep.high > prior_high+sweep_buf and sweep.close < prior_high:
             side, sweep_level, sweep_price = "SHORT", prior_high, sweep.high
             mss_level = min(c.low for c in h1[max(0,j-6):j])
+            temporal_anchor = min(before, key=lambda x: x.low).dt
         else:
             continue
         # После sweep обязателен закрытый displacement через MSS/BOS.
@@ -165,27 +168,40 @@ def _find_setup(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[Candle
             setup_id = f"{symbol}|{side}|{sweep.dt}|{c.dt}|{mss_level:.6f}"
             return Setup(setup_id, symbol, side, sweep_level, sweep_price, mss_level,
                          impulse_low, impulse_high, zone_low, zone_high, fvg_low, fvg_high,
-                         c.dt, min(90, quality), last_dt=c.dt, sweep_dt=sweep.dt, displacement_dt=c.dt)
+                         c.dt, min(90, quality), last_dt=c.dt, sweep_dt=sweep.dt, displacement_dt=c.dt,
+                         temporal_anchor_dt=temporal_anchor)
     return None
 
 
-def _time_cluster_bars(s: Setup, m15: list[Candle]) -> tuple[int, str, int]:
-    """Return closed-M15 age from sweep and proximity to the 26/62 time cluster.
+def _bars_between(m15: list[Candle], start_dt: str, end_dt: str) -> int:
+    if not start_dt or not end_dt or end_dt < start_dt:
+        return 0
+    return max(0, len([c for c in m15 if start_dt <= c.dt <= end_dt]) - 1)
 
-    26 and 62 are treated as timing relationships, never as price-zone width.
-    They improve quality when present but cannot manufacture direction.
+
+def _time_geometry(s: Setup, m15: list[Candle], confirm_dt: str) -> dict:
+    """Measure the 62->26 relationship as two separate closed-bar legs.
+
+    The reference leg runs from the pre-sweep structural anchor to the sweep.
+    The correction leg runs from displacement/BOS to the closed H1 reaction.
+    Timing is confluence only: it never manufactures direction or bypasses H1.
     """
-    if not s.sweep_dt:
-        return 0, "NONE", 99
-    after = [c for c in m15 if c.dt >= s.sweep_dt]
-    n = max(0, len(after) - 1)
-    d26, d62 = abs(n - 26), abs(n - 62)
-    tol = int(getattr(cfg, "SMC_62_26_TIME_TOLERANCE_BARS", 3))
-    if d26 <= tol:
-        return n, "26", d26
-    if d62 <= tol:
-        return n, "62", d62
-    return n, "NONE", min(d26, d62)
+    major = _bars_between(m15, s.temporal_anchor_dt, s.sweep_dt)
+    correction = _bars_between(m15, s.displacement_dt, confirm_dt)
+    target_major = int(getattr(cfg, "SMC_62_26_TIME_MAJOR_BARS", 62))
+    target_corr = int(getattr(cfg, "SMC_62_26_TIME_CORRECTION_BARS", 26))
+    tol_major = int(getattr(cfg, "SMC_62_26_TIME_MAJOR_TOLERANCE", 10))
+    tol_corr = int(getattr(cfg, "SMC_62_26_TIME_CORRECTION_TOLERANCE", 5))
+    if major <= 0 or correction <= 0:
+        return {"major": major, "correction": correction, "cluster": "NONE", "ratio_error": 1.0}
+    expected = target_corr / max(1, target_major)
+    actual = correction / major
+    ratio_error = abs(actual - expected) / expected
+    major_ok = abs(major-target_major) <= tol_major
+    corr_ok = abs(correction-target_corr) <= tol_corr
+    ratio_ok = ratio_error <= float(getattr(cfg, "SMC_62_26_TIME_RATIO_ERROR", .22))
+    cluster = "62→26" if major_ok and corr_ok and ratio_ok else ("RATIO" if ratio_ok else "NONE")
+    return {"major": major, "correction": correction, "cluster": cluster, "ratio_error": ratio_error}
 
 
 def _confirm(s: Setup, by_tf: dict, d1: list[Candle], h4: list[Candle], h1: list[Candle], m15: list[Candle], m5: list[Candle], strength: dict[str,float]) -> dict | None:
@@ -239,15 +255,17 @@ def _confirm(s: Setup, by_tf: dict, d1: list[Candle], h4: list[Candle], h1: list
     if not og.get("allow", True):
         return None
 
-    time_bars, time_cluster, time_distance = _time_cluster_bars(s, m15)
-    time_bonus = 5 if time_cluster != "NONE" else 0
+    tg = _time_geometry(s, m15, c.dt)
+    time_cluster = tg["cluster"]
+    time_bonus = 5 if time_cluster == "62→26" else (2 if time_cluster == "RATIO" else 0)
     ltf_bonus = 3 if (m15b == wanted or m5b == wanted) else 0
     quality=min(97,s.quality+6+ltf_bonus+time_bonus+min(5,int(abs(gap)*30))+int(og.get("quality_delta",0)))
     return {**asdict(s),"close":c.close,"gap":gap,"quality":quality,"confidence":min(93,quality-3),
             "confirm_dt":c.dt,"pullback_mode":pb.mode,"pullback_bars":pb.bars,
             "pullback_move_atr":pb.move_atr,"pullback_efficiency":pb.efficiency,
-            "market_regime":pb.regime,"time_bars_m15":time_bars,"time_cluster":time_cluster,
-            "time_distance":time_distance,"early_reason":early.get("reason","")}
+            "market_regime":pb.regime,"time_major_bars_m15":tg["major"],
+            "time_correction_bars_m15":tg["correction"],"time_cluster":time_cluster,
+            "time_ratio_error":tg["ratio_error"],"early_reason":early.get("reason","")}
 
 
 def _price(symbol: str, v: float) -> str:
@@ -265,10 +283,10 @@ def format_message(e: dict) -> str:
         f"Зона 61.8%: {_price(e['symbol'],e['zone_low'])}–{_price(e['symbol'],e['zone_high'])}",
         f"FVG: {fvg}",f"Цена подтверждения H1: {_price(e['symbol'],e['close'])}",
         f"Откат: {e.get('pullback_mode','—')} · {e.get('pullback_bars',0)} H1 · {e.get('pullback_move_atr',0):.2f} ATR · эффективность {e.get('pullback_efficiency',0):.0%}",
-        f"Временная геометрия: {e.get('time_bars_m15',0)} M15 баров · кластер {e.get('time_cluster','NONE')}",
+        f"Временная геометрия: {e.get('time_major_bars_m15',0)}→{e.get('time_correction_bars_m15',0)} M15 · кластер {e.get('time_cluster','NONE')} · ошибка ratio {e.get('time_ratio_error',1.0):.0%}",
         "Подтверждение: H4 направление · H1 sweep+MSS/displacement · H1 реакция · M15/M5 только вспомогательно",
         f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",f"Вероятность: {e['confidence']}%","",
-        f"✅ Факт: ликвидность снята, структура сменилась в {e['side']}, цена дала многосвечный откат к 61.8% и реакцию на закрытой H1; 26/62 учитываются как временной кластер, а не ширина цены.",
+        f"✅ Факт: ликвидность снята, структура сменилась в {e['side']}, цена дала многосвечный откат к 61.8% и реакцию на закрытой H1; 62→26 измеряется как две временные ноги и остаётся только конфлюэнцией.",
     ])
 
 
