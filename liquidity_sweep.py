@@ -39,6 +39,13 @@ class SweepSetup:
     last_dt: str = ""
     sent: bool = False
     invalid: bool = False
+    pool_rank: int = 0
+    pool_timeframe: str = ""
+    pool_hierarchy: str = ""
+    pool_distance_atr: float = 0.0
+    sweep_depth_atr: float = 0.0
+    reclaim_depth_atr: float = 0.0
+    rejection_wick_pct: float = 0.0
 
 
 def _path() -> Path:
@@ -130,16 +137,33 @@ def detect_new_sweep(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[C
     pools=liquidity_map.build_map(symbol,by_tf)
     for pool in pools:
         level=pool.level; upper=pool.zone_high if pool.zone_high is not None else level; lower=pool.zone_low if pool.zone_low is not None else level
+        candle_range=max(current.high-current.low, 1e-12)
         if pool.side=="BSL" and current.high>upper+buffer and current.close<upper:
             side,swept,confirm="SHORT",current.high,min(c.low for c in prior); key_level=upper
+            sweep_depth=(current.high-upper)/av
+            reclaim_depth=(upper-current.close)/av
+            rejection_wick=max(0.0,current.high-max(current.open,current.close))/candle_range
         elif pool.side=="SSL" and current.low<lower-buffer and current.close>lower:
             side,swept,confirm="LONG",current.low,max(c.high for c in prior); key_level=lower
+            sweep_depth=(lower-current.low)/av
+            reclaim_depth=(current.close-lower)/av
+            rejection_wick=max(0.0,min(current.open,current.close)-current.low)/candle_range
         else:
             continue
+        # Geometry is evidence quality, not a new veto: preserve existing thresholds.
+        geometry=min(4.0,sweep_depth*4.0)+min(4.0,reclaim_depth*4.0)+min(4.0,rejection_wick*8.0)
+        pool_quality=float(pool.rank)*4.0 + (3.0 if pool.hierarchy=="HTF" else 1.5 if pool.hierarchy=="STRUCTURAL" else 0.0)
+        # Prefer a strong, fresh, nearby pool only after the existing hierarchy/rank.
+        selection=(pool.rank, pool_quality+geometry-max(0.0,float(pool.distance_atr)-2.0))
         precision=3 if "JPY" in symbol else 5
         setup_id=f"{symbol}|{side}|{pool.source}|{key_level:.{precision}f}|{current.dt}"
-        choices.append((pool.rank,SweepSetup(setup_id,symbol,side,pool.source,key_level,swept,current.dt,confirm,last_dt=current.dt)))
-    return max(choices,key=lambda x:x[0],default=(0,None))[1]
+        choices.append((selection,SweepSetup(
+            setup_id,symbol,side,pool.source,key_level,swept,current.dt,confirm,last_dt=current.dt,
+            pool_rank=int(pool.rank),pool_timeframe=str(pool.timeframe),pool_hierarchy=str(pool.hierarchy),
+            pool_distance_atr=float(pool.distance_atr),sweep_depth_atr=float(sweep_depth),
+            reclaim_depth_atr=float(reclaim_depth),rejection_wick_pct=float(rejection_wick),
+        )))
+    return max(choices,key=lambda x:x[0],default=((0,0),None))[1]
 
 
 def _pd_array_confluence(h1: list[Candle], m15: list[Candle], side: str, av: float) -> tuple[str, int]:
@@ -211,7 +235,10 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
     # delivery commit is deferred until Telegram acknowledgement
     source_points = 8 if "дня" in setup.source else 5
     pd_array, pd_bonus = _pd_array_confluence(h1, m15, setup.side, av)
-    quality = min(94, 72 + source_points + min(7, int(abs(current.close-current.open)/av*4)) + min(5, int(abs(gap)*30)) + pd_bonus)
+    # Small bounded bonuses: geometry can strengthen a valid setup but cannot create one.
+    geometry_bonus=min(6, int(setup.sweep_depth_atr*3 + setup.reclaim_depth_atr*3 + setup.rejection_wick_pct*6))
+    hierarchy_bonus=2 if setup.pool_hierarchy=="HTF" else 1 if setup.pool_hierarchy=="STRUCTURAL" else 0
+    quality = min(94, 72 + source_points + min(7, int(abs(current.close-current.open)/av*4)) + min(5, int(abs(gap)*30)) + pd_bonus + geometry_bonus + hierarchy_bonus)
     lifecycle = "ПУЛ ЛИКВИДНОСТИ → SWEEP → ВОЗВРАТ → CHOCH/BOS → " + ("FVG/OB КОНФЛЮЭНС" if pd_bonus else "СТРУКТУРА ПОДТВЕРЖДЕНА")
     return {
         "symbol": setup.symbol, "side": setup.side, "source": setup.source,
@@ -219,6 +246,10 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
         "confirm_level": setup.confirm_level, "close": current.close, "confirm_tf": confirm_tf,
         "gap": gap, "quality": quality, "confidence": min(90, quality-4),
         "pd_array_confluence": pd_array, "pd_array_bonus": pd_bonus, "lifecycle": lifecycle,
+        "pool_rank": setup.pool_rank, "pool_timeframe": setup.pool_timeframe, "pool_hierarchy": setup.pool_hierarchy,
+        "pool_distance_atr": setup.pool_distance_atr, "sweep_depth_atr": setup.sweep_depth_atr,
+        "reclaim_depth_atr": setup.reclaim_depth_atr, "rejection_wick_pct": setup.rejection_wick_pct,
+        "move_from_sweep_atr": abs(current.close-setup.sweep_price)/av,
     }
 
 
@@ -237,6 +268,8 @@ def format_message(event: dict) -> str:
         f"Уровень подтверждения CHOCH/BOS: {_price(event['symbol'], event['confirm_level'])}",
         f"Цена закрытия {event.get('confirm_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
         f"Подтверждение: более поздняя закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
+        f"Геометрия sweep: прокол {event.get('sweep_depth_atr',0):.2f} ATR · возврат {event.get('reclaim_depth_atr',0):.2f} ATR · rejection wick {event.get('rejection_wick_pct',0)*100:.0f}%",
+        f"Пул: {event.get('pool_hierarchy','—')} · TF {event.get('pool_timeframe','—')} · rank {event.get('pool_rank',0)}",
         f"Конфлюэнс после структуры: {event.get('pd_array_confluence', 'не оценён')}",
         f"Lifecycle: {event.get('lifecycle', 'SWEEP → ВОЗВРАТ → CHOCH/BOS')}",
         f"Разница силы валют: {event['gap']:+.2f}",
