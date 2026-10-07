@@ -1628,21 +1628,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         market, session_events, state):
                     try:
                         caption = localize_telegram(bundle["caption"])
-                        media = []
-                        if bundle.get("echo"):
-                            bundle["echo"]["image"].seek(0)
-                            media.append(InputMediaPhoto(media=bundle["echo"]["image"], caption=caption))
-                        if bundle.get("pivot"):
-                            bundle["pivot"]["image"].seek(0)
-                            media.append(InputMediaPhoto(media=bundle["pivot"]["image"]))
-                        if len(media) == 1:
-                            message = await context.application.bot.send_photo(
-                                chat_id=int(chat_id), photo=media[0].media, caption=caption)
-                            message_id = getattr(message, "message_id", None)
-                        else:
-                            messages = await context.application.bot.send_media_group(
-                                chat_id=int(chat_id), media=media)
-                            message_id = getattr(messages[0], "message_id", None) if messages else None
+                        image = bundle.get("image")
+                        if image is None:
+                            raise ValueError("Unified Echo/Pivot/ZigZag image is missing")
+                        image.seek(0)
+                        message = await context.application.bot.send_photo(
+                            chat_id=int(chat_id), photo=image, caption=caption)
+                        message_id = getattr(message, "message_id", None)
                         session_projection_reports.mark_delivered(state, bundle["key"])
                         save_state(state)
                         log.info("SESSION_ECHO_PIVOT_BUNDLE_SENT message_id=%s key=%s pid=%s",

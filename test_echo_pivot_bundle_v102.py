@@ -18,5 +18,5 @@ def test_combined_caption_labels_two_images():
     bundle = {"symbol": "USD/JPY", "period": "АЗИЯ → ЕВРОПА · около 8 ч",
               "echo": {"result": {}}, "pivot": {"result": {}}}
     text = reports.combined_pair_caption(bundle)
-    assert "1/2 — Echo" in text
-    assert "2/2 — Next Pivot" in text
+    assert "Единый график" in text
+    assert "Adaptive ZigZag + Echo + Next Pivot" in text

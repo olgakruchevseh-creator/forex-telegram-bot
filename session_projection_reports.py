@@ -15,6 +15,7 @@ import briefing
 import echo_projection
 import news as newsmod
 import next_pivot_projection
+import zigzag_scanner
 from analysis import closed_candles, currency_strength
 
 log = logging.getLogger("fxbot.session_projections")
@@ -480,11 +481,120 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
             lines.append(f"Связка: Pivot — локальная зона; реакция {_side_badge(reaction)} учитывается только после подтверждения M15/H1.")
     else:
         lines.append("Pivot: надёжная следующая зона пока не рассчитана.")
-    lines.append("🖼 1/2 — Echo · 2/2 — Next Pivot")
+    lines.append("🖼 Единый график: Adaptive ZigZag + Echo + Next Pivot")
     lines.append("⚠️ Информационный вероятностный сценарий, не торговый сигнал.")
     text = "\n".join(lines)
     return text if len(text) <= limit else text[:limit-1].rstrip() + "…"
 
+
+
+def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
+    """One H1 canvas: confirmed Adaptive ZigZag + Echo path + Next Pivot zone/reaction.
+
+    The layers keep their roles separate: ZigZag is confirmed structure, Echo is a
+    probabilistic session path, and Pivot is a target/reaction zone.  No layer is
+    allowed to manufacture a trading signal for another one.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+    from analysis import closed_candles, zigzag, atr
+
+    symbol = str(bundle.get("symbol") or "")
+    by_tf = by_tf or {}
+    bars = closed_candles(by_tf.get("H1") or [], 60)[-40:]
+    if len(bars) < 8:
+        raise ValueError("Unified Echo/Pivot/ZigZag chart requires closed H1 candles")
+    echo = ((bundle.get("echo") or {}).get("result") or {})
+    pivot = ((bundle.get("pivot") or {}).get("result") or {})
+    zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+
+    width, height = 1200, 720
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image, "RGBA")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+    except OSError:
+        font = ImageFont.load_default(size=22); small = ImageFont.load_default(size=17)
+
+    left, right, top, bottom = 75, 1045, 82, 620
+    future = max(8, min(14, int(echo.get("session_hours") or 8)))
+    total = len(bars) + future
+    current = float(bars[-1].close)
+    av = float(echo.get("atr") or atr(bars, 14) or max(current*.0005, 1e-8))
+    expected = echo.get("expected_by_horizon") or {}
+    echo_points = [(0, current)]
+    for h in sorted(int(k) for k in expected if str(k).isdigit()):
+        if h <= future:
+            echo_points.append((h, current + av*float(expected.get(str(h), 0))))
+    if len(echo_points) == 1 and echo.get("side"):
+        sign = 1 if echo.get("side") == "LONG" else -1
+        echo_points.append((future, current + sign*av*.8))
+
+    prices = [v for b in bars for v in (b.low,b.high)] + [v for _,v in echo_points]
+    if pivot:
+        prices += [float(pivot.get("zone_low", current)), float(pivot.get("zone_high", current))]
+        sign = 1 if pivot.get("side") == "LONG" else -1
+        prices.append((float(pivot.get("zone_low", current))+float(pivot.get("zone_high", current)))/2 - sign*av*.9)
+    lo, hi = min(prices), max(prices); pad=max((hi-lo)*.09,av*.25); lo-=pad; hi+=pad
+    def x_at(i): return left + i/max(1,total-1)*(right-left)
+    def y_at(v): return bottom-(v-lo)/max(1e-12,hi-lo)*(bottom-top)
+
+    decimals = 3 if "JPY" in symbol else 5
+    for row in range(6):
+        y=top+row*(bottom-top)/5; draw.line((left,y,right,y),fill="#293143",width=1)
+        draw.text((right+12,y-10),f"{hi-row*(hi-lo)/5:.{decimals}f}",fill="#9aa4b5",font=small)
+    cw=max(4,int((right-left)/total*.55))
+    for i,b in enumerate(bars):
+        x=x_at(i); c="#37d67a" if b.close>=b.open else "#ff5c6c"
+        draw.line((x,y_at(b.high),x,y_at(b.low)),fill=c,width=2)
+        y1,y2=y_at(b.open),y_at(b.close); draw.rectangle((x-cw/2,min(y1,y2),x+cw/2,max(y1,y2)+1),fill=c)
+
+    # Adaptive ZigZag: confirmed base-scale extrema only; unfinished leg is grey/dashed.
+    zz_swings=zigzag(bars, float(cfg.ZIGZAG_PCT.get("H1",.18)), cfg.ZIGZAG_MIN_BARS)
+    zpts=[(x_at(p.index),y_at(p.price),p) for p in zz_swings]
+    if len(zpts)>=2: draw.line([(x,y) for x,y,_ in zpts],fill="#f1f5fb",width=4)
+    ph=pl=None
+    for x,y,p in zpts:
+        if p.kind=="high": label="H" if ph is None else ("HH" if p.price>ph else "LH"); ph=p.price
+        else: label="L" if pl is None else ("HL" if p.price>pl else "LL"); pl=p.price
+        draw.ellipse((x-5,y-5,x+5,y+5),fill="#f1f5fb")
+        draw.text((x-11,y-25 if p.kind=="high" else y+8),label,fill="#f1f5fb",font=small)
+    if zpts:
+        a=zpts[-1][:2]; b=(x_at(len(bars)-1),y_at(current))
+        for n in range(0,12,2):
+            t1=n/12;t2=min(1,(n+1)/12);draw.line((a[0]+(b[0]-a[0])*t1,a[1]+(b[1]-a[1])*t1,a[0]+(b[0]-a[0])*t2,a[1]+(b[1]-a[1])*t2),fill="#8f99aa",width=3)
+
+    boundary=x_at(len(bars)-1); draw.line((boundary,top,boundary,bottom),fill="#707b8d",width=2)
+    draw.text((max(left,boundary-72),bottom-25),"СЕЙЧАС",fill="#b9c3d3",font=small)
+
+    # Echo: dotted probabilistic route.
+    if len(echo_points)>=2:
+        ecol="#42e889" if echo.get("side")=="LONG" else "#ff6575"
+        pts=[(x_at(len(bars)-1+h),y_at(v)) for h,v in echo_points]
+        for a,b in zip(pts,pts[1:]):
+            for n in range(0,14,2):
+                t1=n/14;t2=min(1,(n+1)/14);draw.line((a[0]+(b[0]-a[0])*t1,a[1]+(b[1]-a[1])*t1,a[0]+(b[0]-a[0])*t2,a[1]+(b[1]-a[1])*t2),fill=ecol,width=5)
+        draw.text((boundary+12,top+8),f"ЭХО {echo.get('side','—')} · {echo.get('direction_probability',echo.get('confidence','—'))}%",fill=ecol,font=small)
+
+    # Pivot: zone + route into it + projected reaction after touch.
+    if pivot:
+        zl,zh=float(pivot["zone_low"]),float(pivot["zone_high"]); mid=(zl+zh)/2
+        low_b=max(1,int(pivot.get("bars_low") or 1)); high_b=max(low_b,int(pivot.get("bars_high") or low_b+2)); high_b=min(future,high_b)
+        zx1=x_at(len(bars)-1+min(future,low_b)); zx2=x_at(len(bars)-1+max(min(future,high_b),min(future,low_b)+1))
+        draw.rectangle((zx1,y_at(zh),zx2,y_at(zl)),fill="#5ca8ff2b",outline="#8cc8ff",width=2)
+        pc="#42e889" if pivot.get("side")=="LONG" else "#ff6575"
+        target=((zx1+zx2)/2,y_at(mid)); start=(boundary,y_at(current))
+        draw.line((start[0],start[1],target[0],target[1]),fill=pc,width=4)
+        sign=1 if pivot.get("side")=="LONG" else -1; reaction=mid-sign*av*.9
+        end=(x_at(min(total-1,len(bars)-1+high_b+3)),y_at(reaction)); draw.line((target[0],target[1],end[0],end[1]),fill="#d889ff",width=4)
+        kind="ВЕРШИНА" if pivot.get("kind")=="high" else "ОСНОВАНИЕ"
+        draw.text((max(left,zx1-15),max(top+32,y_at(zh)-26)),f"PIVOT {kind}",fill="#8cc8ff",font=small)
+
+    zdir=(zz.get("zigzag_directions") or {}).get("H1",0); zword="LONG" if zdir>0 else "SHORT" if zdir<0 else "RANGE"
+    draw.text((left,24),f"{symbol} · H1 · ЭХО + NEXT PIVOT + ADAPTIVE ZIGZAG",fill="#f1f5fb",font=font)
+    draw.text((left,51),f"ZigZag H1: {zword} · подтверждённая структура белым · прогноз пунктиром",fill="#b9c3d3",font=small)
+    draw.text((left,665),"Единый вероятностный сценарий · закрытые H1 · не торговая гарантия",fill="#9aa4b5",font=small)
+    out=io.BytesIO(); out.name=f"echo_pivot_zigzag_{symbol.replace('/','')}.png"; image.save(out,format="PNG",optimize=True); out.seek(0); return out
 
 def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state: dict) -> list[dict]:
     """Seven pair albums instead of fourteen unrelated notifications."""
@@ -533,6 +643,7 @@ def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state:
             bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}
             bundle["caption"] = combined_pair_caption(bundle)
+            bundle["image"] = render_unified_scenario_chart(bundle, by_tf)
             bundles.append(bundle)
         except Exception:
             log.exception("SESSION_BUNDLE_BUILD_FAILED symbol=%s session=%s", symbol, session_id)
