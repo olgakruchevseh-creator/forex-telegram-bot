@@ -49,6 +49,34 @@ def _hurst_proxy(closes, max_lag=12):
     return max(0.0,min(1.0,slope))
 
 
+def _percentile_rank(values, x):
+    vals=[float(v) for v in values if math.isfinite(float(v))]
+    if not vals: return 50.0
+    return 100.0*sum(v <= float(x) for v in vals)/len(vals)
+
+def _zscore(values, x):
+    vals=[float(v) for v in values if math.isfinite(float(v))]
+    if len(vals)<8: return 0.0
+    sd=pstdev(vals)
+    return (float(x)-mean(vals))/sd if sd>1e-15 else 0.0
+
+def _realized_vol(returns):
+    # Root-sum-square realized volatility on log returns; deliberately not annualised.
+    return math.sqrt(sum(float(r)*float(r) for r in returns)) if returns else 0.0
+
+def _directional_persistence(returns):
+    signs=[1 if r>0 else (-1 if r<0 else 0) for r in returns]
+    pairs=[(a,b) for a,b in zip(signs,signs[1:]) if a and b]
+    return sum(a==b for a,b in pairs)/len(pairs) if pairs else 0.5
+
+def _sign_entropy(returns):
+    # Normalised Shannon entropy of up/down log-return signs: 0=one-sided, 1=maximally mixed.
+    signs=[1 if r>0 else -1 for r in returns if r != 0]
+    if not signs: return 1.0
+    p=sum(s>0 for s in signs)/len(signs)
+    if p<=0 or p>=1: return 0.0
+    return -(p*math.log(p)+(1-p)*math.log(1-p))/math.log(2.0)
+
 def _er(closes, n):
     if len(closes) <= n: return 0.0
     w=closes[-(n+1):]
@@ -75,7 +103,8 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     if len(bars)<40:
         return {'symbol':symbol,'ready':False,'samples':len(bars),'label':'НЕДОСТАТОЧНО ДАННЫХ'}
     closes=[float(b.close) for b in bars]
-    rets=[(b-a)/a for a,b in zip(closes,closes[1:]) if a]
+    simple_rets=[(b-a)/a for a,b in zip(closes,closes[1:]) if a]
+    rets=[math.log(b/a) for a,b in zip(closes,closes[1:]) if a>0 and b>0]
     av=float(atr(bars,14) or 0.0); px=max(abs(closes[-1]),1e-12)
     atr_pct=100*av/px
     recent=closes[-25:]; eff=_efficiency(recent)
@@ -83,6 +112,8 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     er8, er24, er72 = _er(closes,8), _er(closes,24), _er(closes,72)
     er_blend = .25*er8 + .50*er24 + .25*er72
     ac1=_corr(rets[:-1],rets[1:]) if len(rets)>10 else 0.0
+    dir_persistence=_directional_persistence(rets[-48:])
+    return_entropy=_sign_entropy(rets[-48:])
     h=_hurst_proxy(closes)
     # persistence blends geometry and return memory; negative autocorrelation
     # naturally shifts the pair toward mean-reversion.
@@ -100,6 +131,21 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     vol_now=mean([abs(x) for x in rets[-12:]] or [0.0])
     vol_base=mean(vol_ref) if vol_ref else 0.0
     vol_ratio=vol_now/vol_base if vol_base else 1.0
+    rv12=_realized_vol(rets[-12:])
+    rv24=_realized_vol(rets[-24:])
+    # Causal historical 12H RV distribution for pair-relative percentile/z-score.
+    rv_hist=[]
+    for i in range(12,len(rets)+1):
+        rv_hist.append(_realized_vol(rets[max(0,i-12):i]))
+    rv_ref=rv_hist[:-1] if len(rv_hist)>1 else rv_hist
+    rv_percentile=_percentile_rank(rv_ref,rv12)
+    rv_z=_zscore(rv_ref,rv12)
+    eff_hist=[]
+    for i in range(25,len(closes)+1):
+        eff_hist.append(_efficiency(closes[i-25:i]))
+    eff_ref=eff_hist[:-1] if len(eff_hist)>1 else eff_hist
+    eff_percentile=_percentile_rank(eff_ref,eff)
+    eff_z=_zscore(eff_ref,eff)
     volatility=_clip(50+35*math.log(max(.25,min(4.0,vol_ratio)),2))
 
     # Counter-move depth against the net 24H direction, normalized by ATR.
@@ -156,6 +202,11 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         'impulse':round(impulse,1),'noise':round(noise,1),'volatility':round(volatility,1),
         'pullback_depth':round(pullback_depth,1),'pullback_atr':round(pullback_atr,2),
         'hurst_proxy':round(h,3),'autocorr_1':round(ac1,3),'efficiency':round(eff,3),
+        'log_return_last':round(rets[-1],8) if rets else 0.0,
+        'realized_vol_12h':round(rv12,8),'realized_vol_24h':round(rv24,8),
+        'realized_vol_percentile':round(rv_percentile,1),'realized_vol_zscore':round(rv_z,3),
+        'efficiency_percentile':round(eff_percentile,1),'efficiency_zscore':round(eff_z,3),
+        'directional_persistence':round(100*dir_persistence,1),'return_sign_entropy':round(return_entropy,3),
         'efficiency_ratio_8':round(er8,3),'efficiency_ratio_24':round(er24,3),
         'efficiency_ratio_72':round(er72,3),'efficiency_ratio_blend':round(er_blend,3),
         'session':current_session,'session_samples':len(session_rows),

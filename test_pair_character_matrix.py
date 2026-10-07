@@ -33,3 +33,20 @@ def test_interaction_matrix_is_bounded_and_transparent():
     assert m['ready'] and 0 <= m['score'] <= 100
     assert abs(sum(m['weights'].values())-1.0) < 1e-9
     assert set(m['components']) == {'pair_reliability','session_fit','regime_fit','cleanliness','strength_separation'}
+
+def test_academic_character_features_are_present_and_finite():
+    r=pcm.analyze('EUR/USD',{'H1':bars(True)}, {})
+    for k in ('log_return_last','realized_vol_12h','realized_vol_24h','realized_vol_percentile',
+              'realized_vol_zscore','efficiency_percentile','efficiency_zscore',
+              'directional_persistence','return_sign_entropy'):
+        assert k in r
+    assert 0 <= r['realized_vol_percentile'] <= 100
+    assert 0 <= r['efficiency_percentile'] <= 100
+    assert 0 <= r['directional_persistence'] <= 100
+    assert 0 <= r['return_sign_entropy'] <= 1
+
+def test_trend_has_lower_sign_entropy_and_higher_directional_persistence():
+    a=pcm.analyze('EUR/USD',{'H1':bars(True)}, {})
+    b=pcm.analyze('EUR/USD',{'H1':bars(False)}, {})
+    assert a['directional_persistence'] > b['directional_persistence']
+    assert a['return_sign_entropy'] < b['return_sign_entropy']
