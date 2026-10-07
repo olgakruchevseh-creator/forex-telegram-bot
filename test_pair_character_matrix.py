@@ -107,3 +107,33 @@ def test_joint_score_shrinks_to_neutral_with_short_history():
     assert r['stability_guard']['history_samples'] == 3
     assert r['stability_guard']['history_confidence'] == 0.025
     assert abs(r['score']-50.0) < 2.0
+
+
+def test_trend_voice_is_kaufman_only_and_reversion_is_not_complement():
+    trend = pcm.analyze('EUR/USD', {'H1': bars(True, 180)}, {})
+    alt = pcm.analyze('EUR/USD', {'H1': bars(False, 180)}, {})
+    assert trend['trend_voice'] == 'KAUFMAN_ER_BLEND'
+    assert abs(trend['trend_persistence'] - 100 * trend['efficiency_ratio_blend']) < 0.15
+    assert abs(trend['hurst_centered'] - (trend['hurst_proxy'] - 0.5)) < 1e-9
+    assert trend['reversion_voice'] == 'NEGATIVE_AC1_TIMES_SIGN_ENTROPY'
+    assert trend['mean_reversion'] == pcm._mean_reversion(trend['autocorr_1'], trend['return_sign_entropy'])
+    assert alt['mean_reversion'] == pcm._mean_reversion(alt['autocorr_1'], alt['return_sign_entropy'])
+    assert alt['mean_reversion'] > trend['mean_reversion']
+    assert alt['autocorr_1'] < trend['autocorr_1']
+    assert 'ВОЗВРАТНЫЙ' not in trend['label']
+
+
+def test_missing_strength_is_not_a_zero_axis():
+    p = pcm.analyze('EUR/USD', {'H1': bars(True, 180)}, {})
+    assert p['strength_known'] is False
+    m = pcm.interaction_matrix(p, 'TREND')
+    assert 'strength_separation' not in m['components']
+    assert m['strength_axis_included'] is False
+    assert abs(sum(m['weights'].values()) - 1.0) < 1e-9
+
+
+def test_rms_vol_is_comparable_across_windows():
+    r = pcm.analyze('EUR/USD', {'H1': bars(True, 180)}, {})
+    assert r['realized_vol_12h_rms'] > 0
+    assert r['realized_vol_24h'] > r['realized_vol_12h']
+    assert abs(r['realized_vol_12h_rms'] - r['realized_vol_24h_rms']) / r['realized_vol_12h_rms'] < 0.35

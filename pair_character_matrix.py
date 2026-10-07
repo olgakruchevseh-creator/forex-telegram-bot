@@ -3,6 +3,10 @@
 Context only: it never creates LONG/SHORT and never vetoes an existing signal.
 All metrics use closed H1 bars and are scale-free where possible so the seven
 majors can be compared without hard-coded folklore about a pair.
+
+Trend persistence is Kaufman ER only. Hurst is a centered memory diagnostic
+and is not added to ER. Mean reversion comes from negative lag-1 autocorrelation,
+amplified by sign entropy; it is not the complement of persistence.
 """
 from __future__ import annotations
 
@@ -154,6 +158,25 @@ def _realized_vol(returns):
     # Root-sum-square realized volatility on log returns; deliberately not annualised.
     return math.sqrt(sum(float(r)*float(r) for r in returns)) if returns else 0.0
 
+def _realized_vol_rms(returns):
+    # Per-bar RMS so 12H and 24H can sit side by side. RSS grows with window length.
+    n=len(returns)
+    return math.sqrt(sum(float(r)*float(r) for r in returns)/n) if n else 0.0
+
+def _trend_persistence(er_blend):
+    """Kaufman ER blend is the only trend voice. Hurst and lag-1 are not added."""
+    return _clip(100.0*max(0.0, min(1.0, float(er_blend))))
+
+def _mean_reversion(ac1, entropy):
+    """Negative lag-1 autocorrelation is reversion memory.
+
+    Sign entropy amplifies that memory only. Mixed signs with ac1 near zero are
+    noise, not mean reversion, so this is not 100 - persistence.
+    """
+    memory=max(0.0, min(1.0, -float(ac1)))
+    mix=max(0.0, min(1.0, float(entropy)))
+    return _clip(100.0*memory*(0.65+0.35*mix))
+
 def _directional_persistence(returns):
     signs=[1 if r>0 else (-1 if r<0 else 0) for r in returns]
     pairs=[(a,b) for a,b in zip(signs,signs[1:]) if a and b]
@@ -205,10 +228,10 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     dir_persistence=_directional_persistence(rets[-48:])
     return_entropy=_sign_entropy(rets[-48:])
     h=_hurst_proxy(closes)
-    # persistence blends geometry and return memory; negative autocorrelation
-    # naturally shifts the pair toward mean-reversion.
-    persistence=_clip(100*(.34*eff+.28*er_blend+.23*h+.15*((ac1+1)/2)))
-    mean_reversion=_clip(100-persistence)
+    # ER is the trend voice. Centered Hurst stays a memory diagnostic only.
+    persistence=_trend_persistence(er_blend)
+    mean_reversion=_mean_reversion(ac1, return_entropy)
+    hurst_centered=h-0.5
 
     bodies=[abs(float(b.close)-float(b.open)) for b in bars[-48:]]
     ranges=[max(0.0,float(b.high)-float(b.low)) for b in bars[-48:]]
@@ -251,15 +274,22 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     pullback_atr=max(adverse or [0.0])
     pullback_depth=_clip(100*pullback_atr/2.0)
 
+    strength_gap=0.0
+    strength_known=False
     try:
         base,quote=symbol.split('/')
-        strength_gap=float((strength or {}).get(base,0))-float((strength or {}).get(quote,0))
-    except Exception: strength_gap=0.0
+        src=strength or {}
+        if base in src and quote in src:
+            strength_gap=float(src.get(base,0))-float(src.get(quote,0))
+            strength_known=True
+    except Exception:
+        strength_gap=0.0
+        strength_known=False
 
     # Adaptive thresholds are estimated from this pair's own causal H1 history.
     # Tertiles are distribution-free: no universal EUR/USD=GBP/USD cut-off is assumed.
     # MAD is retained as a robust scale diagnostic and for later calibration.
-    hist_persistence=[]; hist_impulse=[]; hist_noise=[]; hist_volratio=[]
+    hist_persistence=[]; hist_impulse=[]; hist_noise=[]; hist_volratio=[]; hist_reversion=[]
     abs_rets=[abs(x) for x in rets]
     for end in range(40,len(closes)):
         cw=closes[:end+1]
@@ -272,8 +302,8 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         e8,e24,e72=_er(cw,8),_er(cw,24),_er(cw,72)
         eb=.25*e8+.50*e24+.25*e72
         ac=_corr(rr_log[:-1],rr_log[1:]) if len(rr_log)>10 else 0.0
-        hh=_hurst_proxy(cw)
-        hist_persistence.append(_clip(100*(.34*e+.28*eb+.23*hh+.15*((ac+1)/2))))
+        hist_persistence.append(_trend_persistence(eb))
+        hist_reversion.append(_mean_reversion(ac, _sign_entropy(rr_log[-48:])))
         hist_impulse.append(_clip(100*(.55*bdy+.45*e)))
         hist_noise.append(_clip(100*(.60*(1-e)+.40*(1-bdy))))
         idx=max(1,end)
@@ -287,13 +317,15 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         {'trend_persistence':hist_persistence,'impulse':hist_impulse,'noise':hist_noise,'volatility':hist_volratio},
     )
     trend_band=_adaptive_band(hist_persistence)
+    reversion_band=_adaptive_band(hist_reversion)
     impulse_band=_adaptive_band(hist_impulse)
     noise_band=_adaptive_band(hist_noise)
     volatility_band=_adaptive_band(hist_volratio)
-    trend_lo=trend_band.get('low') if trend_band.get('low') is not None else 38.0
     trend_hi=trend_band.get('high') if trend_band.get('high') is not None else 62.0
-    if persistence>=trend_hi: label='ТРЕНДОВЫЙ'
-    elif persistence<=trend_lo: label='ВОЗВРАТНЫЙ'
+    mr_hi=reversion_band.get('high') if reversion_band.get('high') is not None else 62.0
+    # Low ER is not mean reversion. The return label needs its own upper tertile.
+    if persistence>=trend_hi and persistence>=mean_reversion: label='ТРЕНДОВЫЙ'
+    elif mean_reversion>=mr_hi and mean_reversion>persistence: label='ВОЗВРАТНЫЙ'
     else: label='СМЕШАННЫЙ'
     vol_lo=volatility_band.get('low') if volatility_band.get('low') is not None else 35.0
     vol_hi=volatility_band.get('high') if volatility_band.get('high') is not None else 68.0
@@ -330,9 +362,12 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         'trend_persistence':round(persistence,1),'mean_reversion':round(mean_reversion,1),
         'impulse':round(impulse,1),'noise':round(noise,1),'volatility':round(volatility,1),
         'pullback_depth':round(pullback_depth,1),'pullback_atr':round(pullback_atr,2),
-        'hurst_proxy':round(h,3),'autocorr_1':round(ac1,3),'efficiency':round(eff,3),
+        'hurst_proxy':round(h,3),'hurst_centered':round(hurst_centered,3),
+        'autocorr_1':round(ac1,3),'efficiency':round(eff,3),
         'log_return_last':round(rets[-1],8) if rets else 0.0,
         'realized_vol_12h':round(rv12,8),'realized_vol_24h':round(rv24,8),
+        'realized_vol_12h_rms':round(_realized_vol_rms(rets[-12:]),8),
+        'realized_vol_24h_rms':round(_realized_vol_rms(rets[-24:]),8),
         'realized_vol_percentile':round(rv_percentile,1),'realized_vol_zscore':round(rv_z,3),
         'efficiency_percentile':round(eff_percentile,1),'efficiency_zscore':round(eff_z,3),
         'directional_persistence':round(100*dir_persistence,1),'return_sign_entropy':round(return_entropy,3),
@@ -344,6 +379,7 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         'atr_pct':round(atr_pct,4),'volatility_ratio':round(vol_ratio,3),
         'adaptive_thresholds':{
             'trend_persistence':{k:(round(v,3) if isinstance(v,float) else v) for k,v in trend_band.items()},
+            'mean_reversion':{k:(round(v,3) if isinstance(v,float) else v) for k,v in reversion_band.items()},
             'impulse':{k:(round(v,3) if isinstance(v,float) else v) for k,v in impulse_band.items()},
             'noise':{k:(round(v,3) if isinstance(v,float) else v) for k,v in noise_band.items()},
             'volatility':{k:(round(v,3) if isinstance(v,float) else v) for k,v in volatility_band.items()},
@@ -351,13 +387,16 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         },
         'character_matrix':joint_character,
         'character_matrix_score':joint_character['score'],
-        'strength_gap':round(strength_gap,4),'reliability':round(reliability,1),
+        'strength_gap':round(strength_gap,4),'strength_known':strength_known,
+        'reliability':round(reliability,1),
+        'trend_voice':'KAUFMAN_ER_BLEND','reversion_voice':'NEGATIVE_AC1_TIMES_SIGN_ENTROPY',
     }
 
 
 def compact_text(p: dict) -> str:
     if not p or not p.get('ready'): return 'Характер пары: статистика ещё накапливается'
     return (f"Характер пары: {p['label']} · тренд {p['trend_persistence']:.0f}/100 · "
+            f"возврат {p.get('mean_reversion',0):.0f}/100 · "
             f"импульс {p['impulse']:.0f}/100 · шум {p['noise']:.0f}/100 · "
             f"ER24 {p.get('efficiency_ratio_24',0):.2f} · откат {p['pullback_atr']:.2f} ATR · "
             f"сессия {p.get('session_activity',0):.0f}/100")
@@ -377,9 +416,6 @@ def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
     noise=float(profile.get('noise') or 0)/100.0
     sess=float(profile.get('session_activity') or 0)/100.0
     reliability=float(profile.get('reliability') or 0)/100.0
-    # Strength values in the project are centred around zero.  Saturation at
-    # 0.12 prevents an exceptional reading from dominating the whole matrix.
-    strength=min(1.0, abs(float(profile.get('strength_gap') or 0))/0.12)
     r=str(regime or '').upper()
     if r in ('TREND','EXPANSION','BREAKOUT'):
         regime_fit=.55*trend+.30*impulse+.15*(1-noise)
@@ -387,11 +423,15 @@ def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
         regime_fit=.55*(1-trend)+.30*noise+.15*(1-impulse)
     else:
         regime_fit=.50
-    # No hand-tuned importance coefficients.  Combine the five independent
-    # context dimensions with an equal-weight geometric mean.  A weak dimension
-    # therefore cannot be hidden by one very strong reading, while no professor-
-    # looking coefficient is invented where the literature does not prescribe one.
-    components01=[reliability,sess,regime_fit,(1-noise),strength]
+    # Missing strength is an absent axis, not a zero. A true zero gap is kept
+    # only when both currencies were present in the strength map.
+    parts=[('pair_reliability',reliability),('session_fit',sess),('regime_fit',regime_fit),
+           ('cleanliness',(1-noise))]
+    if profile.get('strength_known') is not False:
+        gap=abs(float(profile.get('strength_gap') or 0))
+        parts.append(('strength_separation', min(1.0, gap/0.12)))
+    w=1.0/len(parts)
+    components01=[v for _,v in parts]
     floor=0.01
     score=100*math.prod(max(floor,min(1.0,x)) for x in components01)**(1.0/len(components01))
     score=_clip(score)
@@ -400,11 +440,9 @@ def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
     elif score >= 43: band='СМЕШАННО'
     else: band='СЛАБОЕ СОГЛАСОВАНИЕ'
     return {'ready':True,'score':round(score,1),'band':band,
-            'components':{'pair_reliability':round(100*reliability,1),
-                          'session_fit':round(100*sess,1),'regime_fit':round(100*regime_fit,1),
-                          'cleanliness':round(100*(1-noise),1),'strength_separation':round(100*strength,1)},
-            'weights':{'pair_reliability':.20,'session_fit':.20,'regime_fit':.20,'cleanliness':.20,'strength_separation':.20},
-            'combiner':'EQUAL_WEIGHT_GEOMETRIC_MEAN'}
+            'components':{k:round(100*v,1) for k,v in parts},
+            'weights':{k:w for k,_ in parts},
+            'combiner':'EQUAL_WEIGHT_GEOMETRIC_MEAN','strength_axis_included':profile.get('strength_known') is not False}
 
 
 def attach_interaction(profile: dict, regime: str | None = None, by_tf: dict | None = None) -> dict:

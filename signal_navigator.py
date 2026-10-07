@@ -827,7 +827,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     strength_dynamic_line = f"• Динамика силы: {strength_dynamic['label']}"
     character = pair_character_matrix.analyze(symbol, (master.get("market") or {}).get(symbol) or master.get("by_tf") or {}, {})
     if character.get("ready"):
-        character = dict(character); character["strength_gap"] = round(raw_gap, 4)
+        character = dict(character); character["strength_gap"] = round(raw_gap, 4); character["strength_known"] = True
         character = pair_character_matrix.attach_interaction(character, master.get("regime"), (master.get("market") or {}).get(symbol) or master.get("by_tf") or {})
     character_line = (f"• Характер пары: {character.get('label')} · тренд {character.get('trend_persistence', 0):.0f}/100 · "
                       f"шум {character.get('noise', 0):.0f}/100" if character.get("ready") else "• Характер пары: статистика накапливается")
