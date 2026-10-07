@@ -517,20 +517,50 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         font = ImageFont.load_default(size=22); small = ImageFont.load_default(size=17)
 
     left, right, top, bottom = 75, 1045, 82, 620
-    future = max(8, min(14, int(echo.get("session_hours") or 8)))
+    # Give the structural projection enough room for its first estimated turn.
+    # The session horizon still controls Echo; ZigZag may extend a few H1 bars
+    # farther when its own historical wave-duration model requires it.
+    session_future = max(8, min(14, int(echo.get("session_hours") or 8)))
+    zz_low = int(zz.get("duration_low") or 0)
+    zz_high = int(zz.get("duration_high") or 0)
+    zz_mid = max(1, int(round((zz_low + zz_high) / 2))) if zz_high else 0
+    future = max(session_future, min(18, zz_high + 4 if zz_high else session_future))
     total = len(bars) + future
     current = float(bars[-1].close)
     av = float(echo.get("atr") or atr(bars, 14) or max(current*.0005, 1e-8))
     expected = echo.get("expected_by_horizon") or {}
     echo_points = [(0, current)]
     for h in sorted(int(k) for k in expected if str(k).isdigit()):
-        if h <= future:
+        if h <= session_future:
             echo_points.append((h, current + av*float(expected.get(str(h), 0))))
     if len(echo_points) == 1 and echo.get("side"):
         sign = 1 if echo.get("side") == "LONG" else -1
-        echo_points.append((future, current + sign*av*.8))
+        echo_points.append((session_future, current + sign*av*.8))
 
-    prices = [v for b in bars for v in (b.low,b.high)] + [v for _,v in echo_points]
+    # Adaptive ZigZag forward geometry.  This is deliberately separate from
+    # Echo/Pivot: it estimates the next structural corner from the pair's own
+    # completed H1 swing lengths/amplitudes, then shows a possible opposite leg.
+    # Both legs are projections only and never become confirmed swing points.
+    zz_swings = zigzag(bars, float(cfg.ZIGZAG_PCT.get("H1", .18)), cfg.ZIGZAG_MIN_BARS)
+    zz_projection = []
+    if zz_swings and zz_mid:
+        amplitudes = [abs(b.price-a.price) for a,b in zip(zz_swings, zz_swings[1:]) if b.index > a.index]
+        if amplitudes:
+            from statistics import median
+            typical_amp = float(median(amplitudes[-10:]))
+            last = zz_swings[-1]
+            next_sign = 1 if last.kind == "low" else -1
+            corner_price = float(last.price) + next_sign * typical_amp
+            # A projected corner must remain beyond the current close in the
+            # expected direction; otherwise the already-travelled part of the
+            # unfinished leg would create a visually backwards forecast.
+            corner_price = max(corner_price, current + av*.35) if next_sign > 0 else min(corner_price, current-av*.35)
+            corner_h = min(future-3, max(1, zz_mid))
+            reverse_h = min(future, corner_h + max(3, min(6, int(round(corner_h*.55)))))
+            reverse_price = corner_price - next_sign * max(typical_amp*.62, av*.55)
+            zz_projection = [(0, current), (corner_h, corner_price), (reverse_h, reverse_price)]
+
+    prices = [v for b in bars for v in (b.low,b.high)] + [v for _,v in echo_points] + [v for _,v in zz_projection]
     if pivot:
         prices += [float(pivot.get("zone_low", current)), float(pivot.get("zone_high", current))]
         sign = 1 if pivot.get("side") == "LONG" else -1
@@ -549,8 +579,8 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         draw.line((x,y_at(b.high),x,y_at(b.low)),fill=c,width=2)
         y1,y2=y_at(b.open),y_at(b.close); draw.rectangle((x-cw/2,min(y1,y2),x+cw/2,max(y1,y2)+1),fill=c)
 
-    # Adaptive ZigZag: confirmed base-scale extrema only; unfinished leg is grey/dashed.
-    zz_swings=zigzag(bars, float(cfg.ZIGZAG_PCT.get("H1",.18)), cfg.ZIGZAG_MIN_BARS)
+    # Adaptive ZigZag: confirmed structure is solid white; its forward route is
+    # white dotted geometry so it cannot be confused with red/green Echo.
     zpts=[(x_at(p.index),y_at(p.price),p) for p in zz_swings]
     if len(zpts)>=2: draw.line([(x,y) for x,y,_ in zpts],fill="#f1f5fb",width=4)
     ph=pl=None
@@ -559,10 +589,27 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         else: label="L" if pl is None else ("HL" if p.price>pl else "LL"); pl=p.price
         draw.ellipse((x-5,y-5,x+5,y+5),fill="#f1f5fb")
         draw.text((x-11,y-25 if p.kind=="high" else y+8),label,fill="#f1f5fb",font=small)
+
+    def dotted(a, b, color, width=4, steps=18):
+        for n in range(0, steps, 2):
+            t1=n/steps; t2=min(1,(n+1)/steps)
+            draw.line((a[0]+(b[0]-a[0])*t1,a[1]+(b[1]-a[1])*t1,
+                       a[0]+(b[0]-a[0])*t2,a[1]+(b[1]-a[1])*t2),fill=color,width=width)
+
     if zpts:
+        # First connect the last confirmed extremum to NOW; this segment is
+        # unfinished history and therefore grey, not a new confirmed pivot.
         a=zpts[-1][:2]; b=(x_at(len(bars)-1),y_at(current))
-        for n in range(0,12,2):
-            t1=n/12;t2=min(1,(n+1)/12);draw.line((a[0]+(b[0]-a[0])*t1,a[1]+(b[1]-a[1])*t1,a[0]+(b[0]-a[0])*t2,a[1]+(b[1]-a[1])*t2),fill="#8f99aa",width=3)
+        dotted(a,b,"#8f99aa",3,12)
+    if len(zz_projection) >= 3:
+        zp=[(x_at(len(bars)-1+h),y_at(v)) for h,v in zz_projection]
+        dotted(zp[0],zp[1],"#f1f5fb",4)
+        dotted(zp[1],zp[2],"#f1f5fb",4)
+        cx,cy=zp[1]
+        draw.ellipse((cx-6,cy-6,cx+6,cy+6),outline="#f1f5fb",width=2)
+        if zz_low and zz_high:
+            draw.text((max(left,cx-95),max(top,cy-31)),f"≈ {zz_low}–{zz_high} H1 до угла",fill="#f1f5fb",font=small)
+        draw.text((min(right-210,zp[2][0]-80),max(top,zp[2][1]+8)),"возможное продолжение",fill="#cbd3df",font=small)
 
     boundary=x_at(len(bars)-1); draw.line((boundary,top,boundary,bottom),fill="#707b8d",width=2)
     draw.text((max(left,boundary-72),bottom-25),"СЕЙЧАС",fill="#b9c3d3",font=small)
@@ -592,7 +639,8 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
 
     zdir=(zz.get("zigzag_directions") or {}).get("H1",0); zword="LONG" if zdir>0 else "SHORT" if zdir<0 else "RANGE"
     draw.text((left,24),f"{symbol} · H1 · ЭХО + NEXT PIVOT + ADAPTIVE ZIGZAG",fill="#f1f5fb",font=font)
-    draw.text((left,51),f"ZigZag H1: {zword} · подтверждённая структура белым · прогноз пунктиром",fill="#b9c3d3",font=small)
+    eta = f" · до вероятного угла ≈ {zz_low}–{zz_high} H1" if zz_low and zz_high else ""
+    draw.text((left,51),f"ZigZag H1: {zword} · белый: структура + прогноз двумя ветвями{eta}",fill="#b9c3d3",font=small)
     draw.text((left,665),"Единый вероятностный сценарий · закрытые H1 · не торговая гарантия",fill="#9aa4b5",font=small)
     out=io.BytesIO(); out.name=f"echo_pivot_zigzag_{symbol.replace('/','')}.png"; image.save(out,format="PNG",optimize=True); out.seek(0); return out
 
