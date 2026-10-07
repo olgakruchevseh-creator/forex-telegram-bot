@@ -11,10 +11,11 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 log = logging.getLogger("fxbot.fibonacci")
-TF_MINUTES = {"H4": 240, "H1": 60, "M15": 15}
+TF_MINUTES = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15}
 _PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
 
 
@@ -56,7 +57,7 @@ def _strength_ok(symbol: str, side: str, strength: dict[str, float]) -> tuple[bo
 
 
 def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
-    h1, h4, m15 = _bars(by_tf, "H1"), _bars(by_tf, "H4"), _bars(by_tf, "M15")
+    d1, h1, h4, m15 = (_bars(by_tf, "D1"), _bars(by_tf, "H1"), _bars(by_tf, "H4"), _bars(by_tf, "M15"))
     if min(len(h1), len(h4), len(m15)) < 25:
         return None
     swings = zigzag(
@@ -85,7 +86,7 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         level_618 = end.price + move * .618
     zone_low, zone_high = sorted((level_50, level_618))
     retrace_ratios = (.236, .382, .50, .618, .705, .786, .85)
-    extension_ratios = (1.618, 2.618, 3.618, 4.236)
+    extension_ratios = (1.272, 1.618, 2.618, 3.618, 4.236)
     if side == "LONG":
         fib_levels = {r: end.price - move * r for r in retrace_ratios}
         fib_extensions = {r: start.price + move * r for r in extension_ratios}
@@ -104,14 +105,36 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         wanted = -1
     if not reacted or not body_ok:
         return None
-    # Старший H4 не должен противоречить, а M15 обязан подтвердить реакцию.
-    if _bias("H4", h4) == -wanted or _bias("M15", m15) != wanted:
+    # Shared pullback-vs-flat classifier owns correction geometry project-wide.
+    # Evaluate the route BEFORE the reaction candle: one/two opposite candles or
+    # RANGE/COMPRESSION can no longer masquerade as a Fibonacci pullback.
+    d1_bias = _bias("D1", d1) if len(d1) >= 20 else 0
+    h4_bias = _bias("H4", h4)
+    pb_tf = {"D1": d1, "H4": h4, "H1": h1[:-1], "M15": m15}
+    pb = pullback_regime.classify(symbol, -wanted, d1_bias, h4_bias, pb_tf)
+    if pb.mode != "PULLBACK":
+        return None
+
+    # Старший H4 не должен противоречить, а M15 только подтверждает реакцию;
+    # самостоятельного M15-сигнала здесь нет.
+    if h4_bias == -wanted or _bias("M15", m15) != wanted:
         return None
     strength_ok, gap = _strength_ok(symbol, side, strength)
     if not strength_ok:
         return None
 
-    quality = min(94, 74 + min(8, int(move / av)) + min(8, int(abs(gap) * 40)) + (4 if _bias("H4", h4) == wanted else 0))
+    # Three-point A-B-C projection starts from the confirmed pullback extreme.
+    # Keep the legacy two-point extensions for compatibility, but expose the
+    # causal projection separately so targets are not silently reinterpreted.
+    projection_anchor = current.low if side == "LONG" else current.high
+    if side == "LONG":
+        fib_projection = {r: projection_anchor + move * r for r in extension_ratios}
+    else:
+        fib_projection = {r: projection_anchor - move * r for r in extension_ratios}
+
+    geometry_bonus = min(4, max(0, pb.bars - 2)) + min(3, int(pb.efficiency * 4))
+    quality = min(94, 72 + min(8, int(move / av)) + min(8, int(abs(gap) * 40))
+                  + (4 if h4_bias == wanted else 0) + geometry_bonus)
     og = ohlc_movement.guard_event(by_tf, side, quality)
     if not og.get("allow", True): return None
     quality = og.get("quality", quality)
@@ -122,6 +145,10 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         "symbol": symbol, "side": side, "low": zone_low, "high": zone_high,
         "level_50": level_50, "level_618": level_618, "close": current.close,
         "fib_levels": fib_levels, "fib_extensions": fib_extensions,
+        "fib_projection": fib_projection, "projection_anchor": projection_anchor,
+        "pullback_mode": pb.mode, "pullback_bars": pb.bars,
+        "pullback_move_atr": pb.move_atr, "pullback_efficiency": pb.efficiency,
+        "market_regime": pb.regime,
         "ote_low": min(fib_levels[.618], fib_levels[.786]),
         "ote_high": max(fib_levels[.618], fib_levels[.786]),
         "ote_reference": fib_levels[.705], "deep_low": deep_zone[0], "deep_high": deep_zone[1],
@@ -146,7 +173,8 @@ def format_message(event: dict) -> str:
         f"Уровень 61.8%: {_price(event['symbol'], event['level_618'])}",
         f"OTE 61.8–78.6%: {_price(event['symbol'], event['ote_low'])}–{_price(event['symbol'], event['ote_high'])} · опорный 70.5%: {_price(event['symbol'], event['ote_reference'])}",
         f"Глубокий откат 78.6–85%: {_price(event['symbol'], event['deep_low'])}–{_price(event['symbol'], event['deep_high'])}",
-        "Цели расширения: " + " · ".join(f"{r:.3f}={_price(event['symbol'], p)}" for r, p in event['fib_extensions'].items()),
+        "Проекция A–B–C: " + " · ".join(f"{r:.3f}={_price(event['symbol'], p)}" for r, p in event['fib_projection'].items()),
+        f"Откат: {event['pullback_bars']} H1 · {event['pullback_move_atr']:.2f} ATR · эффективность {event['pullback_efficiency']:.2f}",
         f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
         "Подтверждение: H1 · M15", f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
@@ -228,10 +256,10 @@ def image_for_alert(text: str) -> io.BytesIO | None:
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
-    if int(state.get("logic_version") or 0) != 2:
+    if int(state.get("logic_version") or 0) != 3:
         state.setdefault("sent", {})
         state["pending"] = {}
-        state["logic_version"] = 2
+        state["logic_version"] = 3
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
     pending = state.setdefault("pending", {})
