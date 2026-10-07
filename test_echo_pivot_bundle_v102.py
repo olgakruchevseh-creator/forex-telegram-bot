@@ -8,8 +8,8 @@ def test_combined_caption_explains_opposite_sides_as_stages():
         "pivot": {"result": {"side": "SHORT", "kind": "low", "zone_low": 1.1700, "zone_high": 1.1720}},
     }
     text = reports.combined_pair_caption(bundle)
-    assert "Echo 🟢 LONG" in text
-    assert "Pivot 🔴 SHORT" in text
+    assert "Echo ЛОНГ" in text
+    assert "Pivot ШОРТ" in text
     assert "локальный крюк" in text
     assert len(text) <= 1000
 

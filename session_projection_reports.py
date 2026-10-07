@@ -445,14 +445,14 @@ def _side_badge(side: str | None) -> str:
     """Consistent visual direction badge for the combined Echo + Next Pivot card."""
     side = str(side or "").upper()
     if side == "LONG":
-        return "🟢 LONG"
+        return "🟢 ЛОНГ"
     if side == "SHORT":
-        return "🔴 SHORT"
+        return "🔴 ШОРТ"
     return "🟡 НЕЙТРАЛЬНО"
 
 
 def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
-    """One readable caption: pair first, then Echo, Pivot and Adaptive ZigZag."""
+    """Compact vertical stack first; plain-text explanation below it."""
     symbol = str(bundle.get("symbol") or "")
     echo = bundle.get("echo") or {}
     pivot = bundle.get("pivot") or {}
@@ -462,47 +462,47 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     eside = er.get("side")
     pside = pr.get("side")
 
-    # The first four lines are intentionally scan-friendly in Telegram: the pair
-    # and the three independent engines are visible before any explanation.
-    lines = ["🔭 ЭХО + 🎯 СЛЕДУЮЩИЙ PIVOT + ↕️ ADAPTIVE ZIGZAG — ЕДИНЫЙ СЦЕНАРИЙ",
-             f"💱 Пара: {symbol}",
-             "━━━━━━━━━━━━━━━━━━"]
+    # Telegram scan block: exactly one item per line.  Direction circles are
+    # intentionally restricted to these three engine rows.
+    lines = [f"Пара: {symbol}"]
     if eside:
-        lines.append(f"🔭 Эхо: {_side_badge(eside)} · вероятность {er.get('direction_probability', '—')}%")
+        lines.append(f"Эхо: {_side_badge(eside)} · вероятность {er.get('direction_probability', '—')}%")
     else:
-        lines.append(f"🔭 Эхо: {_side_badge(None)}")
+        lines.append(f"Эхо: {_side_badge(None)}")
 
     if pr:
         decimals = 3 if "JPY" in symbol else 5
         kind = "ВЕРШИНЫ" if pr.get("kind") == "high" else "ОСНОВАНИЯ"
-        lines.append(f"🎯 Next Pivot: {_side_badge(pside)} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
+        lines.append(f"Next Pivot: {_side_badge(pside)} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
     else:
-        lines.append("🎯 Next Pivot: надёжная следующая зона пока не рассчитана")
+        lines.append(f"Next Pivot: {_side_badge(None)} · надёжная следующая зона пока не рассчитана")
 
     zdir = int((zz.get("zigzag_directions") or {}).get("H1", 0) or 0)
     zside = "LONG" if zdir > 0 else ("SHORT" if zdir < 0 else None)
     zlow, zhigh = int(zz.get("duration_low") or 0), int(zz.get("duration_high") or 0)
     if zlow and zhigh:
-        lines.append(f"↕️ Adaptive ZigZag: {_side_badge(zside)} · ≈ {zlow}–{zhigh} закрытых H1-свечей до вероятного угла")
+        lines.append(f"Adaptive ZigZag: {_side_badge(zside)} · ≈ {zlow}–{zhigh} закрытых H1-свечей до вероятного угла")
     else:
-        lines.append(f"↕️ Adaptive ZigZag: {_side_badge(zside)} · окно до следующего угла пока без достаточной статистики")
+        lines.append(f"Adaptive ZigZag: {_side_badge(zside)} · окно до следующего угла пока без достаточной статистики")
 
-    # Close the compact engine stack before common scenario commentary.
-    lines.append("━━━━━━━━━━━━━━━━━━")
-
+    # Everything below the engine stack is deliberately emoji-free.
+    lines.append("")
     period = str(bundle.get("period") or "")
     if period:
         lines.append(f"Период: {period}")
     if pr:
-        reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else "НЕЙТРАЛЬНО")
+        reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else None)
+        reaction_text = {"LONG": "ЛОНГ", "SHORT": "ШОРТ"}.get(reaction, "НЕЙТРАЛЬНО")
+        echo_text = {"LONG": "ЛОНГ", "SHORT": "ШОРТ"}.get(str(eside or "").upper(), "НЕЙТРАЛЬНО")
+        pivot_text = {"LONG": "ЛОНГ", "SHORT": "ШОРТ"}.get(str(pside or "").upper(), "НЕЙТРАЛЬНО")
         if eside and pside and eside != pside:
-            lines.append(f"Связка: Echo {_side_badge(eside)} — общий фон; Pivot {_side_badge(pside)} — локальный крюк к зоне, не смена тезиса.")
+            lines.append(f"Связка: Echo {echo_text} — общий фон; Pivot {pivot_text} — локальный крюк к зоне, не смена тезиса.")
         elif eside and pside:
-            lines.append(f"Связка: Echo {_side_badge(eside)} → движение к Pivot {_side_badge(pside)} → после зоны возможна реакция {_side_badge(reaction)}.")
+            lines.append(f"Связка: Echo {echo_text} → движение к Pivot {pivot_text} → после зоны возможна реакция {reaction_text}.")
         else:
-            lines.append(f"Связка: Pivot — локальная зона; реакция {_side_badge(reaction)} учитывается только после подтверждения M15/H1.")
-    lines.append("🖼 Единый график: Adaptive ZigZag + Echo + Next Pivot")
-    lines.append("⚠️ Информационный вероятностный сценарий, не торговый сигнал.")
+            lines.append(f"Связка: Pivot — локальная зона; реакция {reaction_text} учитывается только после подтверждения M15/H1.")
+    lines.append("Единый график: Adaptive ZigZag + Echo + Next Pivot")
+    lines.append("Информационный вероятностный сценарий, не торговый сигнал.")
     text = "\n".join(lines)
     return text if len(text) <= limit else text[:limit-1].rstrip() + "…"
 

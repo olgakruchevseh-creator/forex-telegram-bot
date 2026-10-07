@@ -8,10 +8,10 @@ def test_combined_caption_direction_emojis():
         "pivot": {"result": {"side": "SHORT", "kind": "low", "zone_low": 1.1700, "zone_high": 1.1720}},
     }
     text = reports.combined_pair_caption(bundle)
-    assert "🟢 LONG" in text
-    assert "🔴 SHORT" in text
-    assert "Echo 🟢 LONG" in text
-    assert "Pivot 🔴 SHORT" in text
+    assert "🟢 ЛОНГ" in text
+    assert "🔴 ШОРТ" in text
+    assert "Echo ЛОНГ" in text
+    assert "Pivot ШОРТ" in text
 
 
 def test_combined_caption_neutral_emoji():

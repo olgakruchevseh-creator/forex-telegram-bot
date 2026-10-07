@@ -10,15 +10,21 @@ def test_caption_lists_pair_then_three_engines_and_zigzag_candles():
     }
     text = reports.combined_pair_caption(bundle)
     lines = text.splitlines()
-    assert lines[1] == "💱 Пара: EUR/USD"
-    assert lines[2] == "━━━━━━━━━━━━━━━━━━"
-    assert lines[3].startswith("🔭 Эхо:")
-    assert lines[4].startswith("🎯 Next Pivot:")
-    assert lines[5].startswith("↕️ Adaptive ZigZag:")
-    assert "≈ 4–7 закрытых H1-свечей до вероятного угла" in lines[5]
-    assert lines[6] == "━━━━━━━━━━━━━━━━━━"
+    assert lines[0] == "Пара: EUR/USD"
+    assert lines[1].startswith("Эхо: 🔴 ШОРТ")
+    assert lines[2].startswith("Next Pivot: 🔴 ШОРТ")
+    assert lines[3].startswith("Adaptive ZigZag: 🟢 ЛОНГ")
+    assert "≈ 4–7 закрытых H1-свечей до вероятного угла" in lines[3]
+    assert lines[4] == ""
+    # Only the compact top engine stack may contain status emoji.
+    assert not any(icon in "\\n".join(lines[5:]) for icon in ("🟢", "🔴", "🟡", "🔭", "🎯", "↕️", "💱", "🖼", "⚠️"))
 
 
 def test_caption_zigzag_duration_fallback_is_explicit():
     text = reports.combined_pair_caption({"symbol":"USD/CHF", "echo":{"result":{}}, "pivot":{}, "zigzag":{"zigzag_directions":{"H1":0}}})
-    assert "окно до следующего угла пока без достаточной статистики" in text
+    lines = text.splitlines()
+    assert lines[0] == "Пара: USD/CHF"
+    assert lines[1] == "Эхо: 🟡 НЕЙТРАЛЬНО"
+    assert lines[2].startswith("Next Pivot: 🟡 НЕЙТРАЛЬНО")
+    assert lines[3].startswith("Adaptive ZigZag: 🟡 НЕЙТРАЛЬНО")
+    assert "окно до следующего угла пока без достаточной статистики" in lines[3]
