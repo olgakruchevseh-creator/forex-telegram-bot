@@ -41,10 +41,20 @@ class Zone:
     breakout_price: float = 0.0
     reset_epoch: int = 0
     liquidity_lifecycle: str = "STANDARD_BREAKOUT"
+    compression_ratio: float = 1.0
+    expansion_ratio: float = 1.0
+    breakout_body_ratio: float = 0.0
     liquidity_source: str = ""
     sweep_price: float = 0.0
     reclaim_dt: str = ""
     retest_dt: str = ""
+    compression_percentile: float = 100.0
+    boundary_score: float = 0.0
+    age_bars: int = 0
+    failed_breakouts: int = 0
+    failed_breakout_side: str = ""
+    failed_breakout_dt: str = ""
+    failed_reclaim_dt: str = ""
 
 
 def _path() -> Path:
@@ -110,11 +120,89 @@ def detect_zone(symbol: str, tf: str, bars: list[Candle]) -> Zone | None:
     compression = max(0, int((max_width - width_atr) * 5))
     touch_pts = min(18, (touches_low + touches_high) * 2)
     eff_pts = min(15, int((max_eff - efficiency) * 45))
-    quality = min(95, 52 + compression + touch_pts + eff_pts)
+    compression_ratio = _compression_ratio(bars, window)
+    compression_percentile = _compression_percentile(bars, window)
+    max_compression_ratio = float(getattr(cfg, "CONSOLIDATION_MAX_COMPRESSION_RATIO", 0.92))
+    if compression_ratio > max_compression_ratio:
+        return None
+    if compression_percentile > float(getattr(cfg, "CONSOLIDATION_MAX_COMPRESSION_PERCENTILE", 35.0)):
+        return None
+    compression_pts = min(8, max(0, int((1.0 - compression_ratio) * 25)))
+    balance = min(touches_low, touches_high) / max(touches_low, touches_high, 1)
+    rejection = sum((c.low <= low + edge and c.close > low + edge*.35) or (c.high >= high-edge and c.close < high-edge*.35) for c in box) / len(box)
+    boundary_score = 100.0 * (0.65*balance + 0.35*min(1.0, rejection/.35))
+    if boundary_score < float(getattr(cfg, "CONSOLIDATION_MIN_BOUNDARY_SCORE", 55.0)):
+        return None
+    boundary_pts = min(6, int(max(0.0, boundary_score-50.0)/8.0))
+    quality = min(95, 52 + compression + touch_pts + eff_pts + compression_pts + boundary_pts)
     if quality < int(getattr(cfg, "CONSOLIDATION_MIN_QUALITY", 76)):
         return None
-    return Zone(_zone_id(symbol, tf, low, high), symbol, tf, low, high, quality,
-                touches_low, touches_high, width_atr, efficiency, box[-1].dt, box[-1].dt)
+    z = Zone(_zone_id(symbol, tf, low, high), symbol, tf, low, high, quality,
+             touches_low, touches_high, width_atr, efficiency, box[-1].dt, box[-1].dt)
+    z.compression_ratio = compression_ratio
+    z.compression_percentile = compression_percentile
+    z.boundary_score = boundary_score
+    return z
+
+
+def _true_range(c: Candle, prev_close: float | None = None) -> float:
+    if prev_close is None:
+        return max(0.0, c.high - c.low)
+    return max(c.high - c.low, abs(c.high - prev_close), abs(c.low - prev_close))
+
+
+def _compression_ratio(bars: list[Candle], window: int) -> float:
+    """Recent ATR versus its preceding baseline; <1 means genuine contraction."""
+    if len(bars) < window * 2 + 2:
+        return 1.0
+    recent = atr(bars[-window:], min(14, max(2, window - 1)))
+    baseline = atr(bars[-window * 2:-window], min(14, max(2, window - 1)))
+    return recent / baseline if baseline > 0 else 1.0
+
+
+
+def _compression_percentile(bars: list[Candle], window: int) -> float:
+    """Percentile rank of current ATR among recent rolling ATRs; low = unusually compressed."""
+    lookback = int(getattr(cfg, "CONSOLIDATION_COMPRESSION_PERCENTILE_LOOKBACK", 100))
+    period = min(14, max(2, window - 1))
+    if len(bars) < max(window*2, period+lookback//2):
+        return 0.0  # insufficient history: do not veto otherwise valid legacy behaviour
+    start=max(period+1, len(bars)-lookback)
+    vals=[]
+    for end in range(start, len(bars)+1):
+        v=atr(bars[max(0,end-window):end], period)
+        if v>0: vals.append(v)
+    if len(vals)<10: return 0.0
+    cur=vals[-1]
+    return 100.0*sum(v <= cur for v in vals)/len(vals)
+
+def _age_in_tf_bars(zone: Zone, bars: list[Candle]) -> int:
+    return sum(1 for c in bars if c.dt > zone.created_dt)
+
+def _track_failed_breakout_reclaim(zone: Zone, bars: list[Candle], buffer: float) -> None:
+    """Record fast failed excursions/reclaims as internal evidence; never emits a separate alert."""
+    if len(bars)<3: return
+    a,b=bars[-2],bars[-1]
+    max_reclaim=int(getattr(cfg,"CONSOLIDATION_FAILED_RECLAIM_MAX_BARS",2))
+    # closed excursion outside followed immediately by close back inside; current pair covers <=1 bar,
+    # state fields preserve the event for later scoring/diagnostics.
+    if a.close > zone.high+buffer and b.close <= zone.high:
+        zone.failed_breakouts += 1; zone.failed_breakout_side="LONG"; zone.failed_breakout_dt=a.dt; zone.failed_reclaim_dt=b.dt
+    elif a.close < zone.low-buffer and b.close >= zone.low:
+        zone.failed_breakouts += 1; zone.failed_breakout_side="SHORT"; zone.failed_breakout_dt=a.dt; zone.failed_reclaim_dt=b.dt
+
+
+def _closed_h1_break_confirm(zone: Zone, by_tf: dict, wanted: int, buffer: float) -> bool:
+    """Primary alert confirmation: a CLOSED H1 candle must accept outside the box."""
+    h1 = _bars(by_tf, "H1")
+    if len(h1) < 20:
+        return False
+    cur = h1[-1]
+    if cur.dt <= zone.created_dt:
+        return False
+    if wanted > 0:
+        return cur.close > zone.high + buffer and cur.close > cur.open and _bias("H1", h1) == wanted
+    return cur.close < zone.low - buffer and cur.close < cur.open and _bias("H1", h1) == wanted
 
 
 def _bias(tf: str, bars: list[Candle]) -> int:
@@ -199,6 +287,11 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
     zone.last_dt = cur.dt
     av = atr(bars, 14) or max(zone.high-zone.low, 1e-12)
     buffer = av * float(getattr(cfg, "CONSOLIDATION_BREAK_BUFFER_ATR", 0.08))
+    _track_failed_breakout_reclaim(zone, bars, buffer)
+    zone.age_bars = _age_in_tf_bars(zone, bars)
+    max_age = int(getattr(cfg, "CONSOLIDATION_MAX_AGE_M15_BARS", 96))
+    if zone.age_bars > max_age:
+        return False
     body = abs(cur.close-cur.open) / max(av, 1e-12)
     if body < float(getattr(cfg, "CONSOLIDATION_BREAK_MIN_BODY_ATR", 0.35)):
         return False
@@ -207,6 +300,19 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
     elif prev.close >= zone.low - buffer and cur.close < zone.low - buffer and cur.close < cur.open:
         side, wanted = "SHORT", -1
     else:
+        return False
+    candle_range = max(cur.high - cur.low, 1e-12)
+    body_ratio = abs(cur.close - cur.open) / candle_range
+    if body_ratio < float(getattr(cfg, "CONSOLIDATION_BREAK_MIN_BODY_RATIO", 0.60)):
+        return False
+    prev_trs = [_true_range(bars[i], bars[i-1].close) for i in range(max(1, len(bars)-9), len(bars)-1)]
+    baseline_tr = sum(prev_trs) / len(prev_trs) if prev_trs else av
+    expansion_ratio = _true_range(cur, prev.close) / max(baseline_tr, 1e-12)
+    if expansion_ratio < float(getattr(cfg, "CONSOLIDATION_BREAK_MIN_EXPANSION_RATIO", 1.15)):
+        return False
+    # M15 is the early detector only. The actual alert requires acceptance by a CLOSED H1 candle.
+    h1_buffer = av * float(getattr(cfg, "CONSOLIDATION_H1_BREAK_BUFFER_ATR", 0.04))
+    if not _closed_h1_break_confirm(zone, by_tf, wanted, h1_buffer):
         return False
     confirms = 0
     for tf in ("H1", "M15", "M5"):
@@ -220,6 +326,8 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
     need = float(getattr(cfg, "CONSOLIDATION_MIN_STRENGTH_GAP", 0.05))
     if (wanted > 0 and gap < need) or (wanted < 0 and gap > -need):
         return False
+    zone.expansion_ratio = expansion_ratio
+    zone.breakout_body_ratio = body_ratio
     lifecycle = _liquidity_lifecycle(zone, by_tf, wanted)
     if lifecycle:
         zone.liquidity_lifecycle = "SWEEP_RECLAIM_RETEST_EXPANSION"
@@ -256,7 +364,7 @@ def format_message(zone: Zone) -> str:
         f"Зона: {_price(zone.symbol, zone.low)}–{_price(zone.symbol, zone.high)}",
         f"Касания границ: {zone.touches_low}/{zone.touches_high}",
         f"Ширина: {zone.width_atr:.2f} ATR", f"Качество зоны: {zone.quality}/100",
-        "Подтверждение: закрытая M15 + согласование минимум 2/3 H1/M15/M5 + сила валют",
+        "Подтверждение: закрытая H1 + M15/M5 только подтверждение + сила валют",
         *([f"Ликвидность: {zone.liquidity_source}",
            f"Цепочка: SWEEP → ВОЗВРАТ → РЕТЕСТ → ЭКСПАНСИЯ",
            f"Экстремум Sweep: {_price(zone.symbol, zone.sweep_price)}",
@@ -361,6 +469,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         same.low=z.low; same.high=z.high; same.quality=max(same.quality,z.quality)
                         same.touches_low=z.touches_low; same.touches_high=z.touches_high
                         same.width_atr=z.width_atr; same.efficiency=z.efficiency
+                        same.compression_ratio=z.compression_ratio; same.compression_percentile=z.compression_percentile
+                        same.boundary_score=max(same.boundary_score,z.boundary_score)
                     same.last_dt=max(same.last_dt, z.last_dt)
                 else:
                     stored[z.zone_id]=z
