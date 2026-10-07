@@ -7,7 +7,11 @@ majors can be compared without hard-coded folklore about a pair.
 from __future__ import annotations
 
 import math
-from statistics import mean, pstdev
+from statistics import mean, pstdev, median
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+import config as cfg
 
 from analysis import atr, closed_candles
 
@@ -45,6 +49,27 @@ def _hurst_proxy(closes, max_lag=12):
     return max(0.0,min(1.0,slope))
 
 
+def _er(closes, n):
+    if len(closes) <= n: return 0.0
+    w=closes[-(n+1):]
+    path=sum(abs(b-a) for a,b in zip(w,w[1:]))
+    return abs(w[-1]-w[0])/path if path else 0.0
+
+def _parse_dt(raw):
+    try:
+        d=datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if d.tzinfo is None: d=d.replace(tzinfo=timezone.utc)
+        return d
+    except Exception:
+        return None
+
+def _session_key(dt):
+    if not dt: return "UNKNOWN"
+    try: local=dt.astimezone(ZoneInfo(getattr(cfg,"LOCAL_TZ_NAME","Europe/Amsterdam")))
+    except Exception: local=dt
+    h=local.hour
+    return "ASIA" if h < 9 else ("EUROPE" if h < 15 else "AMERICA")
+
 def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     bars=closed_candles((by_tf or {}).get('H1') or [],60)[-180:]
     if len(bars)<40:
@@ -54,11 +79,14 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     av=float(atr(bars,14) or 0.0); px=max(abs(closes[-1]),1e-12)
     atr_pct=100*av/px
     recent=closes[-25:]; eff=_efficiency(recent)
+    # Kaufman ER at three horizons: short/session, day, multi-day character.
+    er8, er24, er72 = _er(closes,8), _er(closes,24), _er(closes,72)
+    er_blend = .25*er8 + .50*er24 + .25*er72
     ac1=_corr(rets[:-1],rets[1:]) if len(rets)>10 else 0.0
     h=_hurst_proxy(closes)
     # persistence blends geometry and return memory; negative autocorrelation
     # naturally shifts the pair toward mean-reversion.
-    persistence=_clip(100*(.48*eff+.32*h+.20*((ac1+1)/2)))
+    persistence=_clip(100*(.34*eff+.28*er_blend+.23*h+.15*((ac1+1)/2)))
     mean_reversion=_clip(100-persistence)
 
     bodies=[abs(float(b.close)-float(b.open)) for b in bars[-48:]]
@@ -99,13 +127,30 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     elif noise>=68: label += ' · ШУМНЫЙ'
     elif volatility<=35: label += ' · СПОКОЙНЫЙ'
 
-    reliability=_clip(100-(noise*.45)-min(30,abs(vol_ratio-1)*20)+eff*35)
+    # Character is also session-dependent.  Compare only closed H1 bars that
+    # historically belonged to the same Amsterdam session as the latest bar.
+    current_session=_session_key(_parse_dt(getattr(bars[-1],"dt",None)))
+    session_rows=[]
+    for b in bars[-120:]:
+        r=max(0.0,float(b.high)-float(b.low))
+        if _session_key(_parse_dt(getattr(b,"dt",None))) == current_session:
+            session_rows.append((b,r))
+    sr=[x[1] for x in session_rows if x[1] > 0]
+    session_range_atr=(median(sr)/av) if sr and av>0 else 0.0
+    session_body_ratio=mean([abs(x[0].close-x[0].open)/x[1] for x in session_rows if x[1]>0] or [0.0])
+    session_activity=_clip(100*(.55*min(1.5,session_range_atr)/1.5+.45*session_body_ratio))
+
+    reliability=_clip(100-(noise*.40)-min(25,abs(vol_ratio-1)*18)+eff*25+er_blend*15)
     return {
         'symbol':symbol,'ready':True,'samples':len(bars),'label':label,
         'trend_persistence':round(persistence,1),'mean_reversion':round(mean_reversion,1),
         'impulse':round(impulse,1),'noise':round(noise,1),'volatility':round(volatility,1),
         'pullback_depth':round(pullback_depth,1),'pullback_atr':round(pullback_atr,2),
         'hurst_proxy':round(h,3),'autocorr_1':round(ac1,3),'efficiency':round(eff,3),
+        'efficiency_ratio_8':round(er8,3),'efficiency_ratio_24':round(er24,3),
+        'efficiency_ratio_72':round(er72,3),'efficiency_ratio_blend':round(er_blend,3),
+        'session':current_session,'session_samples':len(session_rows),
+        'session_range_atr':round(session_range_atr,3),'session_activity':round(session_activity,1),
         'atr_pct':round(atr_pct,4),'volatility_ratio':round(vol_ratio,3),
         'strength_gap':round(strength_gap,4),'reliability':round(reliability,1),
     }
@@ -115,4 +160,5 @@ def compact_text(p: dict) -> str:
     if not p or not p.get('ready'): return 'Характер пары: статистика ещё накапливается'
     return (f"Характер пары: {p['label']} · тренд {p['trend_persistence']:.0f}/100 · "
             f"импульс {p['impulse']:.0f}/100 · шум {p['noise']:.0f}/100 · "
-            f"типичный откат {p['pullback_atr']:.2f} ATR")
+            f"ER24 {p.get('efficiency_ratio_24',0):.2f} · откат {p['pullback_atr']:.2f} ATR · "
+            f"сессия {p.get('session_activity',0):.0f}/100")

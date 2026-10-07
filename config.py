@@ -1380,3 +1380,11 @@ PAIR_CHARACTER_OBSERVE_ONLY = True
 PAIR_CHARACTER_LOOKBACK_H1 = 120
 PAIR_CHARACTER_MIN_H1 = 48
 PAIR_CHARACTER_MIN_REPLAY_SAMPLES = 20
+
+# Pair Character Matrix v2 — quantitative, closed-H1, context-only.
+# ER horizons: 8H / 24H / 72H. Hurst remains one bounded vote, not a signal.
+PAIR_CHARACTER_ER_HORIZONS = (8, 24, 72)
+PAIR_CHARACTER_HURST_MEAN_REVERT = 0.45
+PAIR_CHARACTER_HURST_TREND = 0.55
+PAIR_CHARACTER_SESSION_TZ = "Europe/Amsterdam"
+PAIR_CHARACTER_MAX_SCORE_INFLUENCE = 0  # observe-only: direction/confidence unchanged

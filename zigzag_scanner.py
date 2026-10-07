@@ -275,8 +275,14 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         duration_low = max(min_future, raw_low)
         duration_high = max(duration_low, min_future, raw_high)
         duration_samples = min(10, len(completed_lengths))
+    try:
+        import pair_character_matrix
+        character = pair_character_matrix.analyze(symbol, by_tf, strength or {})
+    except Exception:
+        character = {}
     return {
         "symbol": symbol,
+        "pair_character": character,
         "event": event,
         "side": side,
         "main_side": main_side,

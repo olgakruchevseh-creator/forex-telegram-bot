@@ -361,6 +361,11 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     if weak:
         adjusted = min(adjusted, raw_pct, 64)
     trajectory_ok = bool(endpoint_ok and (aligned_h >= 2 or len(horizons) < 3) and not weak)
+    try:
+        import pair_character_matrix
+        character = pair_character_matrix.analyze(symbol, by_tf, strength or {})
+    except Exception:
+        character = {}
     return {
         "symbol": symbol,
         "side": side,
@@ -371,7 +376,7 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
         "data_quality": max(55, min(95, int(round(55 + min(40, len(matches) / max(1, minimum) * 25))))),
         "trajectory_available": trajectory_ok,
         "trajectory_source": "historical_analogs",
-        "context": context, "smc_context": smc,
+        "context": context, "smc_context": smc, "pair_character": character,
         "sample": len(matches), "estimated": False, "weak": weak,
         "horizons": {
             str(h): int(round((probabilities[h] if side == "LONG" else 1-probabilities[h])*100))
