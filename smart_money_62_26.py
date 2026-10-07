@@ -17,6 +17,7 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.smart_money_62_26")
@@ -41,6 +42,8 @@ class Setup:
     created_dt: str
     quality: int
     age: int = 0
+    sweep_dt: str = ""
+    displacement_dt: str = ""
     last_dt: str = ""
     sent: bool = False
     invalid: bool = False
@@ -140,15 +143,16 @@ def _find_setup(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[Candle
             impulse_high = max(x.high for x in h1[j:k+1])
             rng = impulse_high-impulse_low
             if rng < av * 1.1: continue
-            # 62-26 профиль: рабочая область вокруг 62% retracement, ширина
-            # ограничена 26% импульса. Это параметры, а не магическая гарантия.
-            retr = float(getattr(cfg, "SMC_62_26_RETRACE", .62))
-            width = float(getattr(cfg, "SMC_62_26_ZONE_WIDTH", .26))
+            # 62-26 is a price/time cluster, not a 26%-wide price band.
+            # Price geometry is centred on the canonical 61.8% retracement;
+            # tolerance is volatility-normalised and deliberately narrow.
+            retr = float(getattr(cfg, "SMC_62_26_RETRACE", .618))
             if side == "LONG":
                 anchor = impulse_high-rng*retr
             else:
                 anchor = impulse_low+rng*retr
-            half = rng*width/2
+            half = min(rng * float(getattr(cfg, "SMC_62_26_MAX_ZONE_RATIO", .08)),
+                       av * float(getattr(cfg, "SMC_62_26_ZONE_ATR", .18)))
             zone_low, zone_high = anchor-half, anchor+half
             # Трёхсвечный FVG рядом с displacement повышает качество.
             fvg_low=fvg_high=0.0
@@ -161,39 +165,89 @@ def _find_setup(symbol: str, d1: list[Candle], h4: list[Candle], h1: list[Candle
             setup_id = f"{symbol}|{side}|{sweep.dt}|{c.dt}|{mss_level:.6f}"
             return Setup(setup_id, symbol, side, sweep_level, sweep_price, mss_level,
                          impulse_low, impulse_high, zone_low, zone_high, fvg_low, fvg_high,
-                         c.dt, min(90, quality), last_dt=c.dt)
+                         c.dt, min(90, quality), last_dt=c.dt, sweep_dt=sweep.dt, displacement_dt=c.dt)
     return None
 
 
-def _confirm(s: Setup, h4: list[Candle], h1: list[Candle], m15: list[Candle], m5: list[Candle], strength: dict[str,float]) -> dict | None:
-    if s.sent or s.invalid or len(m15) < 25 or len(m5) < 25: return None
-    c = m15[-1]
-    if c.dt <= s.created_dt or c.dt == s.last_dt: return None
+def _time_cluster_bars(s: Setup, m15: list[Candle]) -> tuple[int, str, int]:
+    """Return closed-M15 age from sweep and proximity to the 26/62 time cluster.
+
+    26 and 62 are treated as timing relationships, never as price-zone width.
+    They improve quality when present but cannot manufacture direction.
+    """
+    if not s.sweep_dt:
+        return 0, "NONE", 99
+    after = [c for c in m15 if c.dt >= s.sweep_dt]
+    n = max(0, len(after) - 1)
+    d26, d62 = abs(n - 26), abs(n - 62)
+    tol = int(getattr(cfg, "SMC_62_26_TIME_TOLERANCE_BARS", 3))
+    if d26 <= tol:
+        return n, "26", d26
+    if d62 <= tol:
+        return n, "62", d62
+    return n, "NONE", min(d26, d62)
+
+
+def _confirm(s: Setup, by_tf: dict, d1: list[Candle], h4: list[Candle], h1: list[Candle], m15: list[Candle], m5: list[Candle], strength: dict[str,float]) -> dict | None:
+    # Main confirmation is CLOSED H1. M15/M5 are auxiliary only.
+    if s.sent or s.invalid or len(h1) < 25 or len(m15) < 25 or len(m5) < 25:
+        return None
+    c = h1[-1]
+    if c.dt <= s.created_dt or c.dt == s.last_dt:
+        return None
     s.last_dt = c.dt; s.age += 1
     av = atr(h1,14)
-    if s.age > int(getattr(cfg,"SMC_62_26_MAX_AGE_M15",16)):
+    if av <= 0:
+        return None
+    if s.age > int(getattr(cfg,"SMC_62_26_MAX_AGE_H1",8)):
         s.invalid=True; return None
     invalid = av * float(getattr(cfg,"SMC_62_26_INVALIDATION_ATR",.12))
+    wanted = 1 if s.side == "LONG" else -1
     if s.side == "LONG":
         if c.close < s.sweep_price-invalid: s.invalid=True; return None
         touched = c.low <= s.zone_high and c.high >= s.zone_low
         held = c.close > s.zone_low and c.close > c.open
-        wanted=1
     else:
         if c.close > s.sweep_price+invalid: s.invalid=True; return None
         touched = c.high >= s.zone_low and c.low <= s.zone_high
         held = c.close < s.zone_high and c.close < c.open
-        wanted=-1
-    if not (touched and held): return None
-    if _bias("H4",h4) != wanted or _bias("M15",m15) != wanted: return None
-    # M5 нужен как дополнительное подтверждение, но RANGE не блокирует хороший M15.
-    m5b = _bias("M5",m5)
-    if m5b == -wanted: return None
+    if not (touched and held):
+        return None
+
+    h4b, d1b = _bias("H4",h4), _bias("D1",d1)
+    if h4b != wanted or d1b == -wanted:
+        return None
+
+    # Shared project classifier owns pullback-vs-flat geometry. A 1-2 candle
+    # touch or a RANGE/COMPRESSION is not promoted to a 62-26 pullback.
+    pb = pullback_regime.classify(s.symbol, -wanted, d1b, h4b, by_tf)
+    if pb.mode != "PULLBACK":
+        return None
+
+    # LTF may confirm timing, but can never create the signal.
+    m15b, m5b = _bias("M15",m15), _bias("M5",m5)
+    if m15b == -wanted and m5b == -wanted:
+        return None
     ok,gap = _strength_ok(s.symbol,s.side,strength)
-    if not ok: return None
-    # delivery commit is deferred until Telegram acknowledgement
-    quality=min(97,s.quality+8+(4 if m5b==wanted else 0)+min(5,int(abs(gap)*30)))
-    return {**asdict(s),"close":c.close,"gap":gap,"quality":quality,"confidence":min(93,quality-3),"confirm_dt":c.dt}
+    if not ok:
+        return None
+
+    early = ohlc_movement.early_entry_check(by_tf, wanted)
+    if not early.get("allow", True):
+        return None
+    og = ohlc_movement.guard_event(by_tf, wanted, s.quality)
+    if not og.get("allow", True):
+        return None
+
+    time_bars, time_cluster, time_distance = _time_cluster_bars(s, m15)
+    time_bonus = 5 if time_cluster != "NONE" else 0
+    ltf_bonus = 3 if (m15b == wanted or m5b == wanted) else 0
+    quality=min(97,s.quality+6+ltf_bonus+time_bonus+min(5,int(abs(gap)*30))+int(og.get("quality_delta",0)))
+    return {**asdict(s),"close":c.close,"gap":gap,"quality":quality,"confidence":min(93,quality-3),
+            "confirm_dt":c.dt,"pullback_mode":pb.mode,"pullback_bars":pb.bars,
+            "pullback_move_atr":pb.move_atr,"pullback_efficiency":pb.efficiency,
+            "market_regime":pb.regime,"time_bars_m15":time_bars,"time_cluster":time_cluster,
+            "time_distance":time_distance,"early_reason":early.get("reason","")}
 
 
 def _price(symbol: str, v: float) -> str:
@@ -208,11 +262,13 @@ def format_message(e: dict) -> str:
         f"Снятая ликвидность: {_price(e['symbol'],e['sweep_level'])}",
         f"Экстремум sweep: {_price(e['symbol'],e['sweep_price'])}",
         f"MSS / BOS: {_price(e['symbol'],e['mss_level'])}",
-        f"Рабочая зона 62/26: {_price(e['symbol'],e['zone_low'])}–{_price(e['symbol'],e['zone_high'])}",
-        f"FVG: {fvg}",f"Цена подтверждения M15: {_price(e['symbol'],e['close'])}",
-        "Подтверждение: H4 направление · H1 sweep+MSS · M15 реакция · M5 не против",
+        f"Зона 61.8%: {_price(e['symbol'],e['zone_low'])}–{_price(e['symbol'],e['zone_high'])}",
+        f"FVG: {fvg}",f"Цена подтверждения H1: {_price(e['symbol'],e['close'])}",
+        f"Откат: {e.get('pullback_mode','—')} · {e.get('pullback_bars',0)} H1 · {e.get('pullback_move_atr',0):.2f} ATR · эффективность {e.get('pullback_efficiency',0):.0%}",
+        f"Временная геометрия: {e.get('time_bars_m15',0)} M15 баров · кластер {e.get('time_cluster','NONE')}",
+        "Подтверждение: H4 направление · H1 sweep+MSS/displacement · H1 реакция · M15/M5 только вспомогательно",
         f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",f"Вероятность: {e['confidence']}%","",
-        f"✅ Факт: ликвидность снята, структура сменилась в {e['side']}, импульс подтверждён и цена отреагировала из зоны 62/26 на закрытой M15.",
+        f"✅ Факт: ликвидность снята, структура сменилась в {e['side']}, цена дала многосвечный откат к 61.8% и реакцию на закрытой H1; 26/62 учитываются как временной кластер, а не ширина цены.",
     ])
 
 
@@ -225,11 +281,8 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
             d1,h4,h1,m15,m5=(_bars(by_tf,tf) for tf in ("D1","H4","H1","M15","M5"))
             for s in list(setups.values()):
                 if s.symbol!=symbol or s.sent or s.invalid: continue
-                e=_confirm(s,h4,h1,m15,m5,strength)
+                e=_confirm(s,by_tf,d1,h4,h1,m15,m5,strength)
                 if e and not first:
-                    og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
-                    if not og.get('allow',True): continue
-                    if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90),max(0,e['quality']-3))
                     text=format_message(e); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"setup_id":s.setup_id,"text":text}; messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
             fresh=_find_setup(symbol,d1,h4,h1,m15)
             if fresh and fresh.setup_id not in setups:
@@ -256,7 +309,7 @@ def render_chart(event: dict, by_tf: dict):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    bars=_bars(by_tf,"M15")[-72:]
+    bars=_bars(by_tf,"H1")[-72:]
     if not bars: return None
     fig,ax=plt.subplots(figsize=(11,5.5))
     xs=list(range(len(bars)))
@@ -267,7 +320,7 @@ def render_chart(event: dict, by_tf: dict):
     ax.axhspan(event["zone_low"],event["zone_high"],alpha=.15)
     ax.axhline(event["sweep_level"],linestyle="--",linewidth=1,label="Liquidity")
     ax.axhline(event["mss_level"],linestyle=":",linewidth=1,label="MSS/BOS")
-    ax.set_title(f"{event['symbol']} · Smart Money 62-26 · {event['side']} · M15")
+    ax.set_title(f"{event['symbol']} · Smart Money 62-26 · {event['side']} · H1")
     ax.legend(loc="best"); ax.grid(alpha=.15); fig.tight_layout()
     buf=io.BytesIO(); fig.savefig(buf,format="png",dpi=150); plt.close(fig); buf.seek(0); return buf
 
