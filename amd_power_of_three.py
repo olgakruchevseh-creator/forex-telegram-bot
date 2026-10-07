@@ -89,10 +89,11 @@ def detect_amd(
     sweep_buffer = av * float(getattr(cfg, "AMD_MIN_SWEEP_ATR", .08))
     break_buffer = av * float(getattr(cfg, "AMD_BREAK_BUFFER_ATR", .08))
     h1_body_need = av * float(getattr(cfg, "AMD_BREAK_BODY_ATR", .50))
-    m15_body_need = av * float(getattr(cfg, "AMD_M15_BREAK_BODY_ATR", .22))
     max_entry_age = int(getattr(cfg, "AMD_MAX_ENTRY_AGE_H1", 2))
     max_extension = float(getattr(cfg, "AMD_MAX_ENTRY_EXTENSION_ATR", 1.20))
-    m15_fresh_bars = int(getattr(cfg, "AMD_M15_EXIT_MAX_AGE_BARS", 2))
+    max_sweep = av * float(getattr(cfg, "AMD_MAX_SWEEP_ATR", 1.50))
+    min_reclaim_depth = float(getattr(cfg, "AMD_MIN_RECLAIM_DEPTH", .08))
+    min_body_ratio = float(getattr(cfg, "AMD_MIN_DISPLACEMENT_BODY_RATIO", .60))
 
     candidates = []
     first_j = max(range_n, len(h1) - 1 - max_age)
@@ -102,8 +103,17 @@ def detect_amd(
         if not valid:
             continue
         manipulation = h1[j]
-        swept_low = manipulation.low < low - sweep_buffer and manipulation.close >= low
-        swept_high = manipulation.high > high + sweep_buffer and manipulation.close <= high
+        range_width = max(high - low, 1e-12)
+        low_penetration = low - manipulation.low
+        high_penetration = manipulation.high - high
+        swept_low = (
+            low_penetration >= sweep_buffer and low_penetration <= max_sweep
+            and manipulation.close >= low + range_width * min_reclaim_depth
+        )
+        swept_high = (
+            high_penetration >= sweep_buffer and high_penetration <= max_sweep
+            and manipulation.close <= high - range_width * min_reclaim_depth
+        )
         if swept_low == swept_high:
             continue
         side = "LONG" if swept_low else "SHORT"
@@ -112,38 +122,25 @@ def detect_amd(
         broken = high if side == "LONG" else low
         sweep_price = manipulation.low if side == "LONG" else manipulation.high
 
-        # Предпочитаем первый свежий закрытый M15-выход после манипуляции. Это
-        # позволяет сообщить о модели до закрытия следующего H1. Закрытая H1
-        # остаётся запасным подтверждением при недоступных/запаздывающих M15.
-        recent_m15 = m15[-max(1, m15_fresh_bars):]
-        after_sweep = [c for c in recent_m15 if c.dt > manipulation.dt]
-        if side == "LONG":
-            m15_exits = [c for c in after_sweep
-                         if c.close > high + break_buffer and c.close > c.open
-                         and abs(c.close-c.open) >= m15_body_need]
-        else:
-            m15_exits = [c for c in after_sweep
-                         if c.close < low - break_buffer and c.close < c.open
-                         and abs(c.close-c.open) >= m15_body_need]
-
+        # Основная AMD/PO3-карточка подтверждается только закрытой H1.
+        # M15/M5 остаются подтверждающим контекстом и не запускают сигнал сами.
         current_h1 = h1[-1]
         h1_is_after = j < len(h1) - 1
+        body = abs(current_h1.close - current_h1.open)
+        candle_range = max(current_h1.high - current_h1.low, 1e-12)
+        body_ratio = body / candle_range
         if side == "LONG":
             h1_exit = (h1_is_after and current_h1.close > high + break_buffer
                        and current_h1.close > current_h1.open
-                       and abs(current_h1.close-current_h1.open) >= h1_body_need)
+                       and body >= h1_body_need and body_ratio >= min_body_ratio)
         else:
             h1_exit = (h1_is_after and current_h1.close < low - break_buffer
                        and current_h1.close < current_h1.open
-                       and abs(current_h1.close-current_h1.open) >= h1_body_need)
-
-        if m15_exits:
-            exit_bar, exit_tf = m15_exits[0], "M15"
-        elif h1_exit:
-            exit_bar, exit_tf = current_h1, "H1"
-        else:
+                       and body >= h1_body_need and body_ratio >= min_body_ratio)
+        if not h1_exit:
             continue
-        # M15 подтверждает выход; H4 может быть нейтральным, но не противоположным.
+        exit_bar, exit_tf = current_h1, "H1"
+        # M15 подтверждает направление; H4 может быть нейтральным, но не противоположным.
         if _bias("M15", m15) != wanted or _bias("H4", h4) == -wanted:
             continue
         strength_ok, gap = _strength(symbol, side, strength)
@@ -287,7 +284,7 @@ def render_chart(event: dict, by_tf: dict) -> io.BytesIO:
     draw.text((max(left, mx-75), bottom+10), "МАНИПУЛЯЦИЯ", fill="#ff8b98", font=small)
     draw.text((max(left, ex-210), max(top, ey-38)), "ПОДТВЕРЖДЁННЫЙ ВЫХОД", fill=side_color, font=small)
     draw.text((left, 26), f"{event['symbol']} · AMD / POWER OF THREE · {event['side']}", fill="#f1f5fb", font=font)
-    draw.text((left, 657), "Реальные закрытые H1-свечи · M15/H1 подтверждает выход", fill="#aeb7c6", font=small)
+    draw.text((left, 657), "Реальные закрытые H1-свечи · M15/M5 только подтверждают контекст", fill="#aeb7c6", font=small)
     output = io.BytesIO()
     output.name = f"amd_{event['symbol'].replace('/', '')}_{event['side']}_{event['exit_dt'].replace(':', '-')}.png"
     image.save(output, format="PNG", optimize=True)

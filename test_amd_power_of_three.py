@@ -60,7 +60,7 @@ class AmdPowerOfThreeTests(unittest.TestCase):
             self.assertIn("EUR/USD|LONG|model", state["sent"])
             self.assertFalse(amd.mark_delivered(text))
 
-    def test_fresh_m15_exit_confirms_before_next_h1_close(self):
+    def test_m15_cannot_trigger_main_amd_before_h1_close(self):
         h1 = [range_bar(i) for i in range(28)]
         h1[27] = Candle("2026-09-09 10:00:00", 100.20, 100.60, 99.70, 100.20)
         other = [range_bar(i) for i in range(25)]
@@ -71,9 +71,7 @@ class AmdPowerOfThreeTests(unittest.TestCase):
         with patch.object(amd, "atr", return_value=.50), \
              patch.object(amd, "_bias", side_effect=lambda tf, _bars: 1):
             event = amd.detect_amd("EUR/USD", h1, other, m15, {"EUR": .10, "USD": 0})
-        self.assertIsNotNone(event)
-        self.assertEqual("M15", event["exit_tf"])
-        self.assertFalse(event["late"])
+        self.assertIsNone(event)
 
     def test_extended_old_exit_is_marked_late(self):
         h1 = bullish_model()

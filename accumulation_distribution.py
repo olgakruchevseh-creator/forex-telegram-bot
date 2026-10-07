@@ -94,7 +94,8 @@ def detect_phase(symbol: str, tf: str, bars: list[Candle]) -> Phase | None:
     touches_high = len({c.dt for c in box if c.high >= high - edge})
     max_width = float(getattr(cfg, "PHASE_MAX_WIDTH_ATR", 7.5))
     max_eff = float(getattr(cfg, "PHASE_MAX_EFFICIENCY", 0.32))
-    if width_atr > max_width or efficiency > max_eff or min(touches_low, touches_high) < 2:
+    min_touches = int(getattr(cfg, "PHASE_MIN_EDGE_TOUCHES", getattr(cfg, "AMD_FAMILY_MIN_EDGE_TOUCHES", 2)))
+    if width_atr > max_width or efficiency > max_eff or min(touches_low, touches_high) < min_touches:
         return None
     prior_move = prior[-1].close - prior[0].open
     prior_atr = prior_move / av
@@ -132,7 +133,7 @@ def detect_exit(phase: Phase, bars: list[Candle], by_tf: dict, strength: dict[st
         return False
     phase.last_dt = current.dt
     av = atr(bars, 14) or max(phase.high-phase.low, 1e-12)
-    buffer = av * .08
+    buffer = av * float(getattr(cfg, "PHASE_BREAK_BUFFER_ATR", getattr(cfg, "AMD_FAMILY_BREAK_BUFFER_ATR", .08)))
     wanted = 1 if phase.side == "LONG" else -1
     if wanted > 0:
         crossed = prev.close <= phase.high + buffer and current.close > phase.high + buffer and current.close > current.open
@@ -241,7 +242,7 @@ def render_chart(phase: Phase, by_tf: dict) -> io.BytesIO:
     draw.text((left+8, y_at(phase.high)+7), f"ФАЗА: {label} · {phase.tf}", fill=phase_color, font=small)
     draw.text((max(left, ex-185), max(top, ey-38)), "ПОДТВЕРЖДЁННЫЙ ВЫХОД", fill=side_color, font=small)
     draw.text((left, 26), f"{phase.symbol} · ФАЗА И ВЫХОД · {phase.side}", fill="#f1f5fb", font=font)
-    draw.text((left, 657), "Реальные закрытые M15-свечи · границы исходной фазы сохранены", fill="#aeb7c6", font=small)
+    draw.text((left, 657), "Фаза D1/H4/H1 · торговый выход подтверждён закрытой H1", fill="#aeb7c6", font=small)
     output = io.BytesIO()
     output.name = f"phase_{phase.symbol.replace('/', '')}_{phase.side}.png"
     image.save(output, format="PNG", optimize=True)
@@ -280,14 +281,28 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             by_tf = market.get(symbol) or {}
             # Existing ranges: only a newly crossed boundary can create exit.
             for phase in [p for p in stored.values() if p.symbol == symbol and not p.exit_sent]:
-                # Граница фазы H1/H4/D1 сохраняется, но сам выход фиксируется
-                # закрытой M15, а не ждёт закрытия старшего таймфрейма.
-                if detect_exit(phase, _bars(by_tf, "M15"), by_tf, strength) and not first:
-                    text = format_message(phase, "exit")
-                    digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-                    pending[digest] = {"phase": asdict(phase), "event": "exit"}
-                    messages.append(text)
-                    _PENDING_CARDS[text] = (phase, freeze_by_tf(by_tf))
+                # Граница фазы может быть D1/H4/H1, но торговый выход семьи AMD
+                # фиксируется только закрытой H1. M15/M5 — подтверждение, не триггер.
+                if detect_exit(phase, _bars(by_tf, "H1"), by_tf, strength) and not first:
+                    # Более специфичный полный PO3 имеет приоритет над простой
+                    # карточкой выхода из фазы, чтобы одно событие не пришло дважды.
+                    po3_same_event = False
+                    if getattr(cfg, "AMD_FAMILY_PO3_PRIORITY", True):
+                        try:
+                            import amd_power_of_three
+                            po3 = amd_power_of_three.detect_amd(
+                                symbol, _bars(by_tf, "H1"), _bars(by_tf, "H4"),
+                                _bars(by_tf, "M15"), strength, by_tf
+                            )
+                            po3_same_event = bool(po3 and not po3.get("late") and po3.get("side") == phase.side)
+                        except Exception:
+                            log.exception("AMD family priority check %s", symbol)
+                    if not po3_same_event:
+                        text = format_message(phase, "exit")
+                        digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+                        pending[digest] = {"phase": asdict(phase), "event": "exit"}
+                        messages.append(text)
+                        _PENDING_CARDS[text] = (phase, freeze_by_tf(by_tf))
             candidates = []
             for tf in MAIN_TFS:
                 phase = detect_phase(symbol, tf, _bars(by_tf, tf))
