@@ -721,7 +721,7 @@ def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state:
             if not echo and not pivot:
                 continue
             zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
-            character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength))
+            character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength), by_tf=by_tf)
             bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot, "zigzag": zz,
                       "pair_character": character,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}

@@ -363,7 +363,7 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     trajectory_ok = bool(endpoint_ok and (aligned_h >= 2 or len(horizons) < 3) and not weak)
     try:
         import pair_character_matrix
-        character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength or {}))
+        character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength or {}), by_tf=by_tf)
     except Exception:
         character = {}
     return {

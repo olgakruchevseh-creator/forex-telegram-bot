@@ -116,3 +116,49 @@ def analyze_symbol(symbol,by_tf,*,states=3,min_samples=72,lookback=240):
 def compact_text(c):
     if not c or c.status!='OK': return 'HMM: данных недостаточно'
     return f"HMM: {c.state} · {c.confidence}/100 · смена {c.transition_risk:.0%} · возраст {c.age} H1"
+
+# --- V2 observation bridge -------------------------------------------------
+def _state_dir():
+    import os
+    from pathlib import Path
+    root=os.getenv('STATE_DIR','').strip()
+    return Path(root) if root else Path(__file__).resolve().parent
+
+def _obs_paths():
+    base=_state_dir()
+    return base/'hmm_regime_observations.jsonl', base/'hmm_regime_observation_state.json'
+
+def _bar_stamp(bar):
+    return str(getattr(bar,'dt',getattr(bar,'time','')) or '')
+
+def record_observation(symbol, by_tf, context, *, character=None, regime=None):
+    """Persist one causal OBSERVE_ONLY row per symbol/closed-H1 candle.
+
+    The row intentionally stores contemporaneous context only.  It is a calibration
+    dataset, not an input back into live decisions.  Duplicate calls from Echo,
+    Pivot, Navigator and session cards are de-duplicated by symbol+H1 timestamp.
+    """
+    import json, os
+    if str(os.getenv('HMM_OBSERVATION_LOG','1')).lower() in ('0','false','no','off'):
+        return False
+    if not context or context.status!='OK': return False
+    bars=closed_candles((by_tf or {}).get('H1') or [],60)
+    if not bars: return False
+    stamp=_bar_stamp(bars[-1])
+    if not stamp: return False
+    log_path,state_path=_obs_paths(); log_path.parent.mkdir(parents=True,exist_ok=True)
+    try:
+        state=json.loads(state_path.read_text()) if state_path.exists() else {}
+        if state.get(symbol)==stamp: return False
+    except Exception: state={}
+    c=character or {}; im=c.get('interaction_matrix') or {}
+    row={'symbol':symbol,'closed_h1':stamp,'hmm':context.as_dict(),
+         'character':{'label':c.get('label'),'score':c.get('character_matrix_score'),
+                      'interaction_score':im.get('score'),'interaction_band':im.get('band'),
+                      'trend_persistence':c.get('trend_persistence'),'impulse':c.get('impulse'),
+                      'noise':c.get('noise'),'session':c.get('session'),'session_activity':c.get('session_activity')},
+         'market_regime':regime,'observe_only':True,'live_effect':'NONE'}
+    with log_path.open('a',encoding='utf-8') as f: f.write(json.dumps(row,ensure_ascii=False,separators=(',',':'))+'\n')
+    state[symbol]=stamp
+    tmp=state_path.with_suffix('.tmp'); tmp.write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8'); tmp.replace(state_path)
+    return True

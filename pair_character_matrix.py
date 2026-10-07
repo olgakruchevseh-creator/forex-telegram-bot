@@ -407,6 +407,22 @@ def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
             'combiner':'EQUAL_WEIGHT_GEOMETRIC_MEAN'}
 
 
-def attach_interaction(profile: dict, regime: str | None = None) -> dict:
+def attach_interaction(profile: dict, regime: str | None = None, by_tf: dict | None = None) -> dict:
+    """Attach direction-neutral interaction + optional HMM observation context.
+
+    HMM is metadata only: it never changes Character Matrix score/band, side, veto,
+    or any trading threshold.  Passing ``by_tf`` enables causal closed-H1 HMM.
+    """
     if not profile: return profile
-    out=dict(profile); out['interaction_matrix']=interaction_matrix(out, regime); return out
+    out=dict(profile)
+    out['interaction_matrix']=interaction_matrix(out, regime)
+    if by_tf is not None and out.get('symbol'):
+        try:
+            import hmm_regime
+            h=hmm_regime.analyze_symbol(out['symbol'], by_tf)
+            out['hmm_regime']=h.as_dict()
+            # Persist one row per closed H1 for later transition calibration.
+            hmm_regime.record_observation(out['symbol'], by_tf, h, character=out, regime=regime)
+        except Exception:
+            out['hmm_regime']={'status':'ERROR','live_effect':'NONE'}
+    return out
