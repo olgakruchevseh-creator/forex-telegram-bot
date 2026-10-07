@@ -217,7 +217,8 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
     # Раннее событие не ждёт, пока средний уклон H1 выйдет из RANGE. Нужны
     # минимум три однонаправленные закрытые M15, подтверждение серией M5 и
     # сила валют в ту же сторону. Одиночная M5-свеча сигнал не создаёт.
-    if not event and main and not h1:
+    if (getattr(cfg, "ZIGZAG_EARLY_LTF_EVENTS_ENABLED", False)
+            and not event and main and not h1):
         m15_bars = bars_by_tf.get("M15") or []
         m5_bars = bars_by_tf.get("M5") or []
         early_side, run_dt = _candle_run(
@@ -283,8 +284,12 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         "duration_high": duration_high,
         "duration_samples": duration_samples,
         "directions": {tf: direction(tf) for tf in views},
+        # Public structural direction MUST be the same 2-of-3 ensemble decision
+        # used by this scanner itself.  Previously this field silently exposed
+        # the single base path, so Master Direction / Echo / Navigator could
+        # receive LONG/SHORT while the ZigZag scanner correctly held RANGE.
         "zigzag_directions": {
-            tf: (_swing_side(swings_by_tf.get(tf) or []) or _sequence_side(_sequence(swings_by_tf.get(tf) or [])))
+            tf: int((ensembles_by_tf.get(tf) or {}).get("side") or 0)
             for tf in views
         },
         "sequences": {tf: _sequence(swings_by_tf.get(tf) or []) for tf in views},

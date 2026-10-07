@@ -80,6 +80,10 @@ ZIGZAG_EARLY_M15_BARS = 3
 ZIGZAG_EARLY_M5_CONFIRM_BARS = 3
 ZIGZAG_EARLY_MIN_BODY_ATR = 0.45
 ZIGZAG_EARLY_MIN_STRENGTH_GAP = 0.05
+# M15/M5 are confirmation-only under the closed-H1 policy.  Keep the old
+# early-LTF engine available for research, but never let it emit a standalone
+# ZigZag event in production unless explicitly re-enabled.
+ZIGZAG_EARLY_LTF_EVENTS_ENABLED = False
 SIGNAL_BLOCK_OPPOSITE_H4_ZIGZAG = False
 DXY_IMPULSE_MIN_CHANGE_PCT = 0.05
 DXY_IMPULSE_MIN_ADX = 25
