@@ -452,26 +452,44 @@ def _side_badge(side: str | None) -> str:
 
 
 def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
-    """One concise caption for the Echo + Next Pivot album of one pair."""
+    """One readable caption: pair first, then Echo, Pivot and Adaptive ZigZag."""
     symbol = str(bundle.get("symbol") or "")
     echo = bundle.get("echo") or {}
     pivot = bundle.get("pivot") or {}
+    zz = bundle.get("zigzag") or {}
     er = echo.get("result") or {}
     pr = pivot.get("result") or {}
-    lines = ["🔭 ЭХО + 🎯 СЛЕДУЮЩИЙ PIVOT — ЕДИНЫЙ СЦЕНАРИЙ", f"💱 Пара: {symbol}"]
-    period = str(bundle.get("period") or "")
-    if period:
-        lines.append(f"Период: {period}")
     eside = er.get("side")
     pside = pr.get("side")
+
+    # The first four lines are intentionally scan-friendly in Telegram: the pair
+    # and the three independent engines are visible before any explanation.
+    lines = ["🔭 ЭХО + 🎯 СЛЕДУЮЩИЙ PIVOT + ↕️ ADAPTIVE ZIGZAG — ЕДИНЫЙ СЦЕНАРИЙ",
+             f"💱 Пара: {symbol}"]
     if eside:
-        lines.append(f"Эхо · фон к следующей сессии: {_side_badge(eside)} · вероятность {er.get('direction_probability', '—')}%")
+        lines.append(f"🔭 Эхо: {_side_badge(eside)} · вероятность {er.get('direction_probability', '—')}%")
     else:
-        lines.append(f"Эхо · фон к следующей сессии: {_side_badge(None)}")
+        lines.append(f"🔭 Эхо: {_side_badge(None)}")
+
     if pr:
         decimals = 3 if "JPY" in symbol else 5
         kind = "ВЕРШИНЫ" if pr.get("kind") == "high" else "ОСНОВАНИЯ"
-        lines.append(f"Pivot · путь к зоне: {_side_badge(pside)} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
+        lines.append(f"🎯 Next Pivot: {_side_badge(pside)} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
+    else:
+        lines.append("🎯 Next Pivot: надёжная следующая зона пока не рассчитана")
+
+    zdir = int((zz.get("zigzag_directions") or {}).get("H1", 0) or 0)
+    zside = "LONG" if zdir > 0 else ("SHORT" if zdir < 0 else None)
+    zlow, zhigh = int(zz.get("duration_low") or 0), int(zz.get("duration_high") or 0)
+    if zlow and zhigh:
+        lines.append(f"↕️ Adaptive ZigZag: {_side_badge(zside)} · ≈ {zlow}–{zhigh} закрытых H1-свечей до вероятного угла")
+    else:
+        lines.append(f"↕️ Adaptive ZigZag: {_side_badge(zside)} · окно до следующего угла пока без достаточной статистики")
+
+    period = str(bundle.get("period") or "")
+    if period:
+        lines.append(f"Период: {period}")
+    if pr:
         reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else "НЕЙТРАЛЬНО")
         if eside and pside and eside != pside:
             lines.append(f"Связка: Echo {_side_badge(eside)} — общий фон; Pivot {_side_badge(pside)} — локальный крюк к зоне, не смена тезиса.")
@@ -479,8 +497,6 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
             lines.append(f"Связка: Echo {_side_badge(eside)} → движение к Pivot {_side_badge(pside)} → после зоны возможна реакция {_side_badge(reaction)}.")
         else:
             lines.append(f"Связка: Pivot — локальная зона; реакция {_side_badge(reaction)} учитывается только после подтверждения M15/H1.")
-    else:
-        lines.append("Pivot: надёжная следующая зона пока не рассчитана.")
     lines.append("🖼 Единый график: Adaptive ZigZag + Echo + Next Pivot")
     lines.append("⚠️ Информационный вероятностный сценарий, не торговый сигнал.")
     text = "\n".join(lines)
@@ -505,7 +521,7 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         raise ValueError("Unified Echo/Pivot/ZigZag chart requires closed H1 candles")
     echo = ((bundle.get("echo") or {}).get("result") or {})
     pivot = ((bundle.get("pivot") or {}).get("result") or {})
-    zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+    zz = bundle.get("zigzag") or zigzag_scanner.analyze_symbol(symbol, by_tf)
 
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#10131d")
@@ -688,7 +704,8 @@ def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state:
                      if getattr(cfg, "NEXT_PIVOT_ENABLED", True) else None)
             if not echo and not pivot:
                 continue
-            bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot,
+            zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
+            bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot, "zigzag": zz,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}
             bundle["caption"] = combined_pair_caption(bundle)
             bundle["image"] = render_unified_scenario_chart(bundle, by_tf)
