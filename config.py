@@ -754,6 +754,17 @@ EARLY_IMPULSE_LOOKBACK_H1 = 10
 EARLY_IMPULSE_MAX_AGE_BARS = 1
 EARLY_MAX_TRAVEL_ATR = 1.35
 EARLY_ORIGIN_RETEST_ATR = 0.40
+# Fresh displacement is not automatically an early entry. If the just-closed
+# H1 candle itself has already consumed an abnormal amount of movement and
+# closes near its directional extreme, keep the event internal instead of
+# presenting a chase entry in Telegram.
+EARLY_FRESH_EXHAUST_BODY_ATR = 1.55
+EARLY_FRESH_EXHAUST_RANGE_ATR = 1.80
+EARLY_FRESH_CLOSE_EDGE_PCT = 0.22
+# Also block a mature 4-H1 staircase even without one giant candle.
+EARLY_RUN_BARS_H1 = 4
+EARLY_RUN_MIN_DIRECTIONAL_BARS = 3
+EARLY_RUN_MAX_TRAVEL_ATR = 1.55
 
 # Unified OHLC movement layer (ZIP 30 -> 31). Internal filter, never a standalone alert.
 OHLC_MOVEMENT_FILTER_ENABLED = True

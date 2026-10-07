@@ -68,3 +68,21 @@ def test_multi_candle_real_move_is_seen():
     assert not a.weak_reversal
     assert a.directional_bars >= 4
     assert a.net_atr > 0
+
+
+def test_fresh_oversized_dump_is_not_a_new_short_entry():
+    closes = [1.360 - i * 0.00010 for i in range(20)] + [1.358]
+    by_tf = _h1_pair(closes, impulse_at=-1, impulse_size=-0.0060)
+    got = om.early_entry_check(by_tf, -1)
+    assert got["allow"] is False
+    assert got["reason"] in ("fresh_impulse_already_extended", "multi_bar_move_already_extended")
+
+
+def test_four_bar_staircase_is_late_without_one_giant_candle():
+    # Normal historical volatility, followed by four efficient bearish H1 bars.
+    closes = [1.360 + (i % 2) * 0.0008 for i in range(18)]
+    closes += [1.3592, 1.3584, 1.3576, 1.3568]
+    by_tf = {"H1": _tight(closes)}
+    got = om.early_entry_check(by_tf, -1)
+    assert got["allow"] is False
+    assert got["reason"] in ("multi_bar_move_already_extended", "late_after_impulse")

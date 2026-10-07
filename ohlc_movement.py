@@ -150,11 +150,13 @@ def setup_adjustment(by_tf: dict, side: int) -> dict:
 
 
 def early_entry_check(by_tf: dict, side) -> dict:
-    """Allow a NEW entry only near the start of the move.
+    """Final anti-late gate for a NEW H1-confirmed entry.
 
-    A large same-direction H1 impulse on the current or previous bar is early.
-    The same impulse two or more bars ago, with price still far from its origin,
-    is a late continuation and must not be sold as a fresh entry.
+    The gate distinguishes an early confirmed start from a move that has already
+    spent too much distance.  A fresh H1 impulse is *not* automatically early:
+    an oversized close near the candle extreme can already be an exhausted entry.
+    A multi-candle directional expansion is also caught even when no single bar
+    is large enough to qualify as the anchor impulse.
     """
     import config as cfg
     from analysis import closed_candles
@@ -172,37 +174,70 @@ def early_entry_check(by_tf: dict, side) -> dict:
     av = float(atr(bars[:-1], 14))
     if av <= 0:
         return {"allow": True, "reason": "insufficient_atr", "impulse_age": None, "travel_atr": 0.0}
+
     min_body = float(getattr(cfg, "EARLY_IMPULSE_MIN_BODY_ATR", 1.15))
     min_range = float(getattr(cfg, "EARLY_IMPULSE_MIN_RANGE_ATR", 1.30))
+    max_age = int(getattr(cfg, "EARLY_IMPULSE_MAX_AGE_BARS", 1))
+    max_travel = float(getattr(cfg, "EARLY_MAX_TRAVEL_ATR", 1.35))
+    retest = float(getattr(cfg, "EARLY_ORIGIN_RETEST_ATR", 0.40))
+    fresh_exhaust_body = float(getattr(cfg, "EARLY_FRESH_EXHAUST_BODY_ATR", 1.55))
+    fresh_exhaust_range = float(getattr(cfg, "EARLY_FRESH_EXHAUST_RANGE_ATR", 1.80))
+    close_edge = float(getattr(cfg, "EARLY_FRESH_CLOSE_EDGE_PCT", 0.22))
+
+    # A just-closed oversized displacement can itself be a late entry.  We still
+    # require a directional close near its extreme, so a wick-heavy rejection is
+    # not confused with consumed directional travel.
+    last = bars[-1]
+    last_body = abs(float(last.close) - float(last.open)) / av
+    last_range = (float(last.high) - float(last.low)) / av
+    last_side = 1 if last.close > last.open else (-1 if last.close < last.open else 0)
+    edge_dist = ((float(last.high) - float(last.close)) if side_i > 0 else
+                 (float(last.close) - float(last.low))) / max(float(last.high) - float(last.low), 1e-12)
+    if (last_side == side_i and last_body >= fresh_exhaust_body and
+            last_range >= fresh_exhaust_range and edge_dist <= close_edge):
+        return {"allow": False, "reason": "fresh_impulse_already_extended", "impulse_age": 0,
+                "travel_atr": round(last_body, 3), "impulse_body_atr": round(last_body, 3),
+                "impulse_range_atr": round(last_range, 3)}
+
+    # Catch a staircase move: several same-direction H1 closes may consume the
+    # route without producing one spectacular candle.
+    run_bars = max(3, int(getattr(cfg, "EARLY_RUN_BARS_H1", 4)))
+    run = bars[-run_bars:]
+    run_net = ((float(run[-1].close) - float(run[0].open)) * side_i) / av
+    directional = sum(1 for c in run if ((c.close - c.open) * side_i) > 0)
+    run_min_dir = max(2, int(getattr(cfg, "EARLY_RUN_MIN_DIRECTIONAL_BARS", 3)))
+    run_max = float(getattr(cfg, "EARLY_RUN_MAX_TRAVEL_ATR", 1.55))
+    if directional >= run_min_dir and run_net >= run_max:
+        return {"allow": False, "reason": "multi_bar_move_already_extended", "impulse_age": run_bars - 1,
+                "travel_atr": round(run_net, 3), "directional_bars": directional}
+
+    # Use the most recent qualifying impulse, not the largest historical one.
+    # Recency is what matters for deciding whether the current setup is late.
     window = bars[-lookback:]
     found = None
-    for offset, c in enumerate(window):
+    for offset in range(len(window) - 1, -1, -1):
+        c = window[offset]
         age = len(window) - 1 - offset
         candle_side = 1 if c.close > c.open else (-1 if c.close < c.open else 0)
         if candle_side != side_i:
             continue
         body_atr = abs(float(c.close) - float(c.open)) / av
         range_atr = (float(c.high) - float(c.low)) / av
-        if body_atr < min_body or range_atr < min_range:
-            continue
-        if found is None or body_atr > found[2]:
-            found = (age, c, body_atr)
+        if body_atr >= min_body and range_atr >= min_range:
+            found = (age, c, body_atr, range_atr)
+            break
     if not found:
         return {"allow": True, "reason": "no_prior_impulse", "impulse_age": None, "travel_atr": 0.0}
-    age, impulse, body_atr = found
+    age, impulse, body_atr, range_atr = found
     origin = float(impulse.high) if side_i < 0 else float(impulse.low)
-    last = bars[-1]
     travel = ((origin - float(last.close)) / av) if side_i < 0 else ((float(last.close) - origin) / av)
-    max_age = int(getattr(cfg, "EARLY_IMPULSE_MAX_AGE_BARS", 1))
-    max_travel = float(getattr(cfg, "EARLY_MAX_TRAVEL_ATR", 1.35))
-    retest = float(getattr(cfg, "EARLY_ORIGIN_RETEST_ATR", 0.40))
-    if age <= max_age:
+    if age <= max_age and travel < max_travel:
         return {"allow": True, "reason": "impulse_is_fresh", "impulse_age": age,
                 "travel_atr": round(travel, 3), "impulse_body_atr": round(body_atr, 3)}
     if travel <= retest:
         return {"allow": True, "reason": "retest_of_origin", "impulse_age": age,
                 "travel_atr": round(travel, 3), "impulse_body_atr": round(body_atr, 3)}
-    if travel >= max_travel:
+    if travel >= max_travel or age > max_age:
         return {"allow": False, "reason": "late_after_impulse", "impulse_age": age,
                 "travel_atr": round(travel, 3), "impulse_body_atr": round(body_atr, 3)}
     return {"allow": True, "reason": "travel_still_early", "impulse_age": age,
