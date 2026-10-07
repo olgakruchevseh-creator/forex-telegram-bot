@@ -12,10 +12,11 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.retest_confirmation")
-TF_MINUTES = {"H4": 240, "H1": 60, "M15": 15}
+TF_MINUTES = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 SCAN_TFS = ("H4", "H1")
 
 
@@ -29,6 +30,10 @@ class RetestSetup:
     bos_dt: str
     last_h1_dt: str
     age: int = 0
+    bos_atr: float = 0.0
+    bos_body_atr: float = 0.0
+    status: str = "BOS_CONFIRMED"
+    invalid_reason: str = ""
     held: bool = False
     hold_dt: str = ""
     sent: bool = False
@@ -94,7 +99,8 @@ def detect_bos(symbol: str, tf: str, bars: list[Candle]) -> RetestSetup | None:
         return None
     precision = 3 if "JPY" in symbol else 5
     setup_id = f"{symbol}|{tf}|{side}|{level:.{precision}f}|{current.dt}"
-    return RetestSetup(setup_id, symbol, tf, side, level, current.dt, current.dt)
+    return RetestSetup(setup_id, symbol, tf, side, level, current.dt, current.dt,
+                       bos_atr=av, bos_body_atr=body / av)
 
 
 def _bias(tf: str, bars: list[Candle]) -> int:
@@ -109,40 +115,55 @@ def _strength_gap(setup: RetestSetup, strength: dict[str, float]) -> float:
 
 def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
                    strength: dict[str, float]) -> dict | None:
-    """Требует две разные закрытые M15 после BOS: удержание, затем ретест."""
+    """H1-owned lifecycle: BOS -> H1 hold -> later H1 retest/reaction.
+
+    M15/M5 may confirm timing only; they never advance age, hold or retest state.
+    """
     if setup.sent or setup.invalid or len(h1) < 20:
         return None
-    m15 = _bars(by_tf, "M15")
-    use_m15 = len(m15) >= 20 and m15[-1].dt > setup.last_h1_dt
-    current = m15[-1] if use_m15 else h1[-1]
-    confirm_tf = "M15" if use_m15 else "H1"
+    current = h1[-1]
     if current.dt <= setup.bos_dt or current.dt == setup.last_h1_dt:
         return None
     setup.last_h1_dt = current.dt
     setup.age += 1
     if setup.age > int(getattr(cfg, "RETEST_MAX_H1_BARS", 12)):
         setup.invalid = True
+        setup.status = "EXPIRED"
+        setup.invalid_reason = "H1_TIMEOUT"
         return None
-    av = atr(h1, 14)
+
+    # Freeze volatility geometry at BOS. Legacy state falls back to current H1 ATR.
+    current_atr = atr(h1, 14)
+    av = float(setup.bos_atr or current_atr)
     if av <= 0:
         return None
     invalidation = av * float(getattr(cfg, "RETEST_INVALIDATION_ATR", 0.18))
     hold_buffer = av * float(getattr(cfg, "RETEST_HOLD_BUFFER_ATR", 0.08))
     wanted = 1 if setup.side == "LONG" else -1
     if wanted > 0 and current.close < setup.level - invalidation:
-        setup.invalid = True
+        setup.invalid = True; setup.status = "FAILED_RECLAIM"; setup.invalid_reason = "H1_CLOSE_BELOW_BOS"
         return None
     if wanted < 0 and current.close > setup.level + invalidation:
-        setup.invalid = True
+        setup.invalid = True; setup.status = "FAILED_RECLAIM"; setup.invalid_reason = "H1_CLOSE_ABOVE_BOS"
         return None
 
-    # Свеча удержания не может одновременно считаться свечой ретеста.
+    h4 = _bars(by_tf, "H4")
+    d1 = _bars(by_tf, "D1") if "D1" in by_tf else []
+    h4_bias = _bias("H4", h4) if len(h4) >= 20 else 0
+    d1_bias = _bias("D1", d1) if len(d1) >= 20 else 0
+    pb = pullback_regime.classify(setup.symbol, wanted, d1_bias, h4_bias, by_tf)
+    if pb.mode in ("RANGE", "COMPRESSION"):
+        setup.status = "PAUSED_RANGE"
+        return None
+
+    # Hold and reaction must be separate CLOSED H1 candles.
     if not setup.held:
         held = (current.close > setup.level + hold_buffer and current.close > current.open) if wanted > 0 else (
             current.close < setup.level - hold_buffer and current.close < current.open)
         if held:
             setup.held = True
             setup.hold_dt = current.dt
+            setup.status = "RETEST_PENDING"
         return None
     if current.dt <= setup.hold_dt:
         return None
@@ -151,27 +172,51 @@ def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
     min_body = av * float(getattr(cfg, "RETEST_REACTION_BODY_ATR", 0.30))
     directional_body = (current.close - current.open) * wanted
     if wanted > 0:
-        reaction = current.low <= setup.level + tolerance and current.close > setup.level and current.close > current.open
+        touched = current.low <= setup.level + tolerance
+        reaction = touched and current.close > setup.level and current.close > current.open
     else:
-        reaction = current.high >= setup.level - tolerance and current.close < setup.level and current.close < current.open
+        touched = current.high >= setup.level - tolerance
+        reaction = touched and current.close < setup.level and current.close < current.open
+    if touched:
+        setup.status = "RETEST_IN_ZONE"
     if not reaction or directional_body < min_body:
         return None
 
-    h4 = _bars(by_tf, "H4")
-    if _bias("M15", m15) != wanted or _bias("H4", h4) == -wanted:
+    # H4 is context, not an unconditional veto when the shared classifier identifies
+    # a legitimate counter-trend route. M15/M5 can only reject obviously opposite timing.
+    m15 = _bars(by_tf, "M15")
+    m5 = _bars(by_tf, "M5") if "M5" in by_tf else []
+    m15_bias = _bias("M15", m15) if len(m15) >= 20 else 0
+    m5_bias = _bias("M5", m5) if len(m5) >= 20 else 0
+    if m15_bias == -wanted and m5_bias == -wanted:
         return None
+
     gap = _strength_gap(setup, strength)
     minimum_gap = float(getattr(cfg, "RETEST_MIN_STRENGTH_GAP", 0.05))
     if (gap * wanted) < minimum_gap:
         return None
 
-    # delivery commit is deferred until Telegram acknowledgement
+    early = ohlc_movement.early_entry_check(by_tf, wanted)
+    if not early.get("allow", True):
+        return None
+    og = ohlc_movement.guard_event(by_tf, wanted, 82)
+    if not og.get("allow", True):
+        return None
+
     reaction_atr = directional_body / av
-    quality = min(94, 78 + (5 if setup.tf == "H4" else 2) + min(9, int(reaction_atr * 10)))
+    displacement_bonus = min(4, int(max(0.0, float(setup.bos_body_atr or 0.0) - 0.5) * 4))
+    ltf_bonus = 2 if (m15_bias == wanted or m5_bias == wanted) else 0
+    quality = min(96, 78 + (5 if setup.tf == "H4" else 2) + min(9, int(reaction_atr * 10))
+                  + displacement_bonus + ltf_bonus + int(og.get("quality_delta", 0)))
+    setup.status = "REACTION_CONFIRMED"
     return {
         "symbol": setup.symbol, "side": setup.side, "tf": setup.tf,
         "level": setup.level, "close": current.close, "gap": gap,
-        "quality": quality, "confidence": min(90, quality - 4), "confirm_tf": confirm_tf,
+        "quality": quality, "confidence": min(92, quality - 4), "confirm_tf": "H1",
+        "bos_atr": av, "bos_body_atr": setup.bos_body_atr, "age_h1": setup.age,
+        "pullback_mode": pb.mode, "pullback_bars": pb.bars,
+        "pullback_move_atr": pb.move_atr, "pullback_efficiency": pb.efficiency,
+        "market_regime": pb.regime, "early_reason": early.get("reason", ""),
     }
 
 
@@ -198,7 +243,9 @@ def format_message(event: dict) -> str:
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
-    setups = {key: RetestSetup(**value) for key, value in (state.get("setups") or {}).items()}
+    allowed = set(RetestSetup.__dataclass_fields__)
+    setups = {key: RetestSetup(**{k: v for k, v in value.items() if k in allowed})
+              for key, value in (state.get("setups") or {}).items()}
     pending=state.setdefault("pending",{})
     messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
@@ -211,9 +258,6 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if existing:
                     event = confirm_retest(existing, h1, by_tf, strength)
                     if event and not first:
-                        og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
-                        if not og.get('allow',True): continue
-                        if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                         message = format_message(event)
 
                         _RETEST_CHART_CACHE[message] = (event, freeze_by_tf(by_tf))
@@ -222,7 +266,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
 
                 bars = _bars(by_tf, tf)
                 fresh = detect_bos(symbol, tf, bars)
-                if fresh and (not existing or fresh.setup_id != existing.setup_id):
+                # Never overwrite a live pending retest with a newer BOS on the same TF.
+                # Replace only completed/invalid/expired lifecycle records.
+                if fresh and (not existing or existing.sent or existing.invalid):
                     setups[key] = fresh
         except Exception:
             log.exception("Структурный ретест %s", symbol)
