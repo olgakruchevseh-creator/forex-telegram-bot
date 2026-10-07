@@ -55,13 +55,16 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
     confirm_buffer = av * float(getattr(cfg, "CRT_MID_CONFIRM_ATR", .05))
     body_need = av * float(getattr(cfg, "CRT_MIN_CONFIRM_BODY_ATR", .22))
     max_sweep_age = int(getattr(cfg, "CRT_MAX_SWEEP_AGE_H1", 3))
+    strict_sequence = bool(getattr(cfg, "CRT_STRICT_THREE_CANDLE_SEQUENCE", True))
     candidates = []
     start = max(0, len(h1) - lookback - max_sweep_age - 2)
     for r in range(start, len(h1)-2):
         ref = h1[r]; width = ref.high-ref.low
         if not (min_range <= width <= max_range): continue
         mid = (ref.high+ref.low)/2
-        for s in range(r+1, min(len(h1)-1, r+1+max_sweep_age)):
+        sweep_stop = min(len(h1)-1, r+1+max_sweep_age)
+        sweep_indices = range(r+1, min(sweep_stop, r+2)) if strict_sequence else range(r+1, sweep_stop)
+        for s in sweep_indices:
             sweep = h1[s]
             low_sweep = sweep.low < ref.low-sweep_need and sweep.close > ref.low
             high_sweep = sweep.high > ref.high+sweep_need and sweep.close < ref.high
@@ -85,8 +88,21 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
             if not ok: continue
             amd = amd_power_of_three.detect_amd(symbol, h1, h4, m15, strength)
             amd_match = bool(amd and amd.get("side") == side and not amd.get("late"))
-            sweep_depth = (ref.low-sweep.low if side == "LONG" else sweep.high-ref.high)/av
-            quality = 76 + min(7, int(max(0, sweep_depth)*10))
+            sweep_raw = ref.low-sweep.low if side == "LONG" else sweep.high-ref.high
+            sweep_depth = sweep_raw/av
+            sweep_depth_range = sweep_raw/max(width, 1e-12)
+            # How decisively the manipulation candle reclaimed the parent range.
+            # 0 = only just back inside; 1 = closed at the opposite boundary.
+            close_back = ((sweep.close-ref.low)/width if side == "LONG" else (ref.high-sweep.close)/width)
+            close_back = max(0.0, min(1.0, close_back))
+            rejection_wick = ((min(sweep.open,sweep.close)-sweep.low) if side == "LONG" else (sweep.high-max(sweep.open,sweep.close)))
+            wick_ratio = max(0.0, rejection_wick/max(sweep.high-sweep.low, 1e-12))
+            # A candle that purges both parent boundaries is ambiguous rather than a clean one-sided CRT.
+            double_sweep = sweep.low < ref.low-sweep_need and sweep.high > ref.high+sweep_need
+            if double_sweep: continue
+            quality = 72 + min(8, int(max(0, sweep_depth_range)*30))
+            quality += min(7, int(close_back*9))
+            quality += min(4, int(wick_ratio*8))
             quality += 4 if _bias("M15", m15) == wanted else 0
             quality += 3 if _bias("H4", h4) == wanted else 0
             quality += min(4, int(abs(gap)*25))
@@ -99,6 +115,8 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
                 "sweep_price": sweep.low if side == "LONG" else sweep.high,
                 "confirm_price": confirm.close, "target": ref.high if side == "LONG" else ref.low,
                 "gap": gap, "quality": quality, "confidence": min(93, quality-4), "amd_match": amd_match,
+                "sweep_depth_range": sweep_depth_range, "close_back": close_back, "wick_ratio": wick_ratio,
+                "phase": "P3_DELIVERY_CONFIRMED",
             })
     return max(candidates, key=lambda e: (e["amd_match"], e["quality"], e["confirm_dt"]), default=None)
 
@@ -115,6 +133,7 @@ def format_message(e: dict) -> str:
         f"📦 CRT Range: {_p(e['symbol'],e['low'])}–{_p(e['symbol'],e['high'])}",
         f"50% диапазона: {_p(e['symbol'],e['mid'])}", f"🧹 Манипуляция: снят {swept} до {_p(e['symbol'],e['sweep_price'])}",
         f"✅ Подтверждение: возврат + displacement через 50% · {_p(e['symbol'],e['confirm_price'])}",
+        f"Фаза: {e.get('phase','P3_DELIVERY_CONFIRMED')} · возврат внутрь {e.get('close_back',0)*100:.0f}% · sweep {e.get('sweep_depth_range',0)*100:.0f}% диапазона",
         f"🎯 Противоположная граница CRT: {_p(e['symbol'],e['target'])}", f"🔗 Связка AMD: {amd}",
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", f"Вероятность: {e['confidence']}%", "",
         "Факт: CRT отправлен только после закрытого sweep, возврата в диапазон и подтверждённого движения через середину диапазона."

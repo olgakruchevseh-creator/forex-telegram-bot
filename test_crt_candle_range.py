@@ -23,6 +23,27 @@ class CrtTests(unittest.TestCase):
             e=crt.detect_crt('EUR/USD',h1,other,other,{'EUR':.1,'USD':0})
         self.assertTrue(e['amd_match']); self.assertIn('AMD совпадает',crt.format_message(e))
 
+
+    def test_rejects_double_sweep_manipulation(self):
+        h1=[c(i) for i in range(25)]
+        h1[22]=c(22,100.4,101.0,100.0,100.6)
+        h1[23]=c(23,100.5,101.2,99.8,100.4)  # swept both sides -> ambiguous
+        h1[24]=c(24,100.4,100.9,100.3,100.8)
+        other=[c(i) for i in range(25)]
+        with patch.object(crt,'atr',return_value=.5), patch.object(crt,'_bias',return_value=1):
+            self.assertIsNone(crt.detect_crt('EUR/USD',h1,other,other,{'EUR':.1,'USD':0}))
+
+    def test_strict_sequence_does_not_bridge_gap(self):
+        h1=[c(i) for i in range(26)]
+        h1[22]=c(22,100.4,101.0,100.0,100.6)
+        h1[23]=c(23,100.4,100.8,100.2,100.5)  # no sweep
+        h1[24]=c(24,100.3,100.7,99.8,100.2)   # delayed sweep must not attach to ref 22
+        h1[25]=c(25,100.3,100.9,100.2,100.8)
+        other=[c(i) for i in range(26)]
+        with patch.object(crt,'atr',return_value=.5), patch.object(crt,'_bias',return_value=1):
+            e=crt.detect_crt('EUR/USD',h1,other,other,{'EUR':.1,'USD':0})
+        self.assertTrue(e is None or e.get('ref_dt') != '22')
+
     def test_chart_png(self):
         bars=[c(i) for i in range(25)]
         e={'symbol':'EUR/USD','side':'LONG','low':100,'high':101,'mid':100.5,'sweep_price':99.8,'confirm_price':100.8,'sweep_dt':'23','confirm_dt':'24','amd_match':True}

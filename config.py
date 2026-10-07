@@ -594,6 +594,8 @@ CRT_MIN_SWEEP_ATR = 0.06
 CRT_MID_CONFIRM_ATR = 0.05
 CRT_MIN_CONFIRM_BODY_ATR = 0.22
 CRT_MAX_SWEEP_AGE_H1 = 3
+# Канонический CRT: reference -> manipulation идут подряд. Старый расширенный поиск можно вернуть False.
+CRT_STRICT_THREE_CANDLE_SEQUENCE = True
 CRT_MAX_CONFIRM_AGE_H1 = 1
 CRT_MIN_STRENGTH_GAP = 0.04
 CRT_CHART_IMAGES_ENABLED = True
