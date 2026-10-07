@@ -39,6 +39,7 @@ class OrderBlock:
     fvg: bool = False
     age: int = 0
     last_dt: str = ""
+    last_h1_dt: str = ""
     retest_sent: bool = False
     invalid: bool = False
     invalidation_reason: str = ""
@@ -137,11 +138,14 @@ def _strength(block: OrderBlock, strength: dict[str, float]) -> tuple[bool, floa
 def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: list[Candle], strength: dict[str, float]) -> dict | None:
     if block.retest_sent or block.invalid or len(h1) < 20 or len(h4) < 20 or len(m15) < 20:
         return None
-    # Реакция от уже найденного H1/H4 блока подтверждается закрытой M15.
-    current = m15[-1] if m15[-1].dt > block.created_dt else h1[-1]
-    confirm_tf = "M15" if current is m15[-1] else "H1"
-    if current.dt <= block.created_dt or current.dt == block.last_dt:
+    # M15 may confirm the reaction path, but a primary Order Block alert is
+    # released only on a NEW CLOSED H1.  This prevents half-hour/quarter-hour
+    # delivery and keeps the project-wide H1-close policy deterministic.
+    current = h1[-1]
+    confirm_tf = "H1"
+    if current.dt <= block.created_dt or current.dt == block.last_h1_dt:
         return None
+    block.last_h1_dt = current.dt
     block.last_dt = current.dt
     block.age += 1
     av = atr(h1, 14)
@@ -225,11 +229,11 @@ def format_message(event: dict) -> str:
         f"Таймфрейм блока: {event['tf']}",
         f"Зона Order Block: {_price(event['symbol'], event['low'])}–{_price(event['symbol'], event['high'])}",
         f"Пробитый уровень BOS: {_price(event['symbol'], event['bos_level'])}",
-        f"Цена закрытия {event.get('confirm_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
+        f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
         f"Сопутствующий FVG: {fvg}",
         f"Реакция зоны: {event.get('reaction_path', 'подтверждена')}",
         f"LTF структура: {' / '.join(event.get('structure_confirmations') or [])}",
-        f"Подтверждение реакции: закрытая {event.get('confirm_tf', 'H1')}; H4 не противоречит",
+        "Подтверждение реакции: закрытая H1; M15 только подтверждает реакцию/структуру; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%",
         *( [f"Mitigation Block: подтверждённый контекст · {event['mitigation_block']['tf']} · {event['mitigation_block']['reaction_path']} (то же семейство OB/MB, не отдельный голос)"] if event.get('mitigation_block') else [] ), "",
