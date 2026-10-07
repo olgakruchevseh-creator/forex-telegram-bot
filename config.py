@@ -785,7 +785,8 @@ REGIME_EXPANSION_VOL_RATIO = 1.22
 
 # Quasimodo Engine — scenario reversal; zone formation is internal only.
 QUASIMODO_ENABLED = True
-QUASIMODO_TIMEFRAMES = ("H1", "M15", "M5")
+QUASIMODO_TIMEFRAMES = ("H1", "M15", "M5")  # internal structure/confluence
+QUASIMODO_ALERT_TIMEFRAMES = ("H1",)  # standalone Telegram events: closed H1 only
 QUASIMODO_LOOKBACK = 100
 QUASIMODO_PIVOT_BARS = 2
 QUASIMODO_MAX_AGE_BARS = 30
@@ -796,6 +797,10 @@ QUASIMODO_INVALIDATION_ATR = 0.10
 QUASIMODO_MIN_DIRECTIONAL_BARS = 3
 QUASIMODO_EQUIVALENT_MOVE_ATR = 0.85
 QUASIMODO_CHART_IMAGES_ENABLED = True
+# Patch 4b: quality/freshness. First/second distinct QML retest allowed; worn levels expire.
+QUASIMODO_MAX_RETESTS = 2
+QUASIMODO_RETEST_QUALITY_PENALTY = 7
+QUASIMODO_MIN_QUALITY = 78
 
 # CISD (Change in State of Delivery) — internal early delivery-shift context.
 # Never a standalone Telegram source; correlated with MSS/BOS as one family.

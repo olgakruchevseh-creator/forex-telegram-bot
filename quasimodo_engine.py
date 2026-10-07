@@ -25,6 +25,7 @@ class QMSetup:
     setup_id:str; symbol:str; tf:str; side:int; qml:float; zone_low:float; zone_high:float
     extreme:float; mss_level:float; created_dt:str; break_dt:str; displacement_atr:float
     last_seen_dt:str=""; touch_dt:str=""; delivered:bool=False; invalid:bool=False
+    sweep_atr:float=0.0; touch_count:int=0; qm_quality:int=0; confluence_score:int=0
 
 def _path():
     root=os.getenv("STATE_DIR","").strip()
@@ -38,13 +39,32 @@ def _save(x):
     t.write_text(json.dumps(x,ensure_ascii=False,indent=2)); t.replace(p)
 def _price(s,v): return f"{v:.3f}" if "JPY" in s else f"{v:.5f}"
 
+def _normalize_pivots(pivots):
+    """Keep a clean alternating ZigZag, retaining the more extreme same-side pivot."""
+    out=[]
+    for p in sorted(pivots,key=lambda x:x[0]):
+        if not out or p[1] != out[-1][1]:
+            out.append(p); continue
+        if (p[1] > 0 and p[2] >= out[-1][2]) or (p[1] < 0 and p[2] <= out[-1][2]):
+            out[-1]=p
+    return out
+
 def _pivots(bars,n=2):
     out=[]
     for i in range(n,len(bars)-n):
         c=bars[i]; around=bars[i-n:i]+bars[i+1:i+n+1]
         if c.high>max(x.high for x in around): out.append((i,1,c.high,c.dt))
         if c.low<min(x.low for x in around): out.append((i,-1,c.low,c.dt))
-    return sorted(out,key=lambda x:x[0])
+    return _normalize_pivots(out)
+
+def _prior_trend(pivots, shoulder_pos, side):
+    """Require an actual trend into the left shoulder, not an isolated QM-like shape."""
+    hist=pivots[max(0,shoulder_pos-4):shoulder_pos+1]
+    highs=[p[2] for p in hist if p[1]>0]; lows=[p[2] for p in hist if p[1]<0]
+    if len(highs)<2 or len(lows)<2: return False
+    if side < 0:  # bearish QM must reverse an uptrend
+        return highs[-1] > highs[-2] and lows[-1] > lows[-2]
+    return highs[-1] < highs[-2] and lows[-1] < lows[-2]
 
 def _newest_setup(symbol,tf,bars):
     if len(bars)<35:return None
@@ -56,7 +76,7 @@ def _newest_setup(symbol,tf,bars):
     zone_atr=float(getattr(cfg,'QUASIMODO_ZONE_ATR',.16))*av
     max_age=int(getattr(cfg,'QUASIMODO_MAX_AGE_BARS',30)); candidates=[]
     # Consecutive alternating H-L-H or L-H-L pivots. The last extreme must take liquidity.
-    for a,b,c in zip(piv,piv[1:],piv[2:]):
+    for pos,(a,b,c) in enumerate(zip(piv,piv[1:],piv[2:])):
         if not (a[0]<b[0]<c[0]): continue
         if (a[1],b[1],c[1])==(1,-1,1) and c[2]>=a[2]+min_sweep:
             side=-1; qml=a[2]; extreme=c[2]; mss=b[2]
@@ -65,14 +85,60 @@ def _newest_setup(symbol,tf,bars):
             side=1; qml=a[2]; extreme=c[2]; mss=b[2]
             breakers=[(i,x) for i,x in enumerate(bars[c[0]+1:],start=c[0]+1) if x.close>mss]
         else: continue
+        if not _prior_trend(piv,pos,side): continue
         if not breakers: continue
         bi,br=breakers[0]; body=abs(br.close-br.open)/av; rng=(br.high-br.low)/av
         if body<min_disp or rng<min_disp*1.10: continue
         if len(bars)-1-bi>max_age: continue
         zl,zh=qml-zone_atr,qml+zone_atr
         sid=f"{symbol}|{tf}|{side}|{round(qml,6)}|{br.dt[:19]}"
-        candidates.append((bi,QMSetup(sid,symbol,tf,side,qml,zl,zh,extreme,mss,c[3],br.dt,body)))
+        sweep_atr=abs(extreme-qml)/av
+        candidates.append((bi,QMSetup(sid,symbol,tf,side,qml,zl,zh,extreme,mss,c[3],br.dt,body,sweep_atr=sweep_atr)))
     return max(candidates,key=lambda x:x[0])[1] if candidates else None
+
+def _zone_touch_episodes(post, z):
+    """Count distinct entries into the QML zone; consecutive candles are one retest."""
+    episodes=0; inside=False
+    for c in post:
+        hit=c.low<=z.zone_high and c.high>=z.zone_low
+        if hit and not inside: episodes+=1
+        inside=hit
+    return episodes
+
+def _smc_confluence(z,bars,av):
+    """Small non-voting quality bonus for local imbalance/origin alignment around BOS."""
+    try: bi=next(i for i,c in enumerate(bars) if c.dt==z.break_dt)
+    except StopIteration: return 0
+    score=0
+    # FVG born around the displacement leg and overlapping/adjacent to QML.
+    for i in range(max(1,bi-3),min(len(bars)-1,bi+2)):
+        a,b,c=bars[i-1],bars[i],bars[i+1]
+        if z.side>0 and a.high<c.low:
+            gl,gh=a.high,c.low
+        elif z.side<0 and a.low>c.high:
+            gl,gh=c.high,a.low
+        else: continue
+        if gh>=z.zone_low-av*.10 and gl<=z.zone_high+av*.10: score=max(score,6)
+    # Origin candle before displacement: opposite body overlapping the QML zone.
+    for c in reversed(bars[max(0,bi-7):bi]):
+        opposite=(z.side>0 and c.close<c.open) or (z.side<0 and c.close>c.open)
+        if not opposite: continue
+        lo,hi=min(c.open,c.close),max(c.open,c.close)
+        if hi>=z.zone_low and lo<=z.zone_high: score+=5
+        break
+    return min(10,score)
+
+def _quality(z,meta,bars,av):
+    age=next((len(bars)-1-i for i,c in enumerate(bars) if c.dt==z.break_dt),0)
+    freshness=max(0,8-min(8,age//3))
+    sweep=min(8,max(0,int(round((z.sweep_atr-.10)*8))))
+    disp=min(10,max(0,int(round((z.displacement_atr-.70)*10))))
+    reaction=max(0,min(10,int(round((meta['score']-60)*.35))))
+    confluence=_smc_confluence(z,bars,av)
+    retest_penalty=max(0,z.touch_count-1)*int(getattr(cfg,'QUASIMODO_RETEST_QUALITY_PENALTY',7))
+    q=max(0,min(100,72+freshness+sweep+disp+reaction+confluence-retest_penalty))
+    z.qm_quality=q; z.confluence_score=confluence
+    return q
 
 def _reaction(z,bars,by_tf):
     post=[c for c in bars if c.dt>z.break_dt]
@@ -85,6 +151,10 @@ def _reaction(z,bars,by_tf):
     # Structural invalidation beyond the liquidity extreme.
     inv_buf=float(getattr(cfg,'QUASIMODO_INVALIDATION_ATR',.10))*av
     if (z.side>0 and c.close<z.extreme-inv_buf) or (z.side<0 and c.close>z.extreme+inv_buf):
+        z.invalid=True; return None
+    z.touch_count=_zone_touch_episodes(post,z)
+    max_retests=int(getattr(cfg,'QUASIMODO_MAX_RETESTS',2))
+    if z.touch_count>max_retests:
         z.invalid=True; return None
     if c.low<=z.zone_high and c.high>=z.zone_low: z.touch_dt=c.dt
     if not z.touch_dt:return None
@@ -101,12 +171,14 @@ def _reaction(z,bars,by_tf):
     if not (multi or equiv):return None
     early=ohlc_movement.early_entry_check(by_tf,z.side)
     if not early.get('allow',True):return None
+    quality=_quality(z,{'score':score},bars,av)
+    if quality<int(getattr(cfg,'QUASIMODO_MIN_QUALITY',78)): return None
     z.delivered=True
-    return {'dt':c.dt,'close':c.close,'guard':guard,'directional':directional,'net_atr':net,'score':score,'early':early}
+    return {'dt':c.dt,'close':c.close,'guard':guard,'directional':directional,'net_atr':net,'score':score,'early':early,'quality':quality,'confluence':z.confluence_score,'touch_count':z.touch_count}
 
 def format_message(z,meta):
     module_evidence_bus.publish('QUASIMODO', z, **meta)
-    side='LONG' if z.side>0 else 'SHORT'; quality=max(76,min(96,int(round(78+(z.displacement_atr-.7)*8+(meta['score']-55)*.15))))
+    side='LONG' if z.side>0 else 'SHORT'; quality=int(meta.get('quality',z.qm_quality or 78))
     prob=max(70,min(92,quality-5))
     return '\n'.join([
       '━━━━━━━━━━━━━━━━━━','🔄 QUASIMODO — QM · РЕАКЦИЯ ПОДТВЕРЖДЕНА','━━━━━━━━━━━━━━━━━━','',
@@ -117,7 +189,8 @@ def format_message(z,meta):
       '🕯 Подтверждение: возврат в QM Zone + удержание + OHLC Movement',
       f'🕐 Закрытие подтверждения: {meta["dt"]}',f'💵 Цена: {_price(z.symbol,meta["close"])}',
       f'OHLC: {meta["directional"]} направл. свеч. · {meta["net_atr"]:.2f} ATR · score {meta["score"]:.0f}/100',
-      f'Качество: {quality}/100',f'Вероятность: {prob}%','',
+      f'QML freshness: ретест {meta.get("touch_count",z.touch_count)} · SMC confluence +{meta.get("confluence",z.confluence_score)}',
+      f'Качество QM: {quality}/100',f'Вероятность: {prob}%','',
       'Структурная цепочка ZigZag/экстремум → sweep → MSS/BOS → displacement → QM учитывается как одно коррелированное семейство.',
       'Факт: образование QM-зоны само по себе не отправляется. Событие создано только после подтверждённого возврата и реакции.'
     ])
@@ -125,11 +198,17 @@ def format_message(z,meta):
 def process_market(market,strength=None):
     _PENDING_CARDS.clear(); state=_load(); first=not bool(state.get('bootstrapped'))
     stored={k:QMSetup(**v) for k,v in (state.get('setups') or {}).items()}; pending=state.setdefault('pending_events',{}); messages=[]
-    for raw in pending.values():
-        z=QMSetup(**raw['setup']); text=raw['text']; messages.append(text); _PENDING_CARDS[text]=(z,freeze_by_tf(market.get(z.symbol) or {}))
+    alert_tfs=tuple(getattr(cfg,'QUASIMODO_ALERT_TIMEFRAMES',('H1',)))
+    for key,raw in list(pending.items()):
+        z=QMSetup(**raw['setup']); text=raw['text']
+        if z.tf not in alert_tfs:
+            pending.pop(key,None); continue
+        messages.append(text); _PENDING_CARDS[text]=(z,freeze_by_tf(market.get(z.symbol) or {}))
     for symbol in cfg.PAIRS:
       by_tf=market.get(symbol) or {}
-      for tf in getattr(cfg,'QUASIMODO_TIMEFRAMES',('H1','M15','M5')):
+      # Standalone Telegram events are closed-H1 only. M15/M5 remain internal
+      # confirmation timeframes through OHLC Movement and the shared context.
+      for tf in alert_tfs:
         if tf not in TF_MINUTES:continue
         bars=closed_candles(by_tf.get(tf) or [],TF_MINUTES[tf]); look=int(getattr(cfg,'QUASIMODO_LOOKBACK',100))
         if len(bars)<35:continue
