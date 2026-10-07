@@ -646,6 +646,38 @@ def reaction_size(c: Candle, zone: Zone, atr_v: float) -> bool:
     return body >= need or abs(c.close - zone.mid) >= need
 
 
+def _parse_market_dt(raw: str) -> Optional[datetime]:
+    if not raw:
+        return None
+    text = str(raw).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def independent_touch(zone: Zone, candle_dt: str, tf_key: str) -> bool:
+    """Count only separated tests; consecutive candles in one visit are one test."""
+    if not zone.last_touch_dt:
+        return True
+    current = _parse_market_dt(candle_dt)
+    previous = _parse_market_dt(zone.last_touch_dt)
+    if current is None or previous is None:
+        return candle_dt != zone.last_touch_dt
+    bars = max(1, int(getattr(cfg, "LEVEL_TOUCH_COOLDOWN_BARS", 3)))
+    required = timedelta(minutes=int(TF_MINUTES.get(tf_key, 60)) * bars)
+    return current - previous >= required
+
+
 def pick_work_tf(zone: Zone) -> str:
     """Финальные события Levels подтверждаются только закрытой H1-свечой.
 
@@ -1064,9 +1096,10 @@ def detect_events(
     if not bounce_just_confirmed and zone.state in ("активна", "протестирована", "отбой подтверждён", "ослаблена"):
         if zone.kind == "resistance" and closed_back(c1, zone, "resistance") and reaction_size(c1, zone, atr_v):
             if c1.high >= zone.low:
-                zone.tests_recent += 1
-                zone.last_test_ts = _now()
-                zone.last_touch_dt = c1.dt
+                if independent_touch(zone, c1.dt, work):
+                    zone.tests_recent += 1
+                    zone.last_test_ts = _now()
+                    zone.last_touch_dt = c1.dt
                 if getattr(cfg, "LEVEL_BOUNCE_REQUIRE_FOLLOW_THROUGH", True):
                     if not zone.pending_bounce_dt:
                         zone.pending_bounce_side = "SHORT"
@@ -1081,9 +1114,10 @@ def detect_events(
                     ))
         elif zone.kind == "support" and closed_back(c1, zone, "support") and reaction_size(c1, zone, atr_v):
             if c1.low <= zone.high:
-                zone.tests_recent += 1
-                zone.last_test_ts = _now()
-                zone.last_touch_dt = c1.dt
+                if independent_touch(zone, c1.dt, work):
+                    zone.tests_recent += 1
+                    zone.last_test_ts = _now()
+                    zone.last_touch_dt = c1.dt
                 if getattr(cfg, "LEVEL_BOUNCE_REQUIRE_FOLLOW_THROUGH", True):
                     if not zone.pending_bounce_dt:
                         zone.pending_bounce_side = "LONG"

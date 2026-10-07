@@ -278,6 +278,7 @@ LEVEL_FALSE_BREAK_MIN_STRENGTH_GAP = 0.05
 LEVEL_DIRECTION_MEMORY_HOURS = 12
 # Levels remain context-first: touch alone is never a LONG/SHORT fact.
 LEVEL_TOUCH_IS_SIGNAL = False
+LEVEL_TOUCH_COOLDOWN_BARS = 3  # consecutive H1 candles inside one visit count as one test
 ZIGZAG_SCANNER_ENABLED = True
 ZIGZAG_CHART_IMAGES_ENABLED = True
 PATTERNS_ENABLED = True
