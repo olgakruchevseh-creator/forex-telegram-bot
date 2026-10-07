@@ -264,8 +264,16 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
     if len(completed_lengths) >= 3:
         typical = float(median(completed_lengths[-10:]))
         elapsed = max(0, len(bars_by_tf.get("H1") or []) - 1 - h1_swings[-1].index) if h1_swings else 0
-        duration_low = max(1, int(math.floor(typical * .65 - elapsed)))
-        duration_high = max(duration_low, int(math.ceil(typical * 1.35 - elapsed)))
+        # A projected structural corner must respect the same minimum-leg
+        # contract as confirmed ZigZag geometry.  A 1–2 H1 remainder is noise,
+        # not a new structural wave/corner.  Keep at least 3 *future* closed H1
+        # bars before the projected turn, even when the historical median says
+        # the current leg is statistically near completion.
+        min_future = max(3, int(getattr(cfg, "ZIGZAG_MIN_BARS", 3)))
+        raw_low = int(math.floor(typical * .65 - elapsed))
+        raw_high = int(math.ceil(typical * 1.35 - elapsed))
+        duration_low = max(min_future, raw_low)
+        duration_high = max(duration_low, min_future, raw_high)
         duration_samples = min(10, len(completed_lengths))
     return {
         "symbol": symbol,

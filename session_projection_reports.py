@@ -465,7 +465,8 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     # The first four lines are intentionally scan-friendly in Telegram: the pair
     # and the three independent engines are visible before any explanation.
     lines = ["🔭 ЭХО + 🎯 СЛЕДУЮЩИЙ PIVOT + ↕️ ADAPTIVE ZIGZAG — ЕДИНЫЙ СЦЕНАРИЙ",
-             f"💱 Пара: {symbol}"]
+             f"💱 Пара: {symbol}",
+             "━━━━━━━━━━━━━━━━━━"]
     if eside:
         lines.append(f"🔭 Эхо: {_side_badge(eside)} · вероятность {er.get('direction_probability', '—')}%")
     else:
@@ -485,6 +486,9 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
         lines.append(f"↕️ Adaptive ZigZag: {_side_badge(zside)} · ≈ {zlow}–{zhigh} закрытых H1-свечей до вероятного угла")
     else:
         lines.append(f"↕️ Adaptive ZigZag: {_side_badge(zside)} · окно до следующего угла пока без достаточной статистики")
+
+    # Close the compact engine stack before common scenario commentary.
+    lines.append("━━━━━━━━━━━━━━━━━━")
 
     period = str(bundle.get("period") or "")
     if period:
