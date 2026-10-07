@@ -16,6 +16,7 @@ import echo_projection
 import news as newsmod
 import next_pivot_projection
 import zigzag_scanner
+import session_pullback_consensus
 from analysis import closed_candles, currency_strength
 
 log = logging.getLogger("fxbot.session_projections")
@@ -481,7 +482,8 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     zside = "LONG" if zdir > 0 else ("SHORT" if zdir < 0 else None)
     zlow, zhigh = int(zz.get("duration_low") or 0), int(zz.get("duration_high") or 0)
     if zlow and zhigh:
-        lines.append(f"Adaptive ZigZag: {_side_badge(zside)} · ≈ {zlow}–{zhigh} закрытых H1-свечей до вероятного угла")
+        zwindow = str(zlow) if zlow == zhigh else f"{zlow}–{zhigh}"
+        lines.append(f"Adaptive ZigZag: {_side_badge(zside)} · ≈ {zwindow} закрытых H1-свечей до вероятного угла")
     else:
         lines.append(f"Adaptive ZigZag: {_side_badge(zside)} · окно до следующего угла пока без достаточной статистики")
 
@@ -490,6 +492,9 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     period = str(bundle.get("period") or "")
     if period:
         lines.append(f"Период: {period}")
+    pullback = bundle.get("pullback_consensus") or {}
+    if pullback.get("text"):
+        lines.append(str(pullback["text"]))
     if pr:
         reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else None)
         reaction_text = {"LONG": "ЛОНГ", "SHORT": "ШОРТ"}.get(reaction, "НЕЙТРАЛЬНО")
@@ -711,6 +716,13 @@ def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state:
             zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
             bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot, "zigzag": zz,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}
+            pb_states = state.setdefault("session_pullback_consensus", {})
+            previous_pb = pb_states.get(symbol) or {}
+            pullback = session_pullback_consensus.analyze(symbol, bundle, by_tf, previous_pb)
+            bundle["pullback_consensus"] = pullback
+            pb_states[symbol] = {"stage": pullback.get("stage"), "continuation": pullback.get("continuation")}
+            if len(pb_states) > 20:
+                state["session_pullback_consensus"] = {k: pb_states[k] for k in list(pb_states)[-20:]}
             bundle["caption"] = combined_pair_caption(bundle)
             bundle["image"] = render_unified_scenario_chart(bundle, by_tf)
             bundles.append(bundle)
