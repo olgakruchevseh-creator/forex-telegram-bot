@@ -54,6 +54,31 @@ def _percentile_rank(values, x):
     if not vals: return 50.0
     return 100.0*sum(v <= float(x) for v in vals)/len(vals)
 
+def _quantile(values, q):
+    """Linear empirical quantile (Hyndman-Fan type 7 / NumPy default style)."""
+    vals=sorted(float(v) for v in values if math.isfinite(float(v)))
+    if not vals: return 0.0
+    q=max(0.0,min(1.0,float(q)))
+    pos=(len(vals)-1)*q; lo=int(math.floor(pos)); hi=int(math.ceil(pos))
+    if lo==hi: return vals[lo]
+    return vals[lo]+(vals[hi]-vals[lo])*(pos-lo)
+
+def _robust_scale(values):
+    """Median/MAD robust centre and Gaussian-consistent scale."""
+    vals=[float(v) for v in values if math.isfinite(float(v))]
+    if not vals: return 0.0, 0.0
+    m=median(vals); mad=median([abs(v-m) for v in vals])
+    return m, 1.4826*mad
+
+def _adaptive_band(values):
+    """Distribution-free lower/upper tertiles plus robust diagnostics."""
+    vals=[float(v) for v in values if math.isfinite(float(v))]
+    if len(vals)<12:
+        return {'low':None,'high':None,'median':None,'mad_sigma':None,'samples':len(vals),'method':'INSUFFICIENT'}
+    m,rs=_robust_scale(vals)
+    return {'low':_quantile(vals,1/3),'high':_quantile(vals,2/3),'median':m,
+            'mad_sigma':rs,'samples':len(vals),'method':'EMPIRICAL_TERTILES_MAD'}
+
 def _zscore(values, x):
     vals=[float(v) for v in values if math.isfinite(float(v))]
     if len(vals)<8: return 0.0
@@ -166,12 +191,47 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         strength_gap=float((strength or {}).get(base,0))-float((strength or {}).get(quote,0))
     except Exception: strength_gap=0.0
 
-    if persistence>=62: label='ТРЕНДОВЫЙ'
-    elif mean_reversion>=62: label='ВОЗВРАТНЫЙ'
+    # Adaptive thresholds are estimated from this pair's own causal H1 history.
+    # Tertiles are distribution-free: no universal EUR/USD=GBP/USD cut-off is assumed.
+    # MAD is retained as a robust scale diagnostic and for later calibration.
+    hist_persistence=[]; hist_impulse=[]; hist_noise=[]; hist_volratio=[]
+    abs_rets=[abs(x) for x in rets]
+    for end in range(40,len(closes)):
+        cw=closes[:end+1]
+        e=_efficiency(cw[-25:])
+        bb=bars[max(0,end-47):end+1]
+        br=[abs(float(x.close)-float(x.open)) for x in bb]
+        rr=[max(0.0,float(x.high)-float(x.low)) for x in bb]
+        bdy=mean([x/y for x,y in zip(br,rr) if y>0] or [0.0])
+        rr_log=[math.log(b/a) for a,b in zip(cw,cw[1:]) if a>0 and b>0]
+        e8,e24,e72=_er(cw,8),_er(cw,24),_er(cw,72)
+        eb=.25*e8+.50*e24+.25*e72
+        ac=_corr(rr_log[:-1],rr_log[1:]) if len(rr_log)>10 else 0.0
+        hh=_hurst_proxy(cw)
+        hist_persistence.append(_clip(100*(.34*e+.28*eb+.23*hh+.15*((ac+1)/2))))
+        hist_impulse.append(_clip(100*(.55*bdy+.45*e)))
+        hist_noise.append(_clip(100*(.60*(1-e)+.40*(1-bdy))))
+        idx=max(1,end)
+        recent_abs=abs_rets[max(0,idx-12):idx]
+        base_abs=abs_rets[max(0,idx-120):idx]
+        vb=mean(base_abs) if base_abs else 0.0
+        vr=(mean(recent_abs)/vb) if recent_abs and vb else 1.0
+        hist_volratio.append(_clip(50+35*math.log(max(.25,min(4.0,vr)),2)))
+    trend_band=_adaptive_band(hist_persistence)
+    impulse_band=_adaptive_band(hist_impulse)
+    noise_band=_adaptive_band(hist_noise)
+    volatility_band=_adaptive_band(hist_volratio)
+    trend_lo=trend_band.get('low') if trend_band.get('low') is not None else 38.0
+    trend_hi=trend_band.get('high') if trend_band.get('high') is not None else 62.0
+    if persistence>=trend_hi: label='ТРЕНДОВЫЙ'
+    elif persistence<=trend_lo: label='ВОЗВРАТНЫЙ'
     else: label='СМЕШАННЫЙ'
-    if volatility>=68: label += ' · БЫСТРЫЙ'
-    elif noise>=68: label += ' · ШУМНЫЙ'
-    elif volatility<=35: label += ' · СПОКОЙНЫЙ'
+    vol_lo=volatility_band.get('low') if volatility_band.get('low') is not None else 35.0
+    vol_hi=volatility_band.get('high') if volatility_band.get('high') is not None else 68.0
+    noise_hi=noise_band.get('high') if noise_band.get('high') is not None else 68.0
+    if volatility>=vol_hi: label += ' · БЫСТРЫЙ'
+    elif noise>=noise_hi: label += ' · ШУМНЫЙ'
+    elif volatility<=vol_lo: label += ' · СПОКОЙНЫЙ'
 
     # Character is also session-dependent.  Compare only closed H1 bars that
     # historically belonged to the same Amsterdam session as the latest bar.
@@ -213,6 +273,13 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         'session_range_atr':round(session_range_atr,3),'session_periodic_factor':round(periodic_factor,3),
         'session_activity':round(session_activity,1),
         'atr_pct':round(atr_pct,4),'volatility_ratio':round(vol_ratio,3),
+        'adaptive_thresholds':{
+            'trend_persistence':{k:(round(v,3) if isinstance(v,float) else v) for k,v in trend_band.items()},
+            'impulse':{k:(round(v,3) if isinstance(v,float) else v) for k,v in impulse_band.items()},
+            'noise':{k:(round(v,3) if isinstance(v,float) else v) for k,v in noise_band.items()},
+            'volatility':{k:(round(v,3) if isinstance(v,float) else v) for k,v in volatility_band.items()},
+            'quantiles':[round(1/3,6),round(2/3,6)],'causal':True,'observe_only':True,
+        },
         'strength_gap':round(strength_gap,4),'reliability':round(reliability,1),
     }
 

@@ -50,3 +50,19 @@ def test_trend_has_lower_sign_entropy_and_higher_directional_persistence():
     b=pcm.analyze('EUR/USD',{'H1':bars(False)}, {})
     assert a['directional_persistence'] > b['directional_persistence']
     assert a['return_sign_entropy'] < b['return_sign_entropy']
+
+def test_adaptive_threshold_families_are_causal_and_ordered():
+    r=pcm.analyze('EUR/USD',{'H1':bars(True,180)}, {})
+    a=r['adaptive_thresholds']
+    assert a['causal'] and a['observe_only']
+    for family in ('trend_persistence','impulse','noise','volatility'):
+        b=a[family]
+        assert b['method'] == 'EMPIRICAL_TERTILES_MAD'
+        assert b['samples'] >= 12
+        assert b['low'] <= b['median'] <= b['high']
+        assert b['mad_sigma'] >= 0
+
+def test_adaptive_thresholds_change_with_pair_history():
+    a=pcm.analyze('EUR/USD',{'H1':bars(True,180)}, {})['adaptive_thresholds']
+    b=pcm.analyze('GBP/USD',{'H1':bars(False,180)}, {})['adaptive_thresholds']
+    assert a['noise']['median'] != b['noise']['median'] or a['impulse']['median'] != b['impulse']['median']
