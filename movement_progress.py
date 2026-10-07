@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 import config as cfg
+import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 log = logging.getLogger("fxbot.movement_progress")
@@ -58,8 +59,11 @@ def _strength_ok(symbol: str, side: str, strength: dict[str, float]) -> tuple[bo
     return (gap >= need if side == "LONG" else gap <= -need), gap
 
 
-def _movement_mode(direction: int, d1_bias: int, h4_bias: int) -> str:
-    """D1 защищает старший маршрут от ошибочной подписи «основной импульс»."""
+def _movement_mode(direction: int, d1_bias: int, h4_bias: int, by_tf: dict | None = None, symbol: str = "") -> str:
+    """Shared route mode. With market data, counter-direction needs real H1 geometry."""
+    if by_tf is not None:
+        return pullback_regime.classify(symbol, direction, d1_bias, h4_bias, by_tf).mode
+    # Compatibility fallback for callers/tests without candle context.
     if d1_bias and d1_bias != direction:
         return "PULLBACK"
     if h4_bias == direction:
@@ -84,7 +88,7 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
     side = "LONG" if direction > 0 else "SHORT"
     _strength_confirmed, gap = _strength_ok(symbol, side, strength)
     directed_gap = gap * direction
-    mode = _movement_mode(direction, d1_view.bias, h4_view.bias)
+    mode = _movement_mode(direction, d1_view.bias, h4_view.bias, by_tf, symbol)
     if mode == "IMPULSE":
         min_gap = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .03))
     elif mode == "LOCAL":
@@ -204,7 +208,7 @@ def analyze_for_side(symbol: str, by_tf: dict, strength: dict[str, float], side:
         "anchor": anchor, "target": target, "target_tf": target_tf, "targets": targets,
         "current": current, "progress": int(round(progress)),
         "remaining": int(round(100-progress)),
-        "mode": _movement_mode(direction, d1_view.bias, h4_view.bias),
+        "mode": _movement_mode(direction, d1_view.bias, h4_view.bias, by_tf, symbol),
         "gap": gap, "h1_dt": h1[-1].dt,
     }
 

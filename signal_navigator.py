@@ -261,7 +261,7 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     d1_view = movement_progress._view("D1", d1)
     h4_view = movement_progress._view("H4", h4)
     mode = movement_progress._movement_mode(
-        direction, d1_view.bias if d1_view else 0, h4_view.bias if h4_view else 0)
+        direction, d1_view.bias if d1_view else 0, h4_view.bias if h4_view else 0, by_tf, symbol)
 
     candidates = []
     target_kind = "high" if direction > 0 else "low"

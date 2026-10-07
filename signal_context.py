@@ -18,6 +18,7 @@ import config as cfg
 import movement_progress
 import ohlc_movement
 import market_regime
+import pullback_regime
 import zigzag_scanner
 import decision_journal
 import evidence_uncertainty_context
@@ -183,7 +184,7 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
     h4_zz = _h4_zigzag(symbol, by_tf)
     gap = _strength_gap(symbol, strength)
     directed_gap = gap * direction
-    mode = movement_progress._movement_mode(direction, views.get("D1", 0), views.get("H4", 0))
+    mode = movement_progress._movement_mode(direction, views.get("D1", 0), views.get("H4", 0), by_tf, symbol)
     route = movement_progress.analyze_for_side(symbol, by_tf, strength, side)
     if not route:
         route = movement_progress.analyze_progress(symbol, by_tf, strength)
@@ -208,8 +209,6 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
     # RANGE/COMPRESSION, not an endlessly extending pullback.
     if regime_name in ("RANGE", "COMPRESSION"):
         mode = regime_name
-    elif against_h4:
-        mode = "PULLBACK"
     return {
         "symbol": symbol,
         "side": side,

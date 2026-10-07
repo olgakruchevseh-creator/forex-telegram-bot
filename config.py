@@ -918,6 +918,8 @@ DEMAND_SUPPLY_FLIP_RETEST_MAX_BARS = 3
 # Weekly audit patch 78+: conservative context additions.
 SIGNAL_PULLBACK_MIN_H1_BARS = 3
 SIGNAL_PULLBACK_EQUIVALENT_MOVE_ATR = 0.85
+# Shared pullback-vs-flat geometry: net/path efficiency on closed H1.
+PULLBACK_MIN_PATH_EFFICIENCY = 0.34
 # Early post-signal protection for confirmed Liquidity Sweep routes.
 # Three closed M15 candles are required; one candle is never treated as a pullback/cancel.
 LIQUIDITY_POST_SIGNAL_M15_CONTROL_ENABLED = True
