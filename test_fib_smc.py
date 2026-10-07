@@ -5,7 +5,7 @@ def test_format_has_required_facts():
        "ob_ok":True,"smc_zone":"Order Block + FVG","sweep_ok":True,"bos_level":1.112,"close":1.113,
        "d1_bias":1,"gap":.2,"quality":91,"confidence":88}
     text=fib_smc.format_message(e)
-    assert "FIB + SMC" in text and "BOS/CHOCH M15" in text and "снятие ликвидности" in text
+    assert "FIB + SMC" in text and "Структурное подтверждение H1" in text and "снятие ликвидности" in text
 
 def test_news_filter_blocks_high_impact_pair_currency():
     from datetime import datetime, timezone, timedelta

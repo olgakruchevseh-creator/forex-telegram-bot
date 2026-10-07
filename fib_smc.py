@@ -17,6 +17,7 @@ from pathlib import Path
 import config as cfg
 import module_evidence_bus
 import ohlc_movement
+import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 log = logging.getLogger("fxbot.fib_smc")
@@ -118,22 +119,27 @@ def _smc_zone_overlap(h1: list[Candle], side: str, zone_low: float, zone_high: f
     return True, ob_low, ob_high, "Order Block + FVG" if fvg else "Order Block"
 
 
-def _m15_confirmation(m15: list[Candle], side: str, av_h1: float) -> tuple[bool, float, float]:
-    if len(m15) < 12:
+def _h1_confirmation(h1: list[Candle], side: str, av_h1: float) -> tuple[bool, float, float]:
+    """Closed-H1 owns delivery.  Confirm a real close through recent structure."""
+    if len(h1) < 10:
         return False, 0.0, 0.0
-    cur = m15[-1]
+    cur = h1[-1]
+    look = max(3, int(getattr(cfg, "FIB_SMC_BOS_LOOKBACK_H1", 5)))
+    prior = h1[-look-1:-1]
+    buffer = av_h1 * float(getattr(cfg, "FIB_SMC_H1_BOS_BUFFER_ATR", .03))
     body = abs(cur.close-cur.open)
-    min_body = av_h1 * float(getattr(cfg, "FIB_SMC_DISPLACEMENT_ATR", .18))
-    look = max(4, int(getattr(cfg, "FIB_SMC_BOS_LOOKBACK_M15", 6)))
-    prior = m15[-look-1:-1]
-    buffer = av_h1 * float(getattr(cfg, "FIB_SMC_BOS_BUFFER_ATR", .03))
+    min_body = av_h1 * float(getattr(cfg, "FIB_SMC_H1_CONFIRM_BODY_ATR", .20))
     if side == "LONG":
-        level = max(c.high for c in prior)
-        ok = cur.close > level + buffer and cur.close > cur.open and body >= min_body
+        level=max(c.high for c in prior); ok=cur.close > level+buffer and cur.close > cur.open and body >= min_body
     else:
-        level = min(c.low for c in prior)
-        ok = cur.close < level - buffer and cur.close < cur.open and body >= min_body
+        level=min(c.low for c in prior); ok=cur.close < level-buffer and cur.close < cur.open and body >= min_body
     return ok, level, body
+
+
+def _aux_confirmation(m15: list[Candle], m5: list[Candle], side: str) -> tuple[int, int]:
+    """M15/M5 are evidence only; never independent signal owners."""
+    wanted=1 if side == "LONG" else -1
+    return _bias("M15", m15), _bias("M5", m5)
 
 
 def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=None, now_utc=None) -> dict | None:
@@ -153,6 +159,14 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
     move = abs(end.price-start.price)
     if av <= 0 or move < av*float(getattr(cfg, "FIB_SMC_MIN_IMPULSE_ATR", 2.2)):
         return None
+    # OTE is measured only on a genuine displacement leg, not on a slow grind.
+    leg = h1[start.index:end.index+1]
+    if len(leg) < 2:
+        return None
+    path = sum(abs(leg[i].close-leg[i-1].close) for i in range(1,len(leg)))
+    efficiency = move/path if path > 0 else 0.0
+    if efficiency < float(getattr(cfg, "FIB_SMC_MIN_IMPULSE_EFFICIENCY", .55)):
+        return None
     wanted = 1 if side == "LONG" else -1
     # D1/H4: запрет только на одновременное сильное противоречие; H4 должен поддерживать setup.
     h4_bias, d1_bias = _bias("H4", h4), _bias("D1", d1)
@@ -171,14 +185,27 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
     touched = any(c.low <= zone_high and c.high >= zone_low for c in recent)
     if not touched:
         return None
+    # Invalidate a body-close beyond the impulse origin / excessive retracement.
+    deep = float(getattr(cfg, "FIB_SMC_DEEP_RETRACE_MAX", .85))
+    invalid = (end.price-move*deep) if side == "LONG" else (end.price+move*deep)
+    if (side == "LONG" and any(c.close < invalid for c in recent)) or (side == "SHORT" and any(c.close > invalid for c in recent)):
+        return None
+    # Shared route classifier prevents RANGE/COMPRESSION from masquerading as a pullback.
+    pb = pullback_regime.classify(symbol, -wanted, d1_bias, h4_bias, by_tf)
+    if pb.mode in ("RANGE", "COMPRESSION"):
+        return None
 
     ob_ok, ob_low, ob_high, smc_zone = _smc_zone_overlap(h1[:end.index+1] + recent, side, zone_low, zone_high, av)
     sweep_ok, sweep_price = _recent_liquidity_sweep(h1, side, zone_low, zone_high, av)
     # Требуем реальную SMC-конфлюэнцию: OB overlap ИЛИ liquidity sweep; лучше оба.
     if not (ob_ok or sweep_ok):
         return None
-    bos_ok, bos_level, body = _m15_confirmation(m15, side, av)
-    if not bos_ok or _bias("M5", m5) != wanted:
+    bos_ok, bos_level, body = _h1_confirmation(h1, side, av)
+    if not bos_ok:
+        return None
+    m15_bias, m5_bias = _aux_confirmation(m15, m5, side)
+    # Lower TF may be neutral; explicit opposite agreement is a veto, never a trigger.
+    if m15_bias == -wanted and m5_bias == -wanted:
         return None
     strength_ok, gap = _strength(symbol, side, strength)
     if not strength_ok:
@@ -197,9 +224,11 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
         "symbol": symbol, "side": side, "zone_low": zone_low, "zone_high": zone_high,
         "fib_min": fib_a, "fib_max": fib_b, "fib_reference": fib_ref, "impulse_start": start.price, "impulse_end": end.price,
         "impulse_start_dt": h1[start.index].dt, "impulse_end_dt": h1[end.index].dt,
-        "confirm_dt": m15[-1].dt, "close": m15[-1].close, "bos_level": bos_level,
+        "confirm_dt": h1[-1].dt, "close": h1[-1].close, "bos_level": bos_level,
         "ob_ok": ob_ok, "ob_low": ob_low, "ob_high": ob_high, "smc_zone": smc_zone,
         "sweep_ok": sweep_ok, "sweep_price": sweep_price, "gap": gap,
+        "impulse_efficiency": efficiency, "pullback_mode": pb.mode, "pullback_bars": pb.bars,
+        "m15_bias": m15_bias, "m5_bias": m5_bias,
         "quality": quality, "confidence": min(94, quality-3), "h4_bias": h4_bias, "d1_bias": d1_bias,
         "news": news_name,
     }
@@ -217,15 +246,17 @@ def format_message(e: dict) -> str:
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", f"🧬 FIB + SMC — {e['side']} ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {e['symbol']}", f"Направление: {e['side']}",
-        "Импульс: H1 · подтверждение: M15 + M5",
+        "Импульс: H1 · основное подтверждение: закрытая H1",
+        f"Маршрут коррекции: {e.get('pullback_mode','LOCAL')} · H1-свечей: {e.get('pullback_bars',0)}",
         f"OTE-зона {e['fib_min']*100:.1f}–{e['fib_max']*100:.1f}%: {_price(e['symbol'], e['zone_low'])}–{_price(e['symbol'], e['zone_high'])}",
         f"Опорный уровень OTE: {e.get('fib_reference', .705)*100:.1f}%",
         f"SMC-подтверждение: {' + '.join(smc)}",
-        f"BOS/CHOCH M15: {_price(e['symbol'], e['bos_level'])}",
+        f"Структурное подтверждение H1: {_price(e['symbol'], e['bos_level'])}",
+        f"M15/M5: вспомогательно · {e.get('m15_bias',0):+d}/{e.get('m5_bias',0):+d}",
         f"Цена подтверждения: {_price(e['symbol'], e['close'])}",
         f"Старший контекст: H4 {e['side']} · D1 {'поддерживает' if e['d1_bias'] == (1 if e['side']=='LONG' else -1) else 'нейтрален'}",
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", f"Вероятность: {e['confidence']}%", "",
-        f"✅ Факт: коррекция вошла в Fib-зону, SMC-контекст подтверждён, после чего закрытая M15 дала структурный слом {e['side']}; M5 и H4 направление подтвердили.",
+        f"✅ Факт: валидный H1 displacement скорректировался в OTE, SMC-контекст подтверждён, после чего закрытая H1 дала структурное подтверждение {e['side']}; M15/M5 используются только как вспомогательный контекст.",
     ])
 
 
@@ -245,8 +276,8 @@ def render_chart(event: dict, by_tf: dict) -> io.BytesIO | None:
     if event["ob_ok"]:
         ax.axhspan(event["ob_low"], event["ob_high"], alpha=.08)
     ax.axhline(event["bos_level"], linestyle="--", linewidth=1.1)
-    ax.annotate(f"M15 BOS {event['side']}", (len(bars)-1, event["close"]), xytext=(-95,25), textcoords="offset points", arrowprops={"arrowstyle":"->"})
-    ax.set_title(f"{event['symbol']} · FIB + SMC · {event['side']} · H1 → M15")
+    ax.annotate(f"H1 CONFIRM {event['side']}", (len(bars)-1, event["close"]), xytext=(-95,25), textcoords="offset points", arrowprops={"arrowstyle":"->"})
+    ax.set_title(f"{event['symbol']} · FIB + SMC · {event['side']} · CLOSED H1")
     ax.set_ylabel("Price"); ax.set_xlabel("Closed H1 candles"); ax.grid(True, alpha=.2); fig.tight_layout()
     buf=io.BytesIO(); buf.name=f"fib_smc_{event['symbol'].replace('/','')}_{event['side']}.png"
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); plt.close(fig); buf.seek(0); return buf
@@ -260,8 +291,8 @@ def image_for_alert(text: str):
 
 def process_market(market: dict, strength: dict[str, float], events=None, now_utc=None) -> list[str]:
     _PENDING_CARDS.clear(); state=_load()
-    if int(state.get("logic_version") or 0) != 1:
-        state={"logic_version":1, "sent":{}, "pending":{}, "bootstrapped":False}
+    if int(state.get("logic_version") or 0) != 2:
+        state={"logic_version":2, "sent":{}, "pending":{}, "bootstrapped":False}
     first=not bool(state.get("bootstrapped")); sent=state.setdefault("sent",{}); pending=state.setdefault("pending",{})
     messages=[]
     for digest,item in list(pending.items()):
