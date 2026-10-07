@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import config as cfg
@@ -61,6 +62,9 @@ class Profile:
     weights: list[float]
     vwap: float | None = None
     vwap_source: str = "UNAVAILABLE"
+    hvns: tuple[float, ...] = ()
+    lvns: tuple[float, ...] = ()
+    shape: str = "BALANCED"
 
 
 def _bars(by_tf: dict, tf: str) -> list[Candle]:
@@ -112,9 +116,97 @@ def _profile(bars: list[Candle], bins_n: int = 48, value_area: float = .70) -> P
         if den > 0:
             vwap = sum(((c.high + c.low + c.close) / 3.0) * v for c, v in vb) / den
             source = "PROVIDER_VOLUME"
-    return Profile(centers[p], min(centers[i] for i in chosen)-step/2,
-                   max(centers[i] for i in chosen)+step/2, step, centers, w, vwap, source)
+    return _enrich_profile(Profile(centers[p], min(centers[i] for i in chosen)-step/2,
+                   max(centers[i] for i in chosen)+step/2, step, centers, w, vwap, source))
 
+
+
+def _profile_nodes(prof: Profile) -> tuple[tuple[float, ...], tuple[float, ...], str]:
+    """Local acceptance extrema. Deterministic; no future bars and no fake volume."""
+    w = prof.weights
+    if len(w) < 5 or not any(w):
+        return (), (), "BALANCED"
+    peak = max(w)
+    hvn = [prof.bins[i] for i in range(1, len(w)-1)
+           if w[i] >= w[i-1] and w[i] >= w[i+1] and w[i] >= peak*.55]
+    positive = sorted(x for x in w if x > 0)
+    floor = positive[max(0, int(len(positive)*.30)-1)] if positive else 0
+    lvn = [prof.bins[i] for i in range(1, len(w)-1)
+           if w[i] <= w[i-1] and w[i] <= w[i+1] and 0 < w[i] <= floor]
+    # Keep only the strongest/most distinct nodes to avoid turning profile noise into evidence.
+    hvn = sorted(hvn, key=lambda x: abs(x-prof.poc))[:4]
+    lvn = sorted(lvn, key=lambda x: abs(x-prof.poc))[:4]
+    lower = sum(x for b,x in zip(prof.bins,w) if b < prof.poc)
+    upper = sum(x for b,x in zip(prof.bins,w) if b > prof.poc)
+    den = max(lower+upper, 1e-12)
+    skew = (upper-lower)/den
+    shape = "TOP_HEAVY" if skew > .18 else "BOTTOM_HEAVY" if skew < -.18 else "BALANCED"
+    return tuple(hvn), tuple(lvn), shape
+
+
+def _enrich_profile(prof: Profile) -> Profile:
+    hvn, lvn, shape = _profile_nodes(prof)
+    prof.hvns, prof.lvns, prof.shape = hvn, lvn, shape
+    return prof
+
+
+def _composite_profile(h1: list[Candle]) -> Profile | None:
+    n = int(getattr(cfg, "POC_COMPOSITE_LOOKBACK_H1", 120))
+    if len(h1) < max(48, n//2):
+        return None
+    p = _profile(h1[-n:], int(getattr(cfg, "POC_PROFILE_BINS", 48)), float(getattr(cfg, "POC_VALUE_AREA", .70)))
+    return _enrich_profile(p) if p else None
+
+
+def _initial_balance(h1: list[Candle]) -> tuple[float, float] | None:
+    """Daily H1 initial balance using the first closed bars of the current UTC day.
+
+    This is price-range context, not volume. If timestamps are synthetic/unparseable,
+    IB is unavailable rather than guessed from a rolling slice.
+    """
+    if not h1:
+        return None
+    try:
+        parsed=[(datetime.strptime(c.dt[:19], "%Y-%m-%d %H:%M:%S"), c) for c in h1]
+    except (TypeError, ValueError):
+        return None
+    day=parsed[-1][0].date()
+    today=[c for dt,c in parsed if dt.date()==day]
+    n=max(1, int(getattr(cfg, "POC_INITIAL_BALANCE_H1_BARS", 2)))
+    if len(today) < n:
+        return None
+    seed=today[:n]
+    return min(c.low for c in seed), max(c.high for c in seed)
+
+
+def _balanced_target(prof: Profile, side: str) -> float:
+    """Symmetric measured objective around POC/Value Area; context target only."""
+    return prof.poc + (prof.poc-prof.val) if side == "LONG" else prof.poc - (prof.vah-prof.poc)
+
+
+def _naked_poc(h1: list[Candle], cur_close: float, av: float) -> dict | None:
+    """Find a completed daily-profile POC not revisited by later closed H1 bars."""
+    chunk=max(12, int(getattr(cfg, "POC_NAKED_PROFILE_H1", 24)))
+    tol=max(av*float(getattr(cfg, "POC_NAKED_TOUCH_ATR", .10)), 1e-12)
+    max_profiles=max(1, int(getattr(cfg, "POC_NAKED_MAX_PROFILES", 5)))
+    if len(h1) < chunk*2:
+        return None
+    candidates=[]
+    # Completed chunks only; newest unfinished/current chunk is intentionally excluded.
+    end=len(h1)-chunk
+    for stop in range(end, max(chunk-1, end-chunk*max_profiles), -chunk):
+        start=stop-chunk
+        if start < 0: break
+        p=_profile(h1[start:stop], int(getattr(cfg,"POC_PROFILE_BINS",48)), float(getattr(cfg,"POC_VALUE_AREA",.70)))
+        if not p: continue
+        later=h1[stop:]
+        tapped=any(c.low <= p.poc+tol and c.high >= p.poc-tol for c in later)
+        if not tapped:
+            candidates.append((abs(cur_close-p.poc), p.poc, h1[stop-1].dt))
+    if not candidates:
+        return None
+    _, price, completed_at=min(candidates)
+    return {"price": price, "completed_at": completed_at, "state": "NAKED"}
 
 def _bias(tf: str, bars: list[Candle]) -> int:
     v = analyze_tf(tf, tf, bars) if len(bars) >= 20 else None
@@ -128,14 +220,14 @@ def _strength_ok(symbol: str, side: str, strength: dict[str, float]) -> tuple[bo
     return (gap >= need if side == "LONG" else gap <= -need), gap
 
 
-def _value_lifecycle(symbol: str, by_tf: dict, prof: Profile, m15: list[Candle], av: float) -> dict:
+def _value_lifecycle(symbol: str, by_tf: dict, prof: Profile, confirm_bars: list[Candle], av: float) -> dict:
     """Classify value interaction without inventing direction from a touch.
 
     CALCULATED -> APPROACH -> FIRST_TOUCH -> RETEST -> ACCEPTANCE/REJECTION ->
     STRUCTURE_CONFIRMED. Direction exists only after closed-candle reaction and
     structure agreement.
     """
-    cur = m15[-1]
+    cur = confirm_bars[-1]
     refs = [("POC", prof.poc)]
     if prof.vwap is not None:
         refs.append(("VWAP", prof.vwap))
@@ -143,7 +235,7 @@ def _value_lifecycle(symbol: str, by_tf: dict, prof: Profile, m15: list[Candle],
     dist = abs(cur.close-ref) / max(av, 1e-12)
     tol = max(prof.step*1.25, av*float(getattr(cfg, "POC_TOUCH_ATR", .12)))
     touched_now = cur.low <= ref+tol and cur.high >= ref-tol
-    prior = m15[-int(getattr(cfg, "VALUE_RETEST_LOOKBACK", 6))-1:-1]
+    prior = confirm_bars[-int(getattr(cfg, "VALUE_RETEST_LOOKBACK", 6))-1:-1]
     prior_touches = sum(1 for c in prior if c.low <= ref+tol and c.high >= ref-tol)
     retest_ready = prior_touches >= 1
     state = "CALCULATED"
@@ -187,11 +279,12 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
                     float(getattr(cfg, "POC_VALUE_AREA", .70)))
     if not prof:
         return None
-    prev, cur = m15[-2], m15[-1]
-    av = atr(m15, 14)
+    # Main event is confirmed only by the last CLOSED H1. M15 remains auxiliary context.
+    prev, cur = h1[-2], h1[-1]
+    av = atr(h1, 14)
     if av <= 0:
         return None
-    lifecycle = _value_lifecycle(symbol, by_tf, prof, m15, av)
+    lifecycle = _value_lifecycle(symbol, by_tf, prof, h1, av)
     # Final confirmation must use the SAME value reference selected by the lifecycle.
     # When real provider volume exists this may be VWAP; otherwise it is the TPO POC.
     # A touch by itself never creates direction.
@@ -213,7 +306,10 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
         if lifecycle.get("side") != wanted or not lifecycle.get("structure_confirmed"):
             return None
     # VWAP/POC confirms acceptance/rejection; it does not override opposite H4 context.
-    if _bias("H4", h4) == -wanted or _bias("M15", m15) != wanted:
+    if _bias("H4", h4) == -wanted or _bias("H1", h1) != wanted:
+        return None
+    # M15 is confirmation only: explicit opposite bias vetoes, neutral does not create direction.
+    if _bias("M15", m15) == -wanted:
         return None
     ok, gap = _strength_ok(symbol, side, strength)
     if not ok:
@@ -228,9 +324,19 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     quality = 72 + min(8, int(body/av*5)) + min(6, int(abs(gap)*25)) + (3 if value_confluence else 0)
     if _bias("H1", h1) == wanted:
         quality += 5
+    # Geometry/context extensions: bounded evidence, never independent direction votes.
+    composite = _composite_profile(h1)
+    ib = _initial_balance(h1)
+    naked = _naked_poc(h1, cur.close, av)
+    target = _balanced_target(prof, side)
+    near_hvn = min((abs(cur.close-x) for x in prof.hvns), default=999.0) / max(av,1e-12) <= float(getattr(cfg,"POC_NODE_NEAR_ATR",.18))
+    if near_hvn: quality += 2
     quality = min(94, quality)
     return {"symbol": symbol, "side": side, "poc": prof.poc, "val": prof.val, "vah": prof.vah,
-            "close": cur.close, "dt": cur.dt, "gap": gap, "quality": quality,
+            "close": cur.close, "dt": cur.dt, "gap": gap, "quality": quality, "tf": "H1",
+            "profile_shape": prof.shape, "hvns": prof.hvns, "lvns": prof.lvns,
+            "initial_balance": ib, "balanced_target": target, "naked_poc": naked,
+            "composite_poc": composite.poc if composite else None,
             "value_reference": ref_name, "value_reference_price": ref,
             "value_confluence": value_confluence,
             "confidence": max(60, min(90, quality-4)), "profile": prof, "lifecycle": lifecycle}
@@ -250,17 +356,21 @@ def format_message(e: dict) -> str:
         f"💱 Пара: {e['symbol']}", f"Направление: {e['side']}",
         "Профиль: H1 · закрытые свечи", f"POC: {_price(e['symbol'], e['poc'])}",
         f"Value Area: {_price(e['symbol'], e['val'])}–{_price(e['symbol'], e['vah'])}",
-        f"Закрытие M15: {_price(e['symbol'], e['close'])}",
+        f"Закрытие H1: {_price(e['symbol'], e['close'])}",
         f"Опорная value-точка: {ref_name} · {_price(e['symbol'], e.get('value_reference_price', e['poc']))}",
         f"Реакция: {action}",
         f"Состояние value lifecycle: {e.get('lifecycle', {}).get('state', '—')}",
         f"Ретест подтверждён: {'да' if e.get('lifecycle', {}).get('retest_ready') else 'нет'}",
+        f"Форма acceptance-профиля: {e.get('profile_shape', 'BALANCED')}",
+        f"Composite POC: {_price(e['symbol'], e['composite_poc']) if e.get('composite_poc') is not None else '—'}",
+        f"Naked POC: {_price(e['symbol'], e['naked_poc']['price']) if e.get('naked_poc') else '—'}",
+        f"Balanced target: {_price(e['symbol'], e['balanced_target'])}",
         f"VWAP + POC конфлюэнс: {'да' if e.get('value_confluence') else 'нет/недоступен'}",
         (f"VWAP: {_price(e['symbol'], e['profile'].vwap)} · источник: фактический volume провайдера"
          if e['profile'].vwap is not None else "VWAP: недоступен для текущих FX-свечей · поддельный volume не создаётся"),
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100",
         f"Вероятность: {e['confidence']}%", "",
-        f"✅ Факт: закрытая M15 подтвердила реакцию у {ref_name}; структура подтверждена, H4 не противоречит направлению.",
+        f"✅ Факт: закрытая H1 подтвердила реакцию у {ref_name}; структура подтверждена, H4 не противоречит направлению.",
         "ℹ️ POC рассчитан как TPO/price-acceptance proxy по OHLC, а не как биржевой Volume POC.",
     ])
 
@@ -298,7 +408,7 @@ def render_chart(e: dict, by_tf: dict):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
-    bars = _bars(by_tf, "M15")[-int(getattr(cfg, "POC_CHART_LOOKBACK", 72)):]
+    bars = _bars(by_tf, "H1")[-int(getattr(cfg, "POC_CHART_LOOKBACK", 72)): ]
     if not bars:
         return None
     fig, ax = plt.subplots(figsize=(10, 5.4))
@@ -314,7 +424,7 @@ def render_chart(e: dict, by_tf: dict):
         ax.text(len(bars)-1, e["profile"].vwap, " VWAP", ha="right", va="top")
     ax.annotate(e["side"], (len(bars)-1, e["close"]), xytext=(-45, 20 if e["side"]=="LONG" else -28),
                 textcoords="offset points", arrowprops={"arrowstyle":"->"})
-    ax.set_title(f"{e['symbol']} · POC · {e['side']} · M15")
+    ax.set_title(f"{e['symbol']} · POC · {e['side']} · H1")
     ax.set_ylabel("Price"); ax.set_xlabel("Closed candles"); ax.grid(True, alpha=.2); fig.tight_layout()
     buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight"); plt.close(fig); buf.seek(0)
     return buf

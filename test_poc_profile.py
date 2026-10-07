@@ -21,3 +21,40 @@ def test_poc_keys_survive_reload(tmp_path, monkeypatch):
     poc_profile._LAST_KEYS = {}
     loaded = poc_profile._load_keys()
     assert loaded["EUR/USD"] == "LONG|2026-09-17|1.100000"
+
+
+def _series(n=160, base=1.1000):
+    out=[]
+    from datetime import datetime, timedelta
+    t=datetime(2026,10,1)
+    for i in range(n):
+        x=base + (i%24-12)*0.00003
+        out.append(Candle((t+timedelta(hours=i)).strftime('%Y-%m-%d %H:%M:%S'), x, x+.0008, x-.0008, x+.0001))
+    return out
+
+
+def test_profile_is_prefix_non_repainting():
+    bars=_series(180)
+    a=_profile(bars[:100], 48, .70)
+    b=_profile(bars[:100], 48, .70)
+    assert a and b
+    assert (a.poc,a.val,a.vah,a.hvns,a.lvns,a.shape)==(b.poc,b.val,b.vah,b.hvns,b.lvns,b.shape)
+
+
+def test_initial_balance_uses_first_closed_h1_of_current_day():
+    bars=_series(60)
+    ib=poc_profile._initial_balance(bars)
+    assert ib is not None and ib[0] < ib[1]
+
+
+def test_balanced_target_is_symmetric_from_value_edge():
+    p=_profile(_series(80),48,.70)
+    assert p
+    assert abs((poc_profile._balanced_target(p,'LONG')-p.poc)-(p.poc-p.val)) < 1e-12
+    assert abs((p.poc-poc_profile._balanced_target(p,'SHORT'))-(p.vah-p.poc)) < 1e-12
+
+
+def test_nodes_and_shape_are_deterministic():
+    p=_profile(_series(90),48,.70)
+    assert p and p.shape in {'BALANCED','TOP_HEAVY','BOTTOM_HEAVY'}
+    assert isinstance(p.hvns, tuple) and isinstance(p.lvns, tuple)

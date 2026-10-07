@@ -422,6 +422,13 @@ VALUE_REQUIRE_RETEST = True
 # If real provider-volume VWAP exists and sits near POC, use only a small quality bonus.
 VALUE_POC_VWAP_CONFLUENCE_ATR = 0.20
 VALUE_REQUIRE_STRUCTURE_CONFIRM = True
+# Module 11 geometry/lifecycle extensions. All are context/evidence only.
+POC_COMPOSITE_LOOKBACK_H1 = 120
+POC_INITIAL_BALANCE_H1_BARS = 2
+POC_NAKED_PROFILE_H1 = 24
+POC_NAKED_MAX_PROFILES = 5
+POC_NAKED_TOUCH_ATR = 0.10
+POC_NODE_NEAR_ATR = 0.18
 
 ORDER_BLOCK_ENABLED = True
 ORDER_BLOCK_PIVOT_BARS = 3

@@ -19,7 +19,8 @@ _FAMILY={
 _KEEP={
  'tf','timeframe','quality','confidence','low','high','zone_low','zone_high','level','poc','val','vah',
  'gap','width_atr','displacement_atr','net_atr','score','h4_bias','d1_bias','amd_match','late',
- 'bos_level','mss_level','extreme','qml','lifecycle','structure_confirmed','reaction_path','state','name'
+ 'bos_level','mss_level','extreme','qml','lifecycle','structure_confirmed','reaction_path','state','name',
+ 'profile_shape','balanced_target','composite_poc','value_reference','value_reference_price','value_confluence'
 }
 
 def _plain(x):
