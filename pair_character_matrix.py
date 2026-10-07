@@ -107,13 +107,35 @@ def _joint_character_score(current: dict, histories: dict) -> dict:
     normalized={n:_percentile_rank(histories.get(n,[]), current.get(n,50.0)) for n in names}
     weights,corr=_redundancy_adjusted_weights({n:histories.get(n,[]) for n in names})
     quality=dict(normalized); quality['noise']=100.0-normalized['noise']
-    score=sum(weights[n]*quality[n] for n in names)
+
+    # Final bounded-influence guard. Empirical percentiles can legitimately reach
+    # 0/100 on a fresh extreme; allowing that single observation to enter the joint
+    # score unchanged makes a short volatility burst look more important than the
+    # remaining character families. Winsorisation at 10/90 keeps ordering intact
+    # while bounding any one family's instantaneous leverage. The score is then
+    # shrunk toward neutral when the causal history is still short (full trust at
+    # 120 observations). This is context stabilisation only; raw diagnostics remain.
+    influence_floor, influence_ceiling = 10.0, 90.0
+    bounded_quality={n:max(influence_floor,min(influence_ceiling,quality[n])) for n in names}
+    raw_score=sum(weights[n]*quality[n] for n in names)
+    bounded_score=sum(weights[n]*bounded_quality[n] for n in names)
+    min_history=min((len(histories.get(n,[])) for n in names), default=0)
+    history_confidence=max(0.0,min(1.0,min_history/120.0))
+    score=50.0 + history_confidence*(bounded_score-50.0)
     # Effective independent-family count (Kish ESS): 1..4, transparent diagnostic.
     ess=1.0/sum(w*w for w in weights.values()) if weights else 0.0
     return {
         'score':round(_clip(score),1),
+        'raw_score':round(_clip(raw_score),1),
+        'bounded_score':round(_clip(bounded_score),1),
         'normalized':{k:round(v,1) for k,v in normalized.items()},
         'quality_components':{k:round(v,1) for k,v in quality.items()},
+        'bounded_quality_components':{k:round(v,1) for k,v in bounded_quality.items()},
+        'stability_guard':{'method':'WINSORIZED_PERCENTILE_PLUS_HISTORY_SHRINKAGE',
+                           'winsor_limits':[influence_floor,influence_ceiling],
+                           'history_samples':min_history,
+                           'history_confidence':round(history_confidence,4),
+                           'full_confidence_samples':120},
         'weights':{k:round(v,4) for k,v in weights.items()},
         'correlation':{a:{b:round(v,3) for b,v in row.items()} for a,row in corr.items()},
         'effective_families':round(ess,2),

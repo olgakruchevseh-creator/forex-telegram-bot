@@ -1,0 +1,4 @@
+pair_character_matrix.py — финальный bounded-influence guard для Character Matrix Score: winsor 10–90 + history shrinkage к 50; добавлены прозрачные диагностические поля.
+test_pair_character_matrix.py — тест одиночного экстремума и тест короткой истории; сохранены предыдущие тесты.
+CHARACTER_MATRIX_SCORE_STABILITY_V7_RU.md — описание формулы и защиты устойчивости.
+CHANGED_FILES_CHARACTER_MATRIX_STABILITY_V7_RU.txt — список изменённых/добавленных файлов пакета.

@@ -87,3 +87,23 @@ def test_redundancy_weights_penalize_duplicate_families():
     w,c=pcm._redundancy_adjusted_weights({'a':x,'b':x,'c':alt,'d':[i*i%17 for i in range(30)]})
     assert abs(c['a']['b']) > .99
     assert abs(sum(w.values())-1.0) < 1e-9
+
+
+def test_joint_score_has_bounded_influence_for_single_extreme_family():
+    base=[float(i) for i in range(1,121)]
+    histories={n:list(base) for n in ('trend_persistence','impulse','noise','volatility')}
+    ordinary=pcm._joint_character_score(
+        {'trend_persistence':60,'impulse':60,'noise':40,'volatility':60}, histories)
+    spike=pcm._joint_character_score(
+        {'trend_persistence':60,'impulse':60,'noise':40,'volatility':1e9}, histories)
+    assert spike['stability_guard']['method'] == 'WINSORIZED_PERCENTILE_PLUS_HISTORY_SHRINKAGE'
+    assert spike['bounded_quality_components']['volatility'] == 90.0
+    assert abs(spike['score']-ordinary['score']) <= 10.0
+
+def test_joint_score_shrinks_to_neutral_with_short_history():
+    h={n:[10.0,20.0,30.0] for n in ('trend_persistence','impulse','noise','volatility')}
+    r=pcm._joint_character_score(
+        {'trend_persistence':100,'impulse':100,'noise':0,'volatility':100}, h)
+    assert r['stability_guard']['history_samples'] == 3
+    assert r['stability_guard']['history_confidence'] == 0.025
+    assert abs(r['score']-50.0) < 2.0
