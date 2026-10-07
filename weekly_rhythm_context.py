@@ -78,6 +78,16 @@ class WeeklyRhythmContext:
     projection_window: str = ""
     projection_quality: int = 0
     family: str = "WEEKLY_CONTEXT"
+    # Monday opening range is an independent weekly anchor. It is descriptive only:
+    # no direction vote, no replacement for the existing Mon-Tue trap lifecycle.
+    monday_high: float | None = None
+    monday_low: float | None = None
+    monday_mid: float | None = None
+    monday_range_ratio: float = 0.0
+    monday_state: str = ""
+    monday_acceptance_side: int = 0
+    # Independent maturity telemetry: current weekly range / robust normal range.
+    maturity_state: str = ""
 
 
 def _dt(value: str) -> datetime | None:
@@ -306,12 +316,61 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
             weekly_trap="ПРОБОЙ_ПРИНЯТ"; trap_quality=0
             acceptance_side=1 if up_run>=2 and up_run>=dn_run else -1
 
+    # Monday Opening Range (MOR). Keep this separate from the Mon-Tue trap range:
+    # MOR measures the first-day anchor; Mon-Tue lifecycle continues to detect traps.
+    monday=[c for c in current if (_dt(c.dt) and _dt(c.dt).isocalendar().weekday == 1)]
+    monday_high=monday_low=monday_mid=None; monday_range_ratio=0.0
+    monday_state="ФОРМИРУЕТСЯ" if weekday == 1 else "НЕТ_ДАННЫХ"
+    monday_acceptance_side=0
+    if monday:
+        monday_high=max(float(c.high) for c in monday); monday_low=min(float(c.low) for c in monday)
+        monday_mid=(monday_high+monday_low)/2.0
+        monday_range=max(monday_high-monday_low,1e-12)
+        monday_range_ratio=monday_range/max(baseline_range,1e-12)
+        if weekday >= 2:
+            tol=max(av,1e-12)*float(getattr(cfg,"WEEKLY_RHYTHM_MONDAY_TOLERANCE_ATR",0.10))
+            post=[c for c in current if (_dt(c.dt) and _dt(c.dt).isocalendar().weekday >= 2)]
+            need=max(2,int(getattr(cfg,"WEEKLY_RHYTHM_MONDAY_ACCEPT_CLOSES",2)))
+            up_run=dn_run=0
+            for c in reversed(post):
+                if float(c.close)>monday_high+tol: up_run+=1
+                else: break
+            for c in reversed(post):
+                if float(c.close)<monday_low-tol: dn_run+=1
+                else: break
+            broke_up=any(float(c.high)>monday_high+tol for c in post)
+            broke_dn=any(float(c.low)<monday_low-tol for c in post)
+            if up_run>=need:
+                monday_state="ПРИНЯТИЕ_ВЫШЕ"; monday_acceptance_side=1
+            elif dn_run>=need:
+                monday_state="ПРИНЯТИЕ_НИЖЕ"; monday_acceptance_side=-1
+            elif broke_up and px < monday_high-tol:
+                monday_state="ОТКЛОНЕНИЕ_ВЫШЕ"
+            elif broke_dn and px > monday_low+tol:
+                monday_state="ОТКЛОНЕНИЕ_НИЖЕ"
+            elif px>monday_high+tol:
+                monday_state="ТЕСТ_ВЫШЕ"
+            elif px<monday_low-tol:
+                monday_state="ТЕСТ_НИЖЕ"
+            else:
+                monday_state="ВНУТРИ_ДИАПАЗОНА"
+
+    # Maturity is scale-only telemetry. Robust median+MAD remains the primary range
+    # model; these labels make exhaustion/remaining-space explicit without direction.
+    mature=float(getattr(cfg,"WEEKLY_RHYTHM_MATURE_REALIZATION",0.90))
+    over=float(getattr(cfg,"WEEKLY_RHYTHM_OVEREXTENDED_REALIZATION",1.15))
+    if range_ratio < 0.45: maturity_state="РАННЯЯ"
+    elif range_ratio < mature: maturity_state="РАЗВИВАЕТСЯ"
+    elif range_ratio < over: maturity_state="ЗРЕЛАЯ"
+    else: maturity_state="ПЕРЕРАСТЯНУТА"
+
     # Trap/acceptance are contextual consistency checks, not votes. A confirmed trap
     # against the proposed weekly side prevents a false confirmation; accepted breakout
     # in the opposite direction does the same. Matching context is intentionally not
     # rewarded, avoiding double-counting liquidity/structure evidence.
     context_conflict = (trap_side and expansion_side and trap_side != expansion_side) or \
-                       (acceptance_side and expansion_side and acceptance_side != expansion_side)
+                       (acceptance_side and expansion_side and acceptance_side != expansion_side) or \
+                       (monday_acceptance_side and expansion_side and monday_acceptance_side != expansion_side)
     if context_conflict:
         penalty += int(getattr(cfg,"WEEKLY_RHYTHM_TRAP_CONFLICT_PENALTY",18))
         confidence=max(0, confidence-int(getattr(cfg,"WEEKLY_RHYTHM_TRAP_CONFLICT_PENALTY",18)))
@@ -396,7 +455,8 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
         early_candidate,early_candidate_day,(low_early_atr if early_candidate=="LOW" else high_early_atr if early_candidate=="HIGH" else 0.0),
         ((last_dt-(low_dt if (candidate or early_candidate)=="LOW" else high_dt)).total_seconds()/3600.0 if (candidate or early_candidate) and (low_dt if (candidate or early_candidate)=="LOW" else high_dt) else 0.0),
         (min(100.0,100.0*((px-wl) if (candidate or early_candidate)=="LOW" else (wh-px))/max(width,1e-12)) if (candidate or early_candidate) else 0.0),
-        projection_w1,projection_w2,projection_w3,projection_remaining_atr,projection_depth,projection_window,projection_quality)
+        projection_w1,projection_w2,projection_w3,projection_remaining_atr,projection_depth,projection_window,projection_quality,
+        "WEEKLY_CONTEXT",monday_high,monday_low,monday_mid,monday_range_ratio,monday_state,monday_acceptance_side,maturity_state)
 
 
 def alignment(ctx: WeeklyRhythmContext | None, side: int) -> int:
@@ -474,6 +534,9 @@ def format_alert(symbol: str, ctx: WeeklyRhythmContext, previous_side: int = 0) 
         f"Снятие ликвидности/возврат: {ctx.sweep_reclaim or 'нет подтверждения'}",
         f"Структура: {ctx.structure_state} · Режим: {ctx.regime}", f"Реализация недельного движения: {ctx.realization*100:.0f}%",
         f"Нормальный недельный диапазон (median): {ctx.baseline_range:.5f} · текущий {ctx.range_ratio*100:.0f}% · robust z {ctx.range_z:+.2f}",
+        f"Зрелость недельного диапазона: {ctx.maturity_state or 'нет данных'}",
+        *(([f"Monday Range H/L/M: {ctx.monday_high:.5f} / {ctx.monday_low:.5f} / {ctx.monday_mid:.5f}",
+             f"Monday Range: {ctx.monday_range_ratio*100:.0f}% нормальной недели · состояние: {ctx.monday_state}"] if ctx.monday_high is not None else [])),
         f"Недельная ловушка: {ctx.weekly_trap or 'не подтверждена'}" + (f" · качество {ctx.trap_quality}/100" if ctx.weekly_trap else ""),
         f"Устойчивость ухода от экстремума: {ctx.departure_bars} закрытых H4",
         f"Раннее обнаружение: {ctx.early_candidate or 'нет'}" + (f" · {ctx.early_departure_atr:.2f} ATR · задержка {ctx.detection_lag_hours:.1f} ч · уже пройдено {ctx.missed_move_pct:.0f}% диапазона" if ctx.early_candidate else ""),

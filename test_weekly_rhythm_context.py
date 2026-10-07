@@ -137,3 +137,23 @@ def test_projection_never_creates_direction():
         projection_w1=1.01,projection_w2=1.02,projection_w3=1.03,projection_quality=80)
     assert x.expansion_side == 0
     assert w.alignment(x,1) == 0
+
+
+def test_monday_range_is_independent_context(monkeypatch):
+    start=datetime(2026,9,21,tzinfo=timezone.utc)  # Monday
+    h4=bars(start,30,240); h1=bars(start,120,60); d1=bars(start-timedelta(days=30),40,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':0,'state':'FORMING'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'RANGE'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x is not None and x.monday_high is not None and x.monday_low is not None
+    assert x.monday_high >= x.monday_mid >= x.monday_low
+    assert x.monday_range_ratio >= 0
+    assert x.maturity_state in {'РАННЯЯ','РАЗВИВАЕТСЯ','ЗРЕЛАЯ','ПЕРЕРАСТЯНУТА'}
+
+def test_monday_context_never_invents_direction(monkeypatch):
+    start=datetime(2026,9,21,tzinfo=timezone.utc)
+    h4=bars(start,30,240); h1=bars(start,120,60); d1=bars(start-timedelta(days=30),40,1440)
+    monkeypatch.setattr(w.structure_context,'analyze_symbol',lambda *a,**k:type('S',(),{'side':0,'state':'FORMING'})())
+    monkeypatch.setattr(w.market_regime,'analyze_symbol',lambda *a,**k:type('R',(),{'name':'RANGE'})())
+    x=w.analyze_symbol('EUR/USD',{'H4':h4,'H1':h1,'D1':d1})
+    assert x.expansion_side == 0
