@@ -37,6 +37,8 @@ class BPRZone:
     last_seen_dt: str = ""
     touch_dt: str = ""
     delivered_side: str = ""
+    expected_side: str = ""
+    clean: bool = True
     invalid: bool = False
 
 
@@ -82,6 +84,8 @@ def _newest_bpr(symbol: str, tf: str, bars: list[Candle]) -> BPRZone | None:
     av = atr(bars[:-1], 14)
     if av <= 0: return None
     gaps = _fvgs(bars, av)
+    require_clean = bool(getattr(cfg, "BPR_REQUIRE_CLEAN_FORMATION", True))
+    min_disp = float(getattr(cfg, "BPR_MIN_DISPLACEMENT_BODY_ATR", 0.35))
     max_age = int(getattr(cfg, "BPR_MAX_AGE_BARS", 24))
     min_overlap = float(getattr(cfg, "BPR_MIN_OVERLAP_ATR", 0.04))
     candidates = []
@@ -95,20 +99,46 @@ def _newest_bpr(symbol: str, tf: str, bars: list[Candle]) -> BPRZone | None:
             if high <= low: continue
             width_atr = (high-low)/av
             if width_atr < min_overlap: continue
+            older, newer = (g1, g2) if g1[0] < g2[0] else (g2, g1)
+            # A true BPR is produced by an opposing displacement through an
+            # untouched imbalance. If price already traded into the eventual
+            # overlap before the second FVG completed, that geometry is closer
+            # to mitigation/inversion and must not be relabelled as a fresh BPR.
+            clean = True
+            if require_clean:
+                for bar in bars[older[0] + 1:max(older[0] + 1, newer[0] - 2)]:
+                    if bar.low <= high and bar.high >= low:
+                        clean = False
+                        break
+            if not clean:
+                continue
+            newer_bar = bars[newer[0] - 1] if newer[0] > 0 else bars[newer[0]]
+            body_atr = abs(newer_bar.close - newer_bar.open) / av
+            if body_atr < min_disp:
+                continue
             bull = g1 if g1[1] > 0 else g2
             bear = g1 if g1[1] < 0 else g2
             created_dt = bars[newest_i].dt
-            candidates.append((age, -width_atr, low, high, created_dt, bull[4], bear[4]))
+            expected_side = "LONG" if newer[1] > 0 else "SHORT"
+            candidates.append((age, -width_atr, low, high, created_dt, bull[4], bear[4], expected_side, clean))
     if not candidates: return None
-    age, neg_width, low, high, created_dt, bull_dt, bear_dt = min(candidates)
+    age, neg_width, low, high, created_dt, bull_dt, bear_dt, expected_side, clean = min(candidates)
     zid = f"{symbol}|{tf}|{round(low,6)}|{round(high,6)}|{created_dt[:19]}"
-    return BPRZone(zid, symbol, tf, low, high, created_dt, bull_dt, bear_dt, -neg_width)
+    return BPRZone(zid, symbol, tf, low, high, created_dt, bull_dt, bear_dt, -neg_width, expected_side=expected_side, clean=clean)
 
 
 def _reaction(zone: BPRZone, bars: list[Candle], by_tf: dict) -> tuple[str, dict] | None:
     fresh = [c for c in bars if c.dt > zone.created_dt]
     if not fresh: return None
     c = fresh[-1]
+    # Closed-candle acceptance through the far side retires the BPR. Wicks are
+    # allowed; invalidation requires a close plus a small ATR-normalized buffer.
+    av = atr(bars, 14)
+    inv = float(getattr(cfg, "BPR_INVALIDATION_BUFFER_ATR", 0.03)) * max(av, 0.0)
+    if (zone.expected_side == "LONG" and c.close < zone.low - inv) or (zone.expected_side == "SHORT" and c.close > zone.high + inv):
+        zone.invalid = True
+        zone.status = "ЗОНА ИНВАЛИДИРОВАНА"
+        return None
     if c.dt == zone.last_seen_dt: return None
     zone.last_seen_dt = c.dt
 
@@ -148,6 +178,11 @@ def _reaction(zone: BPRZone, bars: list[Candle], by_tf: dict) -> tuple[str, dict
     if not early.get("allow", True):
         return None
     side = "LONG" if side_i > 0 else "SHORT"
+    # The newer opposing displacement defines the expected support/resistance
+    # role. A contrary reaction remains useful internally but is not promoted
+    # into a standalone BPR event.
+    if zone.expected_side and side != zone.expected_side:
+        return None
     if zone.delivered_side == side: return None
     zone.delivered_side = side
     zone.status = f"РЕАКЦИЯ {side} ПОДТВЕРЖДЕНА"
@@ -163,7 +198,8 @@ def format_message(zone: BPRZone, side: str, meta: dict) -> str:
         "━━━━━━━━━━━━━━━━━━", "⚖️ BPR — BALANCED PRICE RANGE · РЕАКЦИЯ ПОДТВЕРЖДЕНА", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {zone.symbol}", f"📊 Таймфрейм BPR: {zone.tf}", f"Направление: {side}",
         f"📦 Зона BPR: {_price(zone.symbol, zone.low)}–{_price(zone.symbol, zone.high)}",
-        "Основа: пересечение противоположных FVG/Imbalance",
+        f"Роль зоны: {'поддержка' if zone.expected_side == 'LONG' else 'сопротивление'} · по последнему displacement",
+        "Основа: чистое пересечение противоположных FVG/Imbalance",
         f"🕯 Подтверждение зоны: {meta.get('reaction_path', 'REACTION')} → OHLC Movement",
         f"🕐 Время закрытия: {meta['dt']}", f"💵 Цена закрытия: {_price(zone.symbol, meta['close'])}",
         f"Движение OHLC: {meta['directional']} направл. свеч. · {meta['net_atr']:.2f} ATR · score {meta['score']:.0f}/100",
@@ -183,7 +219,9 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
         messages.append(text); _PENDING_CARDS[text] = (z, freeze_by_tf(market.get(z.symbol) or {}))
     for symbol in cfg.PAIRS:
         by_tf = market.get(symbol) or {}
-        for tf in getattr(cfg, "BPR_TIMEFRAMES", ("H1","M15","M5")):
+        # Telegram events are H1-only. Lower TF BPRs remain available to the
+        # internal confluence API, but can never become standalone alerts.
+        for tf in getattr(cfg, "BPR_ALERT_TIMEFRAMES", ("H1",)):
             if tf not in TF_MINUTES: continue
             bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
             if len(bars) < 24: continue

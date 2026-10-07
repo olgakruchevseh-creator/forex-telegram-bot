@@ -617,11 +617,15 @@ LTF_CONFIRM_CONFLICT_PENALTY = 5
 # Balanced Price Range — зона копится молча; карточка только после реакции + OHLC
 # и только через общий контур Master / Navigator, не отдельным входом.
 BPR_ENABLED = True
-BPR_TIMEFRAMES = ("H1", "M15", "M5")
+BPR_TIMEFRAMES = ("H1", "M15", "M5")  # internal confluence
+BPR_ALERT_TIMEFRAMES = ("H1",)  # standalone Telegram events: closed H1 only
 BPR_LOOKBACK = 80
 BPR_MAX_AGE_BARS = 24
 BPR_MIN_FVG_ATR = 0.06
 BPR_MIN_OVERLAP_ATR = 0.04
+BPR_REQUIRE_CLEAN_FORMATION = True
+BPR_MIN_DISPLACEMENT_BODY_ATR = 0.35
+BPR_INVALIDATION_BUFFER_ATR = 0.03
 BPR_TOUCH_BUFFER_ATR = 0.10
 BPR_MIN_DIRECTIONAL_BARS = 3
 BPR_EQUIVALENT_MOVE_ATR = 0.85
