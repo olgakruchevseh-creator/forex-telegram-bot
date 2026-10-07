@@ -32,6 +32,7 @@ import session_cycle_context
 import pump_dump_context
 import divergence_context
 import market_regime
+import pullback_regime
 
 log = logging.getLogger("fxbot.briefing")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
@@ -448,7 +449,7 @@ def leader_confidence(brief: PairBrief) -> int:
     return max(62, min(92, int(round(conf))))
 
 
-def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0, by_tf: Optional[dict] = None) -> str:
+def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0, by_tf: Optional[dict] = None, symbol: str = "") -> str:
     """Старший маршрут против текущего движения; ZigZag защищает от ложного ярлыка отката."""
     if not stack:
         return "НЕТ ДАННЫХ"
@@ -464,37 +465,43 @@ def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0, by_tf:
 
     primary = consensus(("W1", "D1", "H4"))
     local = consensus(("H1", "M15", "M5"))
-    # Do not call every opposite M15/M5 majority a pullback. In a confirmed
-    # H1 range/compression it is a sideways market with a directional tilt.
-    regime = None
-    try:
-        regime = market_regime.analyze_symbol("", by_tf or {}) if by_tf else None
-    except Exception:
-        regime = None
-    flat_like = bool(regime and regime.name in ("RANGE", "COMPRESSION"))
-    # Когда H4, H1 и сам ZigZag H4 уже синхронно идут против W1/D1,
-    # это не просто неопределённый переход, а наблюдаемый локальный импульс.
-    if (primary and _tf_bias(stack, "H4") == -primary
-            and _tf_bias(stack, "H1") == -primary
-            and zigzag_h4_side == -primary):
+    # Pullback/range/transition labels come from one shared closed-H1 classifier.
+    # M15/M5 and H4 ZigZag remain context only and cannot promote a move to PULLBACK.
+    shared = None
+    if primary and by_tf:
+        candidate = -primary
+        try:
+            shared = pullback_regime.classify(
+                symbol or getattr(stack, "symbol", ""), candidate,
+                _tf_bias(stack, "D1"), _tf_bias(stack, "H4"), by_tf,
+            )
+        except Exception:
+            log.exception("PULLBACK_REGIME briefing symbol=%s", symbol or getattr(stack, "symbol", ""))
+
+    if primary and shared:
+        if shared.mode == "RANGE":
+            return f"БОКОВИК С УКЛОНОМ {_dir_word(local or -primary)} ВНУТРИ {_dir_word(primary)}"
+        if shared.mode == "COMPRESSION":
+            return f"СЖАТИЕ / БОКОВИК ВНУТРИ {_dir_word(primary)}"
+        if shared.mode == "PULLBACK":
+            return f"ОТКАТ {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)}"
+        if shared.mode == "TRANSITION" and (_tf_bias(stack, "H1") == -primary or local == -primary):
+            return f"ПЕРЕХОД: ДВИЖЕНИЕ {_dir_word(-primary)} ПРОТИВ ОСНОВНОГО {_dir_word(primary)} · ОТКАТ НЕ ПОДТВЕРЖДЁН"
+
+    # Compatibility path when candle data are unavailable (mainly legacy callers/tests).
+    if not by_tf and primary and _tf_bias(stack, "H4") == -primary and _tf_bias(stack, "H1") == -primary and zigzag_h4_side == -primary:
         return f"ЛОКАЛЬНЫЙ ИМПУЛЬС {_dir_word(-primary)} ВНУТРИ СТАРШЕГО {_dir_word(primary)}"
+    if not by_tf and primary and not local and _tf_bias(stack, "H1") == -primary:
+        return (f"НАЧАЛО ОТКАТА {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)}"
+                " · M15/M5 ЕЩЁ НЕ ПОДТВЕРДИЛИ")
     if primary and zigzag_h4_side == -primary:
         return f"ПЕРЕХОД: ZIGZAG H4 ПРОТИВ ОСНОВНОГО {_dir_word(primary)}"
     if primary and local == primary:
         return f"ОСНОВНОЙ ИМПУЛЬС {_dir_word(primary)}"
     if primary and local == -primary:
-        if flat_like:
-            return f"БОКОВИК С УКЛОНОМ {_dir_word(local)} ВНУТРИ {_dir_word(primary)}"
-        return f"ОТКАТ {_dir_word(local)} ВНУТРИ {_dir_word(primary)}"
+        return f"ПЕРЕХОД: ДВИЖЕНИЕ {_dir_word(local)} ПРОТИВ ОСНОВНОГО {_dir_word(primary)} · ОТКАТ НЕ ПОДТВЕРЖДЁН"
     if primary and not local and _tf_bias(stack, "H1") == -primary:
-        return (f"НАЧАЛО ОТКАТА {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)}"
-                " · M15/M5 ЕЩЁ НЕ ПОДТВЕРДИЛИ")
-    # Если W1/D1 сохраняют старший маршрут, а H4 и H1 уже синхронно идут
-    # против него, это фактический откат даже до подтверждения на M15/M5.
-    if primary and _tf_bias(stack, "H4") == -primary and _tf_bias(stack, "H1") == -primary:
-        return f"ОТКАТ {_dir_word(-primary)} ВНУТРИ {_dir_word(primary)}"
-    # W1/D1 сами по себе не объявляют текущий основной импульс, когда H4 уже
-    # направлен против, а H1/M15/M5 ещё не сформировали большинство.
+        return f"ПЕРЕХОД: H1 {_dir_word(-primary)} ПРОТИВ ОСНОВНОГО {_dir_word(primary)} · ОТКАТ НЕ ПОДТВЕРЖДЁН"
     if primary and not local and _tf_bias(stack, "H4") == -primary:
         return "RANGE / ПЕРЕХОДНАЯ ФАЗА"
     if primary:
@@ -502,7 +509,6 @@ def current_position(stack: Optional[PairStack], zigzag_h4_side: int = 0, by_tf:
     if local:
         return f"ЛОКАЛЬНЫЙ ИМПУЛЬС {_dir_word(local)} · СТАРШИЙ ТРЕНД НЕ ПОДТВЕРЖДЁН"
     return "RANGE / ПЕРЕХОДНАЯ ФАЗА"
-
 
 def effective_dxy_bias(dxy: Optional[IndexView]) -> int:
     """Сильный подтверждённый импульс не становится NEUTRAL из-за сжатия ZigZag."""
@@ -738,7 +744,7 @@ def build_pair_briefs(
             zigzag_h4_mixed=zigzag_h4_mixed,
             w1=_tf_label(stack, "W1"),
             m5=_tf_label(stack, "M5"),
-            position=current_position(stack, zigzag_h4_side, market.get(symbol) or {}),
+            position=current_position(stack, zigzag_h4_side, market.get(symbol) or {}, symbol),
             amd=amd_status,
         )
         technical_side = technical_pair_side(brief)

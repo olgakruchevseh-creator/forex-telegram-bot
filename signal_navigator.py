@@ -16,6 +16,7 @@ import ohlc_movement
 import movement_progress
 import market_state
 import market_regime
+import pullback_regime
 import zigzag_scanner
 import structure_context
 import precision_entry
@@ -28,7 +29,7 @@ import next_pivot_projection
 import trade_lifecycle
 import news as newsmod
 from chart_snapshot import freeze_by_tf
-from analysis import analyze_tf, currency_strength_dynamics
+from analysis import analyze_tf, currency_strength_dynamics, closed_candles
 
 log = logging.getLogger(__name__)
 
@@ -1511,14 +1512,24 @@ def process_lifecycle(market: dict, strength: dict[str, float] | None = None) ->
             pullback_bars = 0
             if extreme:
                 pullback_bars = sum(1 for bar in h1_path if bar.dt > extreme.dt)
-            min_pb_bars=int(getattr(cfg,"SIGNAL_PULLBACK_MIN_H1_BARS",3))
-            eq_atr=float(getattr(cfg,"SIGNAL_PULLBACK_EQUIVALENT_MOVE_ATR",0.85))
             av_pb=movement_progress.atr(h1_path,14) if len(h1_path)>=15 else 0.0
             counter_move=abs(float(h1_bar.close)-float(h1_best))
-            equivalent=bool(av_pb>0 and counter_move/av_pb>=eq_atr)
-            regime=market_regime.analyze_symbol(symbol, by_tf)
-            regime_name=regime.name if regime else "UNKNOWN"
-            pullback_confirmed=(pullback_bars>=min_pb_bars or equivalent) and regime_name not in ("RANGE","COMPRESSION")
+            # Lifecycle alerts must use exactly the same pullback/range decision
+            # as Context/Movement/Briefing.  The counter-route is opposite to
+            # the original signal; D1/H4 remain its structural parents.
+            def _closed_bias(tf: str) -> int:
+                minutes = {"D1": 1440, "H4": 240}[tf]
+                bars_tf = closed_candles((by_tf or {}).get(tf) or [], minutes)
+                if len(bars_tf) < 20:
+                    return 0
+                view = analyze_tf(symbol, tf, bars_tf)
+                return int(getattr(view, "bias", 0) or 0)
+            pb_state = pullback_regime.classify(
+                symbol, -direction, _closed_bias("D1"), _closed_bias("H4"), by_tf
+            )
+            equivalent = bool(pb_state.bars >= 2 and pb_state.move_atr >= float(
+                getattr(cfg, "SIGNAL_PULLBACK_EQUIVALENT_MOVE_ATR", 0.85)))
+            pullback_confirmed = pb_state.mode == "PULLBACK"
             if retrace >= min_retrace and pullback_confirmed and not item.get("pullback_open"):
                 item["pullback_open"] = True
                 item["pullback_retrace"] = fib_retrace
