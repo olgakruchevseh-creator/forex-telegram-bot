@@ -12,6 +12,7 @@ from pathlib import Path
 
 import config as cfg
 import ohlc_movement
+import market_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.chain_entries")
@@ -29,7 +30,7 @@ class Setup:
     level: float
     bos_dt: str
     last_dt: str
-    age: int = 0
+    age: int = 0  # closed H1 bars since BOS, never M15 scan cycles
     retest_seen: bool = False
     entry_sent: bool = False
     invalid: bool = False
@@ -109,56 +110,117 @@ def _strength_ok(setup: Setup, strength: dict[str, float]) -> bool:
     return gap >= need if setup.side == "LONG" else gap <= -need
 
 
-def confirm_entry(setup: Setup, bars: list[Candle], by_tf: dict, strength: dict[str, float]) -> dict | None:
-    if setup.entry_sent or setup.invalid or len(bars) < 20:
+def _tf_biases(by_tf: dict) -> dict[str, int]:
+    out = {}
+    for tf in ("D1", "H4", "H1", "M15"):
+        tb = _bars(by_tf, tf)
+        out[tf] = _bias(tf, tb) if len(tb) >= 20 else 0
+    return out
+
+
+def _h1_bars_since(h1: list[Candle], dt: str) -> int:
+    return sum(1 for bar in h1 if bar.dt > dt)
+
+
+def confirm_entry(setup: Setup, bars: list[Candle], by_tf: dict, strength: dict[str, float],
+                  previous_leg: dict | None = None) -> dict | None:
+    """Confirm one continuation leg on a CLOSED H1 candle.
+
+    M15 is auxiliary confirmation only.  The chain may add only after favourable
+    ATR-normalised progress from the previous delivered/reserved leg; it never
+    averages down and never treats repeated touches of one BOS as new legs.
+    """
+    if setup.entry_sent or setup.invalid:
         return None
-    current = bars[-1]
+    h1 = _bars(by_tf, "H1")
+    if len(h1) < 20:
+        return None
+    current = h1[-1]
     if current.dt <= setup.bos_dt or current.dt == setup.last_dt:
         return None
     setup.last_dt = current.dt
-    setup.age += 1
-    av = atr(bars, 14)
-    if av <= 0:
-        return None
-    if setup.age > int(getattr(cfg, "CHAIN_MAX_RETEST_BARS", 12)):
+    setup.age = _h1_bars_since(h1, setup.bos_dt)
+    if setup.age > int(getattr(cfg, "CHAIN_MAX_RETEST_H1_BARS", getattr(cfg, "CHAIN_MAX_RETEST_BARS", 12))):
         setup.invalid = True
         return None
+
+    av = atr(h1, 14)
+    if av <= 0:
+        return None
+    wanted = 1 if setup.side == "LONG" else -1
+
     tolerance = av * float(getattr(cfg, "CHAIN_RETEST_TOLERANCE_ATR", 0.22))
     failure = av * float(getattr(cfg, "CHAIN_INVALIDATION_ATR", 0.32))
-    wanted = 1 if setup.side == "LONG" else -1
+    reaction_body = av * float(getattr(cfg, "CHAIN_REACTION_BODY_ATR", 0.20))
+    directional_body = (current.close - current.open) * wanted
     if wanted > 0:
         if current.close < setup.level - failure:
             setup.invalid = True
             return None
         touched = current.low <= setup.level + tolerance
-        held = current.close > setup.level and current.close > current.open
+        held = current.close > setup.level and directional_body >= reaction_body
     else:
         if current.close > setup.level + failure:
             setup.invalid = True
             return None
         touched = current.high >= setup.level - tolerance
-        held = current.close < setup.level and current.close < current.open
+        held = current.close < setup.level and directional_body >= reaction_body
     if touched:
         setup.retest_seen = True
     if not (setup.retest_seen and touched and held):
         return None
 
-    confirm_tfs = ("H4", "H1", "M15") if setup.tf == "H4" else ("H1", "M15", "M5")
-    confirmations = 0
-    for tf in confirm_tfs:
-        tb = _bars(by_tf, tf)
-        if len(tb) >= 20 and _bias(tf, tb) == wanted:
-            confirmations += 1
+    # Continuation is not allowed inside a box/compression.  Invalidation above
+    # is evaluated first so a broken setup is retired even when regime is poor.
+    regime = market_regime.analyze_symbol(setup.symbol, by_tf)
+    regime_name = getattr(regime, "name", "UNKNOWN")
+    if regime_name in ("RANGE", "COMPRESSION"):
+        return None
+
+    # Anti-chase: a retest candle that closes too far from the structural level
+    # has already consumed the useful continuation location.
+    close_distance_atr = abs(current.close - setup.level) / av
+    if close_distance_atr > float(getattr(cfg, "CHAIN_MAX_ENTRY_DISTANCE_ATR", 0.75)):
+        return None
+
+    biases = _tf_biases(by_tf)
+    senior = (biases.get("H4", 0), biases.get("H1", 0))
+    if -wanted in senior:
+        return None
+    confirmations = sum(1 for tf in ("H4", "H1", "M15") if biases.get(tf) == wanted)
     if confirmations < int(getattr(cfg, "CHAIN_MIN_CONFIRMATIONS", 2)) or not _strength_ok(setup, strength):
         return None
+
+    chain_number = 1
+    advance_atr = 0.0
+    if previous_leg and previous_leg.get("side") == setup.side:
+        chain_number = int(previous_leg.get("number") or 0) + 1
+        if chain_number > int(getattr(cfg, "CHAIN_MAX_ENTRIES", 4)):
+            setup.invalid = True
+            return None
+        previous_price = float(previous_leg.get("entry_price") or 0.0)
+        advance_atr = ((float(current.close) - previous_price) * wanted / av) if previous_price else 0.0
+        if advance_atr < float(getattr(cfg, "CHAIN_MIN_ADVANCE_ATR", 0.45)):
+            return None
+        previous_level = float(previous_leg.get("level") or 0.0)
+        min_level_step = av * float(getattr(cfg, "CHAIN_MIN_LEVEL_ADVANCE_ATR", 0.15))
+        if previous_level and (float(setup.level) - previous_level) * wanted < min_level_step:
+            return None
+        min_gap_bars = int(getattr(cfg, "CHAIN_MIN_H1_BARS_BETWEEN_ENTRIES", 2))
+        if _h1_bars_since(h1, str(previous_leg.get("entry_dt") or "")) < min_gap_bars:
+            return None
+
     setup.entry_sent = True
-    reaction_atr = abs(current.close - setup.level) / av
-    quality = min(95, 76 + confirmations * 5 + min(7, int(reaction_atr * 8)))
+    reaction_atr = directional_body / av
+    quality = min(95, 75 + confirmations * 5 + min(6, int(reaction_atr * 8)) +
+                  (2 if chain_number > 1 and advance_atr >= 0.75 else 0))
     return {
         "symbol": setup.symbol, "tf": setup.tf, "side": setup.side,
         "level": setup.level, "bos_dt": setup.bos_dt, "entry_dt": current.dt,
-        "confirmations": confirmations, "quality": quality,
-        "confidence": min(92, quality - 4),
+        "entry_price": float(current.close), "confirmations": confirmations,
+        "quality": quality, "confidence": min(92, quality - 4),
+        "number": chain_number, "advance_atr": round(advance_atr, 2),
+        "regime": regime_name, "close_distance_atr": round(close_distance_atr, 2),
     }
 
 
@@ -174,6 +236,8 @@ def format_message(event: dict, number: int) -> str:
         f"Таймфрейм структуры: {event['tf']}",
         f"Уровень слома структуры: {_price(event['symbol'], event['level'])}",
         f"Подтверждение таймфреймов: {event['confirmations']}/3",
+        f"Режим рынка: {event.get('regime', 'UNKNOWN')}",
+        f"Продвижение от прошлой ступени: {event.get('advance_atr', 0):.2f} ATR",
         f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
         f"Факт: структура сломана {direction}; цена вернулась к пробитому уровню, удержала его и закрылась с подтверждением {event['side']}.",
     ])
@@ -249,13 +313,14 @@ def image_for_alert(text: str) -> io.BytesIO | None:
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
-    if int(state.get("logic_version") or 0) != 2:
+    if int(state.get("logic_version") or 0) != 3:
         state["pending"] = {}
-        state["logic_version"] = 2
+        state["logic_version"] = 3
     first = not bool(state.get("bootstrapped"))
     raw = state.get("setups") or {}
     setups = {key: Setup(**value) for key, value in raw.items()}
     chain = state.setdefault("chain_count", {})
+    legs = state.setdefault("last_leg", {})
     pending = state.setdefault("pending", {})
     messages: list[str] = []
     for digest, item in list(pending.items()):
@@ -277,20 +342,20 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if existing:
                     # BOS остаётся H1/H4, а возврат и удержание контролируются
                     # закрытой M15, чтобы не отдавать уже прошедший маршрут.
-                    event = confirm_entry(existing, _bars(by_tf, "M15"), by_tf, strength)
+                    event = confirm_entry(existing, _bars(by_tf, "H1"), by_tf, strength, legs.get(symbol))
                     if event and not first:
                         og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
                         if not og.get('allow',True): continue
                         if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                         count_key = f"{symbol}|{existing.side}"
                         opposite = f"{symbol}|{'SHORT' if existing.side == 'LONG' else 'LONG'}"
-                        chain[opposite] = 0
-                        chain[count_key] = int(chain.get(count_key) or 0) + 1
-                        text = format_message(event, chain[count_key])
+                        number = int(event.get("number") or 1)
+                        event["number"] = number
+                        # Do not commit chain_count/last_leg before Telegram ACK.
+                        # Pending delivery reserves this exact event and number.
+                        text = format_message(event, number)
                         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-                        pending[digest] = {
-                            "event": event, "number": chain[count_key],
-                        }
+                        pending[digest] = {"event": event, "number": number}
                         messages.append(text)
                         _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))
                 bos = detect_bos(symbol, tf, bars)
@@ -301,17 +366,37 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state["bootstrapped"] = True
     state["setups"] = {key: asdict(value) for key, value in setups.items()}
     state["chain_count"] = chain
+    state["last_leg"] = legs
     _save(state)
     return messages
 
 
 def mark_delivered(text: str) -> bool:
-    """Удаляет карточку из очереди только после успешной доставки Telegram."""
+    """Atomically commits a chain leg only after successful Telegram delivery."""
     state = _load()
     digest = hashlib.sha256((text or "").encode()).hexdigest()[:20]
-    if digest not in (state.get("pending") or {}):
+    pending = state.get("pending") or {}
+    item = pending.get(digest)
+    if not isinstance(item, dict):
         return False
-    state["pending"].pop(digest, None)
+    event = item.get("event") or {}
+    number = int(item.get("number") or event.get("number") or 1)
+    symbol, side = event.get("symbol"), event.get("side")
+    if symbol and side:
+        chain = state.setdefault("chain_count", {})
+        chain[f"{symbol}|{'SHORT' if side == 'LONG' else 'LONG'}"] = 0
+        chain[f"{symbol}|{side}"] = number
+        legs = state.setdefault("last_leg", {})
+        legs[symbol] = {
+            "side": side, "number": number,
+            "entry_price": float(event.get("entry_price") or 0.0),
+            "entry_dt": event.get("entry_dt") or "",
+            "level": float(event.get("level") or 0.0),
+            "tf": event.get("tf") or "H1",
+        }
+    pending.pop(digest, None)
+    state["pending"] = pending
     _save(state)
     _PENDING_CARDS.pop(text, None)
     return True
+

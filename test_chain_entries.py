@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import chain_entries as chain
 from analysis import Candle
@@ -38,8 +39,9 @@ class ChainEntryTests(unittest.TestCase):
         self.assertIsNotNone(setup)
         self.assertEqual((setup.side, setup.level), ("LONG", 1.1020))
 
+    @patch.object(chain.market_regime, "analyze_symbol", return_value=SimpleNamespace(name="TREND"))
     @patch.object(chain, "_bias", return_value=1)
-    def test_long_retest_confirms_entry(self, _bias):
+    def test_long_retest_confirms_entry(self, _bias, _regime):
         bars = series()
         setup = chain.Setup("x", "EUR/USD", "H1", "LONG", 1.1020, bars[-2].dt, bars[-2].dt)
         bars[-1] = Candle(bars[-1].dt, 1.1019, 1.1029, 1.1018, 1.1028)
@@ -56,6 +58,45 @@ class ChainEntryTests(unittest.TestCase):
         by_tf = {tf: bars for tf in chain.TF_MINUTES}
         self.assertIsNone(chain.confirm_entry(setup, bars, by_tf, {"EUR": .2, "USD": 0}))
         self.assertTrue(setup.invalid)
+
+
+    @patch.object(chain.market_regime, "analyze_symbol", return_value=SimpleNamespace(name="TREND"))
+    @patch.object(chain, "_bias", return_value=1)
+    def test_second_leg_requires_favourable_atr_progress(self, _bias, _regime):
+        bars = series()
+        setup = chain.Setup("x2", "EUR/USD", "H1", "LONG", 1.1020, bars[-3].dt, bars[-2].dt)
+        bars[-1] = Candle(bars[-1].dt, 1.1019, 1.1025, 1.1018, 1.1023)
+        by_tf = {tf: bars for tf in chain.TF_MINUTES}
+        previous = {"side":"LONG", "number":1, "entry_price":1.1022, "entry_dt":bars[-4].dt, "level":1.1018}
+        event = chain.confirm_entry(setup, bars, by_tf, {"EUR": .2, "USD": 0}, previous)
+        self.assertIsNone(event)
+        self.assertFalse(setup.entry_sent)
+
+    @patch.object(chain.market_regime, "analyze_symbol", return_value=SimpleNamespace(name="COMPRESSION"))
+    @patch.object(chain, "_bias", return_value=1)
+    def test_compression_blocks_chain_entry(self, _bias, _regime):
+        bars = series()
+        setup = chain.Setup("x3", "EUR/USD", "H1", "LONG", 1.1020, bars[-2].dt, bars[-2].dt)
+        bars[-1] = Candle(bars[-1].dt, 1.1019, 1.1029, 1.1018, 1.1028)
+        by_tf = {tf: bars for tf in chain.TF_MINUTES}
+        self.assertIsNone(chain.confirm_entry(setup, bars, by_tf, {"EUR": .2, "USD": 0}))
+        self.assertFalse(setup.entry_sent)
+
+
+    def test_delivery_ack_commits_last_leg(self):
+        event = {"symbol":"EUR/USD", "side":"LONG", "tf":"H1", "level":1.102,
+                 "bos_dt":"2026-01-01 10:00:00", "entry_dt":"2026-01-01 12:00:00",
+                 "entry_price":1.103, "confirmations":3, "quality":90, "confidence":86,
+                 "number":1, "advance_atr":0.0, "regime":"TREND"}
+        text = chain.format_message(event, 1)
+        import hashlib, json
+        digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+        chain._save({"logic_version":3, "pending":{digest:{"event":event,"number":1}},
+                     "chain_count":{}, "last_leg":{}})
+        self.assertTrue(chain.mark_delivered(text))
+        state = chain._load()
+        self.assertEqual(state["last_leg"]["EUR/USD"]["number"], 1)
+        self.assertNotIn(digest, state["pending"])
 
     def test_bootstrap_is_silent(self):
         bars = series()
