@@ -1,0 +1,9 @@
+ЗАМЕНИТЬ 2 СУЩЕСТВУЮЩИХ:
+hmm_regime.py
+config.py
+
+ДОБАВИТЬ 4 НОВЫХ:
+hmm_calibration.py
+test_hmm_calibration.py
+HMM_CALIBRATION_LAYER_V3_RU.md
+CHANGED_FILES_HMM_CALIBRATION_V3_RU.txt

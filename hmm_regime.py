@@ -161,4 +161,17 @@ def record_observation(symbol, by_tf, context, *, character=None, regime=None):
     with log_path.open('a',encoding='utf-8') as f: f.write(json.dumps(row,ensure_ascii=False,separators=(',',':'))+'\n')
     state[symbol]=stamp
     tmp=state_path.with_suffix('.tmp'); tmp.write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8'); tmp.replace(state_path)
+    # V3: refresh an OBSERVE_ONLY calibration snapshot after each genuinely new H1 row.
+    # Failure here must never affect signal/report delivery.
+    try:
+        import hmm_calibration
+        min_n=int(os.getenv('HMM_CALIBRATION_MIN_TRANSITIONS','120'))
+        prior=float(os.getenv('HMM_CALIBRATION_DIRICHLET_PRIOR','2.0'))
+        report=hmm_calibration.calibrate_file(log_path,min_rows=min_n,prior=prior)
+        cal_path=log_path.with_name('hmm_regime_calibration.json')
+        cal_tmp=cal_path.with_suffix('.tmp')
+        cal_tmp.write_text(json.dumps(report.as_dict(),ensure_ascii=False,indent=2),encoding='utf-8')
+        cal_tmp.replace(cal_path)
+    except Exception:
+        pass
     return True
