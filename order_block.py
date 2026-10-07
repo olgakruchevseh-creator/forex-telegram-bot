@@ -51,6 +51,7 @@ class OrderBlock:
     participation_ratio: float | None = None
     touch_count: int = 0
     first_touch_dt: str = ""
+    invalidation_displacement_atr: float = 0.0
 
 
 def _path() -> Path:
@@ -198,12 +199,14 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
         if current.close < block.low-invalid_buffer:
             block.invalid = True
             block.invalidation_reason = "price_break"
+            block.invalidation_displacement_atr = abs(current.close-current.open) / av
             return None
         wanted = 1
     else:
         if current.close > block.high+invalid_buffer:
             block.invalid = True
             block.invalidation_reason = "price_break"
+            block.invalidation_displacement_atr = abs(current.close-current.open) / av
             return None
         wanted = -1
 
