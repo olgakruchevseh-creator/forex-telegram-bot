@@ -138,7 +138,16 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
     sr=[x[1] for x in session_rows if x[1] > 0]
     session_range_atr=(median(sr)/av) if sr and av>0 else 0.0
     session_body_ratio=mean([abs(x[0].close-x[0].open)/x[1] for x in session_rows if x[1]>0] or [0.0])
-    session_activity=_clip(100*(.55*min(1.5,session_range_atr)/1.5+.45*session_body_ratio))
+    # Andersen-Bollerslev style intraday-periodicity adjustment: compare the
+    # current session's typical H1 range with the pair's own unconditional H1
+    # range.  This makes 'session character' relative to EUR/USD, USD/JPY, etc.
+    # rather than imposing a universal London/New-York stereotype.
+    all_ranges=[max(0.0,float(b.high)-float(b.low)) for b in bars[-120:]]
+    all_pos=[x for x in all_ranges if x>0]
+    base_range=median(all_pos) if all_pos else 0.0
+    periodic_factor=(median(sr)/base_range) if sr and base_range>0 else 1.0
+    # 1.0 = normal activity for this pair; 2.0 or more saturates the scale.
+    session_activity=_clip(50.0*min(2.0,max(0.0,periodic_factor)))
 
     reliability=_clip(100-(noise*.40)-min(25,abs(vol_ratio-1)*18)+eff*25+er_blend*15)
     return {
@@ -150,7 +159,8 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         'efficiency_ratio_8':round(er8,3),'efficiency_ratio_24':round(er24,3),
         'efficiency_ratio_72':round(er72,3),'efficiency_ratio_blend':round(er_blend,3),
         'session':current_session,'session_samples':len(session_rows),
-        'session_range_atr':round(session_range_atr,3),'session_activity':round(session_activity,1),
+        'session_range_atr':round(session_range_atr,3),'session_periodic_factor':round(periodic_factor,3),
+        'session_activity':round(session_activity,1),
         'atr_pct':round(atr_pct,4),'volatility_ratio':round(vol_ratio,3),
         'strength_gap':round(strength_gap,4),'reliability':round(reliability,1),
     }
@@ -188,9 +198,13 @@ def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
         regime_fit=.55*(1-trend)+.30*noise+.15*(1-impulse)
     else:
         regime_fit=.50
-    # Fixed transparent weights; sum=1.00.  Reliability receives the largest
-    # share because it already penalises unstable volatility/noise.
-    score=100*(.28*reliability+.22*sess+.18*regime_fit+.17*(1-noise)+.15*strength)
+    # No hand-tuned importance coefficients.  Combine the five independent
+    # context dimensions with an equal-weight geometric mean.  A weak dimension
+    # therefore cannot be hidden by one very strong reading, while no professor-
+    # looking coefficient is invented where the literature does not prescribe one.
+    components01=[reliability,sess,regime_fit,(1-noise),strength]
+    floor=0.01
+    score=100*math.prod(max(floor,min(1.0,x)) for x in components01)**(1.0/len(components01))
     score=_clip(score)
     if score >= 72: band='СИЛЬНОЕ СОГЛАСОВАНИЕ'
     elif score >= 58: band='РАБОЧЕЕ СОГЛАСОВАНИЕ'
@@ -200,7 +214,8 @@ def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
             'components':{'pair_reliability':round(100*reliability,1),
                           'session_fit':round(100*sess,1),'regime_fit':round(100*regime_fit,1),
                           'cleanliness':round(100*(1-noise),1),'strength_separation':round(100*strength,1)},
-            'weights':{'pair_reliability':.28,'session_fit':.22,'regime_fit':.18,'cleanliness':.17,'strength_separation':.15}}
+            'weights':{'pair_reliability':.20,'session_fit':.20,'regime_fit':.20,'cleanliness':.20,'strength_separation':.20},
+            'combiner':'EQUAL_WEIGHT_GEOMETRIC_MEAN'}
 
 
 def attach_interaction(profile: dict, regime: str | None = None) -> dict:
