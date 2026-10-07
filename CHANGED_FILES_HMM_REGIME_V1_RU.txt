@@ -1,0 +1,5 @@
+hmm_regime.py — новый dependency-free causal Gaussian HMM: EM, log-space forward/backward, live filtered posterior, transition matrix, entropy/confidence, age, expected duration, canonical labels.
+test_hmm_regime.py — тесты вероятностей/transition matrix, causal prefix invariance и duration identity.
+config.py — параметры HMM OBSERVE_ONLY.
+HMM_REGIME_CONTEXT_V1_RU.md — архитектура, формулы, ограничения и интеграционный контракт.
+CHANGED_FILES_HMM_REGIME_V1_RU.txt — список файлов пакета.
