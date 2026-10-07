@@ -13,7 +13,7 @@ import config as cfg
 import module_evidence_bus
 import ohlc_movement
 import displacement
-from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
+from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
 
 log = logging.getLogger("fxbot.disbalance")
 TF_MINUTES = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
@@ -77,12 +77,33 @@ def _closed_map(by_tf: dict) -> dict[str, list[Candle]]:
     }
 
 
+def _structural_bos_level(tf: str, bars: list[Candle], side_i: int, lookback: int) -> float:
+    """Return the latest confirmed structural swing level for BOS.
+
+    Prefer the project's existing ZigZag geometry (confirmed on bars before the
+    impulse).  The rolling extreme remains a conservative fallback when a short
+    or unusually flat history cannot form a confirmed swing.
+    """
+    history = bars[:-1]
+    pct = float((getattr(cfg, "ZIGZAG_PCT", {}) or {}).get(tf, .18))
+    min_bars = int(getattr(cfg, "ZIGZAG_MIN_BARS", 3))
+    try:
+        swings = zigzag(history, pct, min_bars)
+    except Exception:
+        swings = []
+    wanted = "H" if side_i > 0 else "L"
+    structural = [x for x in swings if str(getattr(x, "kind", "")).upper().startswith(wanted)]
+    if structural:
+        return float(structural[-1].price)
+    previous = history[-lookback:]
+    return max(x.high for x in previous) if side_i > 0 else min(x.low for x in previous)
+
+
 def _candidate(symbol: str, tf: str, bars: list[Candle]) -> Signal | None:
     lookback = int(getattr(cfg, "DISBALANCE_BOS_LOOKBACK", 12))
     if len(bars) < max(25, lookback + 16):
         return None
     c = bars[-1]
-    previous = bars[-1-lookback:-1]
     av = atr(bars[:-1], 14)
     if av <= 0:
         return None
@@ -96,13 +117,13 @@ def _candidate(symbol: str, tf: str, bars: list[Candle]) -> Signal | None:
     if not side_i or impulse < min_impulse or body_ratio < min_ratio:
         return None
     if side_i > 0:
-        bos = max(x.high for x in previous)
+        bos = _structural_bos_level(tf, bars, side_i, lookback)
         if c.close <= bos + av * 0.04 or bars[-2].close > bos:
             return None
         zone_low, zone_high = c.open, c.open + body * 0.5
         side = "LONG"
     else:
-        bos = min(x.low for x in previous)
+        bos = _structural_bos_level(tf, bars, side_i, lookback)
         if c.close >= bos - av * 0.04 or bars[-2].close < bos:
             return None
         zone_low, zone_high = c.open - body * 0.5, c.open
@@ -137,6 +158,12 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float]) -> Sign
             continue
         if (wanted > 0 and gap < min_gap) or (wanted < 0 and gap > -min_gap):
             continue
+        # A Disbalance is useful only while it is still a NEW executable move.
+        # Keep the global Telegram late-entry gate as a second safety net, but do
+        # not publish an already-consumed impulse into the evidence bus.
+        early = ohlc_movement.early_entry_check(by_tf, sig.side)
+        if not early.get("allow", True):
+            continue
         # Displacement is an independent impulse-quality layer. Disbalance still
         # requires its own BOS; this only rejects weak/inefficient breakout candles.
         disp = displacement.detect(sig.tf, by_tf.get(sig.tf) or []) if getattr(cfg, "DISPLACEMENT_ENABLED", True) else None
@@ -166,7 +193,7 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(s: Signal) -> str:
-    module_evidence_bus.publish('FVG', s)
+    module_evidence_bus.publish('DISBALANCE', s)
     meaning = "покупатели создали сильное смещение вверх" if s.side == "LONG" else "продавцы создали сильное смещение вниз"
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",

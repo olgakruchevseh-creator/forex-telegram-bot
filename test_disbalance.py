@@ -58,6 +58,19 @@ class DisbalanceTests(unittest.TestCase):
             self.assertEqual(disbalance.process_market({"EUR/USD": market}, {"EUR": .2, "USD": 0}), [])
             self.assertEqual(disbalance.process_market({"EUR/USD": market}, {"EUR": .2, "USD": 0}), [])
 
+    def test_disbalance_publishes_own_source_not_fvg(self):
+        sig = disbalance._candidate("EUR/USD", "H1", impulse_bars(1))
+        self.assertIsNotNone(sig)
+        with patch.object(disbalance.module_evidence_bus, "publish") as pub:
+            disbalance.format_message(sig)
+        self.assertEqual(pub.call_args.args[0], "DISBALANCE")
+
+    def test_module_level_early_entry_gate_blocks_consumed_move(self):
+        market = {tf: impulse_bars(1) for tf in disbalance.TF_MINUTES}
+        with patch.object(disbalance, "_tf_bias", return_value=1), \
+             patch.object(disbalance.ohlc_movement, "early_entry_check", return_value={"allow": False, "reason": "fresh_impulse_already_extended"}):
+            self.assertIsNone(disbalance.analyze_symbol("EUR/USD", market, {"EUR": .2, "USD": 0}))
+
 
 if __name__ == "__main__":
     unittest.main()
