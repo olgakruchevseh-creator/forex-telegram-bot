@@ -275,18 +275,33 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     return out
 
 
-def _line(points: list[tuple[int, float]], at: int) -> tuple[float, float] | None:
-    """Линейная граница через подтверждённые экстремумы: значение и наклон."""
+def _line_fit(points: list[tuple[int, float]], at: int) -> tuple[float, float, float, float] | None:
+    """OLS-граница: значение, наклон, R² и средняя абсолютная ошибка.
+
+    R²/ошибка позволяют отличить настоящую геометрическую границу от линии,
+    случайно проведённой через шумные экстремумы.
+    """
     if len(points) < 2:
         return None
-    points = points[-4:]
+    points = points[-5:]
     xs, ys = [float(x) for x, _ in points], [float(y) for _, y in points]
     xm, ym = sum(xs) / len(xs), sum(ys) / len(ys)
     den = sum((x-xm) ** 2 for x in xs)
     if den <= 0:
         return None
     slope = sum((x-xm)*(y-ym) for x, y in zip(xs, ys)) / den
-    return ym + slope*(at-xm), slope
+    intercept = ym - slope*xm
+    fitted = [intercept + slope*x for x in xs]
+    ss_res = sum((y-yhat)**2 for y, yhat in zip(ys, fitted))
+    ss_tot = sum((y-ym)**2 for y in ys)
+    r2 = 1.0 if ss_tot <= 1e-18 else max(0.0, min(1.0, 1.0-ss_res/ss_tot))
+    mae = sum(abs(y-yhat) for y, yhat in zip(ys, fitted)) / len(ys)
+    return intercept + slope*float(at), slope, r2, mae
+
+
+def _line(points: list[tuple[int, float]], at: int) -> tuple[float, float] | None:
+    fit = _line_fit(points, at)
+    return (fit[0], fit[1]) if fit else None
 
 
 def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
@@ -303,11 +318,19 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(tf, 3)))
     highs = [(i, price) for i, price, kind in piv if kind == "H"]
     lows = [(i, price) for i, price, kind in piv if kind == "L"]
-    upper, lower = _line(highs, len(history)), _line(lows, len(history))
-    if not upper or not lower or len(highs) < 2 or len(lows) < 2:
+    upper_fit, lower_fit = _line_fit(highs, len(history)), _line_fit(lows, len(history))
+    if not upper_fit or not lower_fit or len(highs) < 2 or len(lows) < 2:
         return out
-    top, top_slope = upper
-    bottom, bottom_slope = lower
+    top, top_slope, top_r2, top_mae = upper_fit
+    bottom, bottom_slope, bottom_r2, bottom_mae = lower_fit
+    # Две точки задают линию идеально по определению; при 3+ касаниях требуем
+    # реальное качество аппроксимации и ограничиваем разброс относительно ATR.
+    min_r2 = float(getattr(cfg, "PATTERN_LINE_MIN_R2", .55))
+    max_mae = av * float(getattr(cfg, "PATTERN_LINE_MAX_MAE_ATR", .28))
+    if ((len(highs) >= 3 and top_r2 < min_r2 and abs(top_slope/av) > .01) or
+        (len(lows) >= 3 and bottom_r2 < min_r2 and abs(bottom_slope/av) > .01) or
+        top_mae > max_mae or lower_fit[3] > max_mae):
+        return out
     if top <= bottom:
         return out
     top_n, bottom_n = top_slope / av, bottom_slope / av
@@ -325,44 +348,47 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     old_x = max(0, len(history)-18)
     old_top = top-top_slope*(len(history)-old_x)
     old_bottom = bottom-bottom_slope*(len(history)-old_x)
-    converging = (top-bottom) < (old_top-old_bottom) * .82
+    old_width = old_top-old_bottom
+    width = top-bottom
+    converging = old_width > 0 and width < old_width * float(getattr(cfg, "PATTERN_CONVERGENCE_MAX_RATIO", .82))
+    fit_bonus = int(round(((top_r2 + bottom_r2) / 2.0) * 4))
 
     # Нейтральные фигуры получают направление только от фактического пробоя.
     if abs(top_n) <= .035 and bottom_n >= .018 and converging:
         if breaks_up:
-            _add(out, "Восходящий треугольник — пробой вверх", "LONG", tf, 86, 82,
+            _add(out, "Восходящий треугольник — пробой вверх", "LONG", tf, 86+fit_bonus, 82+fit_bonus,
                  "Горизонтальное сопротивление и растущие минимумы завершены; закрытая свеча пробила верхнюю границу.", top, last)
         elif breaks_down:
-            _add(out, "Восходящий треугольник — пробой вниз", "SHORT", tf, 80, 76,
+            _add(out, "Восходящий треугольник — пробой вниз", "SHORT", tf, 80+fit_bonus, 76+fit_bonus,
                  "Цена нарушила растущую нижнюю границу закрытой свечой; бычий сценарий фигуры отменён.", bottom, last)
     if top_n <= -.018 and abs(bottom_n) <= .035 and converging:
         if breaks_down:
-            _add(out, "Нисходящий треугольник — пробой вниз", "SHORT", tf, 86, 82,
+            _add(out, "Нисходящий треугольник — пробой вниз", "SHORT", tf, 86+fit_bonus, 82+fit_bonus,
                  "Снижающиеся максимумы и горизонтальная поддержка завершены; закрытая свеча пробила нижнюю границу.", bottom, last)
         elif breaks_up:
-            _add(out, "Нисходящий треугольник — пробой вверх", "LONG", tf, 80, 76,
+            _add(out, "Нисходящий треугольник — пробой вверх", "LONG", tf, 80+fit_bonus, 76+fit_bonus,
                  "Цена нарушила снижающуюся верхнюю границу закрытой свечой; медвежий сценарий фигуры отменён.", top, last)
     if top_n <= -.015 and bottom_n >= .015 and converging:
         side, level = ("LONG", top) if breaks_up else (("SHORT", bottom) if breaks_down else ("", 0))
         if side:
-            _add(out, "Симметричный треугольник", side, tf, 84, 80,
+            _add(out, "Симметричный треугольник", side, tf, 84+fit_bonus, 80+fit_bonus,
                  f"Сходящиеся границы завершены; закрытая свеча подтвердила пробой {'вверх' if side == 'LONG' else 'вниз'}.", level, last)
 
     # Клин: обе границы наклонены в одну сторону, но диапазон сужается.
     if converging and top_n < -.015 and bottom_n < -.015 and breaks_up:
-        _add(out, "Падающий клин", "LONG", tf, 87, 83,
+        _add(out, "Падающий клин", "LONG", tf, 87+fit_bonus, 83+fit_bonus,
              "Обе границы снижались и сходились; закрытая свеча пробила верхнюю границу клина.", top, last)
     if converging and top_n > .015 and bottom_n > .015 and breaks_down:
-        _add(out, "Восходящий клин", "SHORT", tf, 87, 83,
+        _add(out, "Восходящий клин", "SHORT", tf, 87+fit_bonus, 83+fit_bonus,
              "Обе границы росли и сходились; закрытая свеча пробила нижнюю границу клина.", bottom, last)
 
     # Прямоугольник: почти горизонтальные границы и не менее двух касаний.
     if abs(top_n) <= .035 and abs(bottom_n) <= .035:
         if breaks_up:
-            _add(out, "Бычий прямоугольник", "LONG", tf, 84, 80,
+            _add(out, "Бычий прямоугольник", "LONG", tf, 84+fit_bonus, 80+fit_bonus,
                  "Боковой диапазон завершён закрытым пробоем верхней границы.", top, last)
         elif breaks_down:
-            _add(out, "Медвежий прямоугольник", "SHORT", tf, 84, 80,
+            _add(out, "Медвежий прямоугольник", "SHORT", tf, 84+fit_bonus, 80+fit_bonus,
                  "Боковой диапазон завершён закрытым пробоем нижней границы.", bottom, last)
 
     # Флаг/вымпел требует выраженного импульса перед короткой консолидацией.
@@ -373,11 +399,11 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     narrowed = _range(consolidation[-1]) < max(_range(x) for x in consolidation[:4]) * .75
     if impulse >= 1.8 and last.close > cons_high + tolerance and _bull(last):
         name = "Бычий вымпел" if narrowed else "Бычий флаг"
-        _add(out, name, "LONG", tf, 86, 82,
+        _add(out, name, "LONG", tf, 86+fit_bonus, 82+fit_bonus,
              "После бычьего импульса коррекционная фигура завершилась закрытым пробоем вверх.", cons_high, last)
     if impulse <= -1.8 and last.close < cons_low - tolerance and _bear(last):
         name = "Медвежий вымпел" if narrowed else "Медвежий флаг"
-        _add(out, name, "SHORT", tf, 86, 82,
+        _add(out, name, "SHORT", tf, 86+fit_bonus, 82+fit_bonus,
              "После медвежьего импульса коррекционная фигура завершилась закрытым пробоем вниз.", cons_low, last)
     return out
 
@@ -480,6 +506,17 @@ def _inside(value: float, limits: tuple[float, float], tol: float) -> bool:
     return lo - tol <= value <= hi + tol
 
 
+def _ratio_quality(value: float, limits: tuple[float, float], tol: float) -> float:
+    """0..1: насколько отношение близко к ядру разрешённой Fibonacci-зоны."""
+    lo, hi = sorted((float(limits[0]), float(limits[1])))
+    lo, hi = lo-tol, hi+tol
+    if value < lo or value > hi:
+        return 0.0
+    mid = (lo+hi)/2.0
+    half = max((hi-lo)/2.0, 1e-12)
+    return max(0.0, 1.0-abs(value-mid)/half)
+
+
 def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     """Геометрия XABCD для заявленных в настройках гармонических фигур."""
     out: list[Pattern] = []
@@ -495,7 +532,9 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     if min(xa, ab, bc, cd) <= 0:
         return out
     ratios = {"xb": ab/xa, "ac": bc/ab, "bd": cd/bc,
-              "xd": abs(d[1]-a[1])/xa, "cd": cd/bc}
+              # XD is measured from X to D relative to XA.  The previous A→D
+              # numerator was dimensionally plausible but geometrically wrong.
+              "xd": abs(d[1]-x[1])/xa, "cd": cd/bc}
     last = bars[-1]
     side = "LONG" if d[2] == "L" else "SHORT"
     if not (_bull(last) if side == "LONG" else _bear(last)):
@@ -511,7 +550,9 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
         if rules and all(name in ratios and _inside(ratios[name], limits, tol)
                          for name, limits in rules.items()):
             details = ", ".join(f"{name.upper()}={ratios[name]:.2f}" for name in rules)
-            _add(out, f"Гармонический паттерн {label}", side, tf, 88, 83,
+            ratio_q = sum(_ratio_quality(ratios[name], limits, tol) for name, limits in rules.items()) / len(rules)
+            geometry_bonus = int(round(ratio_q * 5))
+            _add(out, f"Гармонический паттерн {label}", side, tf, 84+geometry_bonus, 79+geometry_bonus,
                  f"Завершена зеркальная структура XABCD ({details}); закрытая свеча подтвердила реакцию от точки D.",
                  d[1], last)
     return out
@@ -530,15 +571,22 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     if min(ab, bc, cd) <= 0 or b[2] == c[2] or c[2] == d[2]:
         return out
     ratio_bc, ratio_cd = bc/ab, cd/ab
-    if .382 <= ratio_bc <= .886 and .90 <= ratio_cd <= 1.68:
+    bc_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("bc", (.382, .886))
+    cd_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("cd_ab", (1.0, 1.68))
+    tol = float(getattr(cfg, "FIB_TOL", .06))
+    if _inside(ratio_bc, bc_limits, tol) and _inside(ratio_cd, cd_limits, tol):
         side = "LONG" if d[2] == "L" else "SHORT"
         last = bars[-1]
         # Это только первичное подтверждение геометрии. Перед отправкой
-        # harmonic_confirmation() дополнительно проверит H1, M15 и силу.
+        # harmonic_confirmation() дополнительно проверит закрытый H1 и силу.
         confirmed = last.close > last.open if side == "LONG" else last.close < last.open
         if confirmed:
-            q = 82 + int(max(0, 8 - abs(1-ratio_cd)*10))
-            _add(out, "Гармонический AB=CD", side, tf, q, 80, f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last)
+            ratio_q = (_ratio_quality(ratio_bc, bc_limits, tol) + _ratio_quality(ratio_cd, cd_limits, tol)) / 2.0
+            time_ab, time_cd = max(1, b[0]-a[0]), max(1, d[0]-c[0])
+            time_sym = min(time_ab, time_cd) / max(time_ab, time_cd)
+            geometry = int(round(ratio_q*5 + time_sym*3))
+            q = min(92, 82 + geometry)
+            _add(out, "Гармонический AB=CD", side, tf, q, min(90, 78+geometry), f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last)
     return out
 
 
