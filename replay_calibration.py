@@ -112,13 +112,14 @@ def _evaluate(rec,h1):
     elif h3['mae_atr']>h3['mfe_atr'] and h3['mae_atr']>=0.6: timing='adverse_first'
     return {'schema':1,'decision_id':rec.get('event_id'),'evaluated_utc':datetime.now(timezone.utc).isoformat(timespec='seconds'),
       'pair':rec.get('pair'),'side':side,'source':rec.get('source'),'status':rec.get('status'),'reason':rec.get('reason',''),
+      'session':rec.get('session'),'timeframe':rec.get('timeframe'),
       'quality':rec.get('quality'),'probability':rec.get('probability'),'regime':_regime(rec),'entry':entry,'atr_h1':round(a,7),
       'horizons_h1':horizons,'targets_hit_8h':hit,'target_hit_time':hit_time,'target_hit_minutes':hit_minutes,'efficiency_3h':round(efficiency,3),'timing_class':timing}
 
 def _build_calibration(outcomes):
     groups=defaultdict(lambda:{'n':0,'mfe':0.0,'mae':0.0,'eff':0.0,'tr1':0,'tr1_known':0,'weak':0})
     for r in outcomes:
-        key='|'.join(str(x or '-') for x in (r.get('source'),r.get('pair'),r.get('status'),r.get('regime')))
+        key='|'.join(str(x or '-') for x in (r.get('source'),r.get('pair'),r.get('status'),r.get('regime'),r.get('session'),r.get('timeframe')))
         g=groups[key]; h=(r.get('horizons_h1') or {}).get('3') or {}; g['n']+=1
         g['mfe']+=float(h.get('mfe_atr') or 0); g['mae']+=float(h.get('mae_atr') or 0); g['eff']+=float(r.get('efficiency_3h') or 0)
         hits=r.get('targets_hit_8h') or {}
