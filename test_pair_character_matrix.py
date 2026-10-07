@@ -66,3 +66,24 @@ def test_adaptive_thresholds_change_with_pair_history():
     a=pcm.analyze('EUR/USD',{'H1':bars(True,180)}, {})['adaptive_thresholds']
     b=pcm.analyze('GBP/USD',{'H1':bars(False,180)}, {})['adaptive_thresholds']
     assert a['noise']['median'] != b['noise']['median'] or a['impulse']['median'] != b['impulse']['median']
+
+
+def test_joint_character_matrix_is_normalized_and_redundancy_aware():
+    r=pcm.analyze('EUR/USD',{'H1':bars(True,180)}, {})
+    j=r['character_matrix']
+    assert 0 <= j['score'] <= 100
+    assert j['observe_only'] is True
+    assert j['normalization'] == 'CAUSAL_EMPIRICAL_PERCENTILE'
+    assert j['redundancy_control'] == 'INVERSE_ABSOLUTE_CORRELATION_PENALTY'
+    assert abs(sum(j['weights'].values())-1.0) < 0.001
+    assert set(j['normalized']) == {'trend_persistence','impulse','noise','volatility'}
+    assert 1.0 <= j['effective_families'] <= 4.01
+    for a,row in j['correlation'].items():
+        assert row[a] == 1.0
+        for v in row.values(): assert -1.0 <= v <= 1.0
+
+def test_redundancy_weights_penalize_duplicate_families():
+    x=list(range(30)); alt=[(-1)**i*i for i in range(30)]
+    w,c=pcm._redundancy_adjusted_weights({'a':x,'b':x,'c':alt,'d':[i*i%17 for i in range(30)]})
+    assert abs(c['a']['b']) > .99
+    assert abs(sum(w.values())-1.0) < 1e-9

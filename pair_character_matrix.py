@@ -79,6 +79,49 @@ def _adaptive_band(values):
     return {'low':_quantile(vals,1/3),'high':_quantile(vals,2/3),'median':m,
             'mad_sigma':rs,'samples':len(vals),'method':'EMPIRICAL_TERTILES_MAD'}
 
+
+
+def _redundancy_adjusted_weights(histories: dict) -> tuple[dict, dict]:
+    """Correlation-aware family weights; absolute correlation prevents +/- duplicates."""
+    names=list(histories)
+    corr={a:{} for a in names}
+    penalties={}
+    for a in names:
+        for b in names:
+            corr[a][b]=1.0 if a==b else _corr(histories[a], histories[b])
+        penalties[a]=sum(abs(corr[a][b]) for b in names if b != a)
+    raw={a:1.0/(1.0+penalties[a]) for a in names}
+    total=sum(raw.values()) or 1.0
+    weights={a:raw[a]/total for a in names}
+    return weights,corr
+
+def _joint_character_score(current: dict, histories: dict) -> dict:
+    """Joint normalization of four families without counting correlated evidence twice.
+
+    Each family first becomes its own causal empirical percentile. Noise is converted
+    to cleanliness only at the final context-quality composition. Family weights are
+    then reduced when that family is strongly correlated (positively or negatively)
+    with the other families. This is descriptive/context-only, never a direction vote.
+    """
+    names=('trend_persistence','impulse','noise','volatility')
+    normalized={n:_percentile_rank(histories.get(n,[]), current.get(n,50.0)) for n in names}
+    weights,corr=_redundancy_adjusted_weights({n:histories.get(n,[]) for n in names})
+    quality=dict(normalized); quality['noise']=100.0-normalized['noise']
+    score=sum(weights[n]*quality[n] for n in names)
+    # Effective independent-family count (Kish ESS): 1..4, transparent diagnostic.
+    ess=1.0/sum(w*w for w in weights.values()) if weights else 0.0
+    return {
+        'score':round(_clip(score),1),
+        'normalized':{k:round(v,1) for k,v in normalized.items()},
+        'quality_components':{k:round(v,1) for k,v in quality.items()},
+        'weights':{k:round(v,4) for k,v in weights.items()},
+        'correlation':{a:{b:round(v,3) for b,v in row.items()} for a,row in corr.items()},
+        'effective_families':round(ess,2),
+        'normalization':'CAUSAL_EMPIRICAL_PERCENTILE',
+        'redundancy_control':'INVERSE_ABSOLUTE_CORRELATION_PENALTY',
+        'observe_only':True,
+    }
+
 def _zscore(values, x):
     vals=[float(v) for v in values if math.isfinite(float(v))]
     if len(vals)<8: return 0.0
@@ -217,6 +260,10 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
         vb=mean(base_abs) if base_abs else 0.0
         vr=(mean(recent_abs)/vb) if recent_abs and vb else 1.0
         hist_volratio.append(_clip(50+35*math.log(max(.25,min(4.0,vr)),2)))
+    joint_character=_joint_character_score(
+        {'trend_persistence':persistence,'impulse':impulse,'noise':noise,'volatility':volatility},
+        {'trend_persistence':hist_persistence,'impulse':hist_impulse,'noise':hist_noise,'volatility':hist_volratio},
+    )
     trend_band=_adaptive_band(hist_persistence)
     impulse_band=_adaptive_band(hist_impulse)
     noise_band=_adaptive_band(hist_noise)
@@ -280,6 +327,8 @@ def analyze(symbol: str, by_tf: dict, strength: dict | None=None) -> dict:
             'volatility':{k:(round(v,3) if isinstance(v,float) else v) for k,v in volatility_band.items()},
             'quantiles':[round(1/3,6),round(2/3,6)],'causal':True,'observe_only':True,
         },
+        'character_matrix':joint_character,
+        'character_matrix_score':joint_character['score'],
         'strength_gap':round(strength_gap,4),'reliability':round(reliability,1),
     }
 
