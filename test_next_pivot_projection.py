@@ -152,7 +152,8 @@ def test_session_projection_has_direction_when_statistical_model_is_unavailable(
     assert result["side"] in ("LONG", "SHORT")
     assert result["estimated"] is True
     assert result["bars_high"] == 8
-    assert result["probability"] >= 50
+    assert result["probability"] is None
+    assert int(result["estimate_score"]) >= 50
 
 
 def test_session_chart_can_show_news_layer(monkeypatch):

@@ -480,7 +480,7 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     else:
         lines.append(f"Эхо: {_side_badge(None)}")
 
-    if pr:
+    if pr and pside:
         decimals = 3 if "JPY" in symbol else 5
         kind = "ВЕРШИНЫ" if pr.get("kind") == "high" else "ОСНОВАНИЯ"
         lines.append(f"Next Pivot: {_side_badge(pside)} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
@@ -581,14 +581,27 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
     # Echo/Pivot: it estimates the next structural corner from the pair's own
     # completed H1 swing lengths/amplitudes, then shows a possible opposite leg.
     # Both legs are projections only and never become confirmed swing points.
-    zz_swings = zigzag(bars, float(cfg.ZIGZAG_PCT.get("H1", .18)), cfg.ZIGZAG_MIN_BARS)
+    full_h1 = closed_candles(by_tf.get("H1") or [], 60)
+    offset = max(0, len(full_h1) - len(bars))
+    exported = zz.get("h1_confirmed_swings") or []
+    if exported:
+        raw_swings = exported
+    else:
+        raw_swings = [{"index": point.index, "price": point.price, "kind": point.kind}
+                      for point in zigzag(full_h1, float(cfg.ZIGZAG_PCT.get("H1", .18)), cfg.ZIGZAG_MIN_BARS)]
+    class _Swing:
+        def __init__(self, index, price, kind):
+            self.index, self.price, self.kind = index, price, kind
+    zz_swings = [_Swing(int(point["index"]) - offset, float(point["price"]), point["kind"])
+                 for point in raw_swings if int(point["index"]) >= offset]
     zz_projection = []
-    if zz_swings and zz_mid:
-        amplitudes = [abs(b.price-a.price) for a,b in zip(zz_swings, zz_swings[1:]) if b.index > a.index]
+    projection_swings = raw_swings or []
+    if projection_swings and zz_mid:
+        amplitudes = [abs(float(b["price"])-float(a["price"])) for a,b in zip(projection_swings, projection_swings[1:]) if int(b["index"]) > int(a["index"])]
         if amplitudes:
             from statistics import median
             typical_amp = float(median(amplitudes[-10:]))
-            last = zz_swings[-1]
+            last = _Swing(int(projection_swings[-1]["index"]), float(projection_swings[-1]["price"]), projection_swings[-1]["kind"])
             next_sign = 1 if last.kind == "low" else -1
             corner_price = float(last.price) + next_sign * typical_amp
             # A projected corner must remain beyond the current close in the
@@ -649,7 +662,7 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         draw.ellipse((cx-6,cy-6,cx+6,cy+6),outline="#f1f5fb",width=2)
         if zz_low and zz_high:
             draw.text((max(left,cx-95),max(top,cy-31)),f"≈ {zz_low}–{zz_high} H1 до угла",fill="#f1f5fb",font=small)
-        draw.text((min(right-210,zp[2][0]-80),max(top,zp[2][1]+8)),"возможное продолжение",fill="#cbd3df",font=small)
+        draw.text((min(right-250,zp[2][0]-110),max(top,zp[2][1]+8)),"схема: возможное продолжение",fill="#cbd3df",font=small)
 
     boundary=x_at(len(bars)-1); draw.line((boundary,top,boundary,bottom),fill="#707b8d",width=2)
     draw.text((max(left,boundary-72),bottom-25),"СЕЙЧАС",fill="#b9c3d3",font=small)
@@ -661,7 +674,8 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         for a,b in zip(pts,pts[1:]):
             for n in range(0,14,2):
                 t1=n/14;t2=min(1,(n+1)/14);draw.line((a[0]+(b[0]-a[0])*t1,a[1]+(b[1]-a[1])*t1,a[0]+(b[0]-a[0])*t2,a[1]+(b[1]-a[1])*t2),fill=ecol,width=5)
-        draw.text((boundary+12,top+8),f"ЭХО {echo.get('side','—')} · {echo.get('direction_probability',echo.get('confidence','—'))}%",fill=ecol,font=small)
+        echo_pct = echo.get("raw_confidence", echo.get("direction_probability", echo.get("confidence", "—")))
+        draw.text((boundary+12,top+8),f"ЭХО {echo.get('side','—')} · доля путей {echo_pct}%",fill=ecol,font=small)
 
     # Pivot: zone + route into it + projected reaction after touch.
     if pivot:

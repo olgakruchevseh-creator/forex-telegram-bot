@@ -30,7 +30,8 @@ def test_echo_report_separates_data_quality_and_direction(monkeypatch):
     monkeypatch.setattr(reports.echo_projection,"analyze",lambda *a,**k:fake)
     monkeypatch.setattr(reports,"_minimal_echo_ray",lambda *a,**k:object())
     text=reports._echo_report("EUR/USD",{},[],9,"АЗИЯ","ЕВРОПА",{})["text"]
-    assert "Вероятность направления: 72%" in text
+    assert "Доля похожих исторических путей: 72%" in text
+    assert "Вероятность направления: 72%" not in text
     assert "Достаточность данных для траектории: 38%" in text
     assert "+2ч:" not in text and "+4ч:" not in text
 

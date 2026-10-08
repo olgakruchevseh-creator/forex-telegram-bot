@@ -26,9 +26,17 @@ def rising_bars(count=180):
 
 class EchoProjectionTests(unittest.TestCase):
     def test_insufficient_history_with_ambiguous_context_stays_silent(self):
-        # Новая логика Echo не выдумывает сторону из слабого context-only fallback.
+        # Короткой истории недостаточно для аналогов. Fallback остаётся явным
+        # нейтральным состоянием и не выбирает сторону. Часовой проход его пропускает.
         result = echo.analyze("EUR/USD", {"H1": rising_bars(40)})
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["side"])
+        self.assertIsNone(result["confidence"])
+        self.assertTrue(result["estimated"])
+        import os, tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"STATE_DIR": directory}):
+            self.assertEqual([], echo.process_market({"EUR/USD": {"H1": rising_bars(40)}}))
 
     def test_historical_analogs_project_repeated_direction(self):
         result = echo.analyze("EUR/USD", {"H1": rising_bars()})

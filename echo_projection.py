@@ -223,7 +223,8 @@ def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
     try:
         import liquidity_map
         lp = liquidity_map.swept_context(symbol, by_tf, side)
-        if lp is not None:
+        max_dist = float(getattr(cfg, "ECHO_SWEEP_MAX_DISTANCE_ATR", 1.5))
+        if lp is not None and float(getattr(lp, "distance_atr", 99)) <= max_dist:
             score += 3; notes.append("BSL/SSL-sweep")
     except Exception:
         pass
@@ -316,7 +317,10 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
             weight = 1.0 / (0.25 + distance)
             move = (bars[index+horizon].close-bars[index].close) / av if av else 0.0
             total_weight += weight
-            up_weight += weight if move > 0 else 0.0
+            if move > 0:
+                up_weight += weight
+            elif move == 0:
+                up_weight += weight * 0.5
             moves.append(move)
         probabilities[horizon] = up_weight / total_weight if total_weight else .5
         expected[horizon] = median(moves) if moves else 0.0
@@ -330,6 +334,17 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     long_probability = sum(probabilities[h]*horizon_weights[h] for h in horizons) / total
     side = "LONG" if long_probability >= .5 else "SHORT"
     confidence = long_probability if side == "LONG" else 1-long_probability
+    side_sign_path = 1 if side == "LONG" else -1
+    expected_median = {h: expected[h] for h in horizons}
+    end_h_path = horizons[-1]
+    end_move = expected[end_h_path]
+    path_endpoint_aligned = True
+    if end_move and ((end_move > 0) != (side_sign_path > 0)):
+        # Медиана может смотреть против доли положительных ходов. Конец пути
+        # на графике обязан совпадать со стороной, промежуточные точки остаются
+        # медианой и могут показывать откат.
+        expected[end_h_path] = side_sign_path * abs(end_move)
+        path_endpoint_aligned = False
     minimum_confidence = float(minimum_confidence_override if minimum_confidence_override is not None
                                else getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
     side_sign = 1 if side == "LONG" else -1
@@ -386,6 +401,8 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
         "session_end_probability": int(round(
             (probabilities[end_h] if side == "LONG" else 1-probabilities[end_h]) * 100)),
         "expected_by_horizon": {str(h): round(expected[h], 4) for h in horizons},
+        "expected_median_by_horizon": {str(h): round(expected_median[h], 4) for h in horizons},
+        "path_endpoint_aligned": path_endpoint_aligned,
         "atr": _atr_at(bars, len(bars)-1),
         "current": bars[-1].close,
         "closed_h1": bars[-1].dt,
@@ -521,7 +538,11 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     # +2ч/+4ч/+6ч/+8ч остаются в Telegram-тексте, но не дублируются на PNG.
     # На изображении остаются только траектория, коридор и конечное направление.
     weak_label = " · СЛАБАЯ ОЦЕНКА" if result.get("weak") else ""
-    draw.text((left, 22), f"{result['symbol']} · H1 · {result['side']} · {result['confidence']}%{weak_label}", fill="#f1f5fb", font=font)
+    raw_pct = result.get("raw_confidence", result.get("confidence"))
+    adjusted_pct = result.get("direction_probability", result.get("confidence"))
+    draw.text((left, 22), f"{result['symbol']} · H1 · {result['side']} · доля путей {raw_pct}%{weak_label}", fill="#f1f5fb", font=font)
+    if adjusted_pct != raw_pct:
+        draw.text((left, 48), f"После контекста: {adjusted_pct}% · не доля аналогов", fill="#b9c3d3", font=small)
     # Визуальный слой: график H1, но расчёт остаётся MTF. Это только подпись
     # и разметка картинки — формула направления/вероятности не меняется.
     draw.text((left, 49), "MTF: D1 · H4 · H1 · M15 · прогноз до следующей сессии", fill="#b9c3d3", font=small)
@@ -584,7 +605,7 @@ def process_market(market: dict) -> list[dict]:
     analyzed = []
     for symbol in cfg.PAIRS:
         result = analyze(symbol, market.get(symbol) or {})
-        if not result:
+        if not result or not result.get("side") or result.get("confidence") is None:
             continue
         analyzed.append((symbol, int(result["confidence"])))
         if int(result["confidence"]) < threshold:

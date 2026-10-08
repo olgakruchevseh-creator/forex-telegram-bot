@@ -117,7 +117,7 @@ def _ensemble_zigzag(bars: list, tf: str, zigzag_fn) -> dict:
     variants = {}
     votes = []
     for name, factor in zip(names, factors):
-        swings = zigzag_fn(bars, base_pct * float(factor), cfg.ZIGZAG_MIN_BARS)
+        swings = zigzag_fn(bars, base_pct, cfg.ZIGZAG_MIN_BARS, float(factor))
         side = _swing_side(swings) or _sequence_side(_sequence(swings))
         variants[name] = {"swings": swings, "side": side, "sequence": _sequence(swings)}
         if side:
@@ -256,9 +256,24 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
     swings = swings_by_tf.get(key_tf) or []
     last_high = next((x.price for x in reversed(swings) if x.kind == "high"), 0.0)
     last_low = next((x.price for x in reversed(swings) if x.kind == "low"), 0.0)
-    # Вероятностная длительность берётся из завершённых H1-волн той же пары.
-    # Незавершённая волна не добавляется в историю и не меняет прошлые точки.
-    h1_swings = swings_by_tf.get("H1") or []
+    # Длительность угла берётся из того же масштаба, который дал публичную
+    # сторону H1. При RANGE окно не публикуется: иначе подпись «нейтрально»
+    # получает чужое статистическое окно базового пути.
+    h1_ensemble = ensembles_by_tf.get("H1") or {}
+    h1_variants = h1_ensemble.get("variants") or {}
+    h1_side = int(h1_ensemble.get("side") or 0)
+    h1_swings = []
+    if h1_side:
+        base_variant = h1_variants.get("base") or {}
+        if int(base_variant.get("side") or 0) == h1_side:
+            h1_swings = base_variant.get("swings") or []
+        if len(h1_swings) < 2:
+            for name in ("fast", "slow"):
+                item = h1_variants.get(name) or {}
+                if int(item.get("side") or 0) == h1_side and len(item.get("swings") or []) >= 2:
+                    h1_swings = item["swings"]
+                    break
+    confirmed_h1 = (h1_variants.get("base") or {}).get("swings") or swings_by_tf.get("H1") or []
     completed_lengths = [b.index-a.index for a, b in zip(h1_swings, h1_swings[1:]) if b.index > a.index]
     duration_low = duration_high = duration_samples = 0
     if len(completed_lengths) >= 3:
@@ -297,6 +312,10 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         "duration_low": duration_low,
         "duration_high": duration_high,
         "duration_samples": duration_samples,
+        "h1_confirmed_swings": [
+            {"index": int(point.index), "price": float(point.price), "kind": point.kind}
+            for point in confirmed_h1
+        ],
         "directions": {tf: direction(tf) for tf in views},
         # Public structural direction MUST be the same 2-of-3 ensemble decision
         # used by this scanner itself.  Previously this field silently exposed

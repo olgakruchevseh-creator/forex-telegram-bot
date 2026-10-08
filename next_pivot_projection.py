@@ -57,7 +57,9 @@ def _projection_swings(tf: str, bars: list) -> list[Swing]:
         high = bars[index].high >= max(item.high for item in area)
         low = bars[index].low <= min(item.low for item in area)
         if high and low:
-            high = abs(bars[index].high-bars[index-1].close) >= abs(bars[index].low-bars[index-1].close)
+            others = [item for item in area if item is not bars[index]]
+            neighbour_mid = ((max(item.high for item in others) + min(item.low for item in others)) / 2) if others else bars[index].close
+            high = abs(bars[index].high-neighbour_mid) >= abs(bars[index].low-neighbour_mid)
             low = not high
         if high:
             candidates.append(Swing(index, bars[index].high, "high"))
@@ -67,16 +69,22 @@ def _projection_swings(tf: str, bars: list) -> list[Swing]:
         bars[-1].close*float(cfg.ZIGZAG_PCT.get(tf, .18))/100*.55,
         atr(bars, 14)*float(getattr(cfg, "ZIGZAG_MIN_MOVE_ATR", .55)),
     )
-    points = []
-    for point in candidates:
-        if not points:
-            points.append(point)
-        elif point.kind == points[-1].kind:
-            more_extreme = point.price > points[-1].price if point.kind == "high" else point.price < points[-1].price
-            if more_extreme:
-                points[-1] = point
-        elif abs(point.price-points[-1].price) >= threshold:
-            points.append(point)
+    def _keep(need: float) -> list:
+        kept = []
+        for point in candidates:
+            if not kept:
+                kept.append(point)
+            elif point.kind == kept[-1].kind:
+                more_extreme = point.price > kept[-1].price if point.kind == "high" else point.price < kept[-1].price
+                if more_extreme:
+                    kept[-1] = point
+            elif abs(point.price-kept[-1].price) >= need:
+                kept.append(point)
+        return kept
+
+    points = _keep(threshold)
+    if len(points) < 4:
+        points = _keep(threshold * 0.65)
     return points[-80:]
 
 
@@ -230,18 +238,27 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
             return None
         # Закрытые свечи: H1 задаёт импульс, H4/D1 подтверждают режим.
         votes = []
+        tf_signs = []
         for tf, lookback, weight in (("H1", 6, 3), ("H4", 4, 2), ("D1", 3, 1)):
             tfbars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
             if len(tfbars) >= lookback + 1:
                 delta = tfbars[-1].close - tfbars[-1-lookback].close
                 if delta:
-                    votes.extend(([1 if delta > 0 else -1] * weight))
+                    sign = 1 if delta > 0 else -1
+                    votes.extend([sign] * weight)
+                    tf_signs.append(sign)
         if not votes:
             delta = bars[-1].close - bars[-7].close
-            votes = [1 if delta >= 0 else -1]
+            sign = 1 if delta > 0 else (-1 if delta < 0 else 0)
+            votes = [sign] if sign else []
+            if sign:
+                tf_signs.append(sign)
         score = sum(votes)
-        direction = 1 if score >= 0 else -1
-        agreement = sum(1 for vote in votes if vote == direction) / max(1, len(votes))
+        # Ничья голосов не становится LONG. Направление есть только при перевесе.
+        direction = 1 if score > 0 else (-1 if score < 0 else 0)
+        agreement = sum(1 for vote in votes if vote == direction) / max(1, len(votes)) if direction else 0.0
+        tf_available = 0
+        tf_aligned = 0
         current = bars[-1].close
         # Цель ограничена горизонтом сессии: слабый сценарий рисуется ближе,
         # сильный — дальше, но не выдаётся за точную будущую цену.
@@ -249,11 +266,11 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
         middle = current + direction * travel
         half = max(av * float(getattr(cfg, "NEXT_PIVOT_MIN_ZONE_ATR", .25)) / 2, av * .18)
         zone_low, zone_high = sorted((middle-half, middle+half))
-        estimate_score = int(round(51 + 10 * agreement))
-        inside = zone_low <= current <= zone_high
+        estimate_score = int(round(51 + 10 * agreement)) if direction else 50
+        inside = zone_low <= current <= zone_high if direction else False
         result = {
-            "tf": "H1", "side": "LONG" if direction > 0 else "SHORT",
-            "kind": "high" if direction > 0 else "low",
+            "tf": "H1", "side": ("LONG" if direction > 0 else "SHORT") if direction else None,
+            "kind": ("high" if direction > 0 else "low") if direction else None,
             "structure": "н/д",
             "zone_low": zone_low, "zone_high": zone_high,
             "bars_low": max(1, min(int(session_hours), 2)),
@@ -261,7 +278,7 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
             "probability": None, "estimate_score": estimate_score, "near": inside,
             "distance_atr": round(abs(middle-current)/av, 2),
             "pivot_dt": bars[-1].dt, "current": current, "symbol": symbol,
-            "aligned": sum(1 for vote in votes if vote == direction), "available": len(votes),
+            "aligned": sum(1 for sign in tf_signs if sign == direction), "available": len(tf_signs),
             "closed_h1": bars[-1].dt, "estimated": True,
             "main_score": None, "flat_score": None,
             "reaction_score": None,
@@ -284,6 +301,18 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
     )
     result["inside_session"] = bool(result["pivot_active"] or int(result.get("bars_low", 999)) <= session_hours)
     result["outside_session"] = not result["inside_session"]
+    if not result.get("side"):
+        result["estimated"] = True
+        result["probability"] = None
+        result["zigzag_check"] = "нет направленного импульса"
+        result["zigzag_conflict"] = False
+        result["smc_confirmations"] = []
+        result["smc_cautions"] = []
+        result["smc_adjust"] = 0
+        result["ohlc"] = {"available": False}
+        result["ohlc_adjust"] = 0
+        result["pair_character"] = {}
+        return result
 
     # Независимая структурная сверка ZigZag. При 0/3 штраф теперь существенный:
     # статистическая гипотеза остаётся видимой, но не выглядит равной 2/3–3/3.
@@ -299,9 +328,14 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
         result["zigzag_conflict"] = bool(checks and agree == 0 and oppose >= 2)
         if checks:
             if len(checks) >= 3:
-                zz_adjust = {0: -16, 1: -8, 2: 4, 3: 8}.get(agree, 0)
+                # RANGE — не конфликт. Полный штраф только если против минимум два ТФ.
+                if agree == 0 and oppose < 2:
+                    zz_adjust = -6
+                else:
+                    zz_adjust = {0: -16, 1: -8, 2: 4, 3: 8}.get(agree, 0)
             else:
-                zz_adjust = int(round((agree/max(1, len(checks))-.5)*16))
+                directional = agree + oppose
+                zz_adjust = int(round((agree/max(1, directional)-.5)*16)) if directional else 0
             if result.get("estimated"):
                 result["estimate_score"] = max(0, min(100, int(result.get("estimate_score") or 0) + zz_adjust))
             else:
@@ -435,8 +469,14 @@ def format_near(result: dict) -> str:
     reaction_icon = "🔴" if reaction == "SHORT" else "🟢"
     kind = "ВЕРШИНЫ" if result["kind"] == "high" else "ОСНОВАНИЯ"
     inside = float(result["zone_low"]) <= float(result["current"]) <= float(result["zone_high"])
+    probability = result.get("probability")
+    if probability is None:
+        probability = int(result.get("estimate_score") or 0)
+        probability_label = f"Оценка пути, не вероятность: {probability}/100"
+    else:
+        probability_label = f"Вероятность структуры: {probability}%"
     title = ("🔭 ЦЕНА В ЗОНЕ ВЕРОЯТНОГО PIVOT" if inside else
-             ("🔭 ПРИБЛИЖЕНИЕ К ВЕРОЯТНОМУ PIVOT" if result["probability"] >= 75
+             ("🔭 ПРИБЛИЖЕНИЕ К ВЕРОЯТНОМУ PIVOT" if int(probability) >= 75 and not result.get("estimated")
               else "🔭 ПРИБЛИЖЕНИЕ К ЗОНЕ ВОЗМОЖНОГО PIVOT"))
     bars_low = max(1, int(result["bars_low"]))
     bars_high = max(bars_low+2, int(result["bars_high"]))
@@ -449,9 +489,9 @@ def format_near(result: dict) -> str:
              f"Возможная реакция может сформироваться в пределах ближайших {bars_low}–{bars_high} закрытых H1"])
           if inside else
           [f"Ожидаемое окно: в пределах ближайших {bars_low}–{bars_high} закрытых H1"]),
-        f"Исторических сравнений: {result['samples']}", f"Вероятность структуры: {result['probability']}%",
+        f"Исторических сравнений: {result['samples']}", probability_label,
         f"Согласование проекций: {result['aligned']} из {result['available']} ТФ",
-        f"🟢/🔴 Основной путь к Pivot: {result.get('main_score', result['probability'])}%",
+        f"🟢/🔴 Основной путь к Pivot: {result.get('main_score', probability)}%",
         f"🟡 Риск отката или флэта по пути: {result.get('flat_score', 0)}%",
         f"{reaction_icon} Вероятность реакции {reaction} после зоны: {result.get('reaction_score', 0)}%",
         f"Возможная следующая реакция: {reaction} {reaction_icon} · требует отдельного подтверждения H1/M15", "",
@@ -518,7 +558,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     price_label_x = right + 14
     current = float(result["current"])
     av = atr(bars, 14) if len(bars) >= 15 else max(abs(result["zone_high"]-result["zone_low"]), current*.0005)
-    direction = 1 if result["side"] == "LONG" else -1
+    direction = 1 if result.get("side") == "LONG" else (-1 if result.get("side") == "SHORT" else 0)
     zone_mid = (float(result["zone_low"])+float(result["zone_high"]))/2
     reaction_price = zone_mid-direction*av*.9
     pullback_price = current-direction*av*.5
@@ -547,6 +587,15 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
         draw.line((x, y_at(bar.high), x, y_at(bar.low)), fill=color, width=2)
         y1, y2 = y_at(bar.open), y_at(bar.close)
         draw.rectangle((x-candle_w/2, min(y1,y2), x+candle_w/2, max(y1,y2)+1), fill=color)
+    if direction == 0:
+        draw.text((left, 22), f"{result['symbol']} · СЛЕДУЮЩИЙ PIVOT · НИЧЬЯ ИМПУЛЬСА", fill="#f1f5fb", font=font)
+        draw.text((left, 52), "H1/H4/D1 не дали перевеса. Направление не выбрано.", fill="#b9c3d3", font=small)
+        draw.text((left, 688), "Оценочный путь · не торговая гарантия", fill="#9aa4b5", font=small)
+        output = io.BytesIO()
+        output.name = f"next_pivot_{result['symbol'].replace('/', '')}_tie.png"
+        image.save(output, format="PNG", optimize=True)
+        output.seek(0)
+        return output
     start_x = x_at(historical-1)
     zone_x1 = x_at(historical-1+max(1, int(result["bars_low"])))
     zone_x2 = x_at(historical-1+max(3, int(result["bars_high"])))
@@ -560,8 +609,13 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     # Основной путь к зоне. Вместо безымянных технических маркеров
     # пользователь видит смысл каждой линии/точки.
     draw.line((start_x, y_at(current), target_x, y_at(zone_mid)), fill=main_color, width=5)
-    draw.polygon([(target_x, y_at(zone_mid)), (target_x-15, y_at(zone_mid)+10*direction),
-                  (target_x-10, y_at(zone_mid)-14*direction)], fill=main_color)
+    tip_x, tip_y = target_x, y_at(zone_mid)
+    ang = math.atan2(tip_y - y_at(current), tip_x - start_x)
+    arrow = 16
+    wing = 0.62
+    draw.polygon([(tip_x, tip_y),
+                  (tip_x-arrow*math.cos(ang-wing), tip_y-arrow*math.sin(ang-wing)),
+                  (tip_x-arrow*math.cos(ang+wing), tip_y-arrow*math.sin(ang+wing))], fill=main_color)
     # Альтернатива: локальный откат/флэт, затем повторный подход к Pivot.
     alt_x = x_at(historical+1)
     draw.line((start_x, y_at(current), alt_x, y_at(pullback_price), target_x, y_at(zone_mid)),
@@ -595,7 +649,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     # Визуальный слой MTF: свечной холст H1, зона уточняется старшими/рабочими TF.
     # Расчёт Pivot и его вероятность здесь не меняются.
     draw.text((left, 49), "График: H1 · MTF-анализ: D1 · H4 · H1 · M15", fill="#b9c3d3", font=small)
-    draw.text((left, 73), "Pivot-зона: H4/H1 · реакция подтверждается M15/H1", fill="#9aa4b5", font=small)
+    draw.text((left, 73), "Зона Pivot: статистика H1. H4/D1 только сверяют сторону, M15 зону не строит", fill="#9aa4b5", font=small)
     # Отделяем историю от будущей сессионной проекции.
     draw.line((start_x, top, start_x, bottom), fill="#8b95a8", width=2)
     draw.text((max(left, start_x-88), bottom-28), "СТАРТ ПРОЕКЦИИ", fill="#c9d1df", font=small)
@@ -616,10 +670,10 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     if markers:
         risk_color = "#ff6575" if any(m.get("impact") == "HIGH" for m in markers) else "#ffd44d"
         label = " · ".join(f"{m.get('time')} {m.get('currency')}" for m in markers[:3])
-        draw.rounded_rectangle((left, 625, 720, 681), radius=10, fill="#171c29dd", outline=risk_color, width=2)
-        draw.text((left+12, 640), f"НОВОСТИ СЕССИИ: {label}", fill=risk_color, font=small)
+        draw.rounded_rectangle((left, 636, 700, 674), radius=10, fill="#171c29dd", outline=risk_color, width=2)
+        draw.text((left+12, 644), f"НОВОСТИ СЕССИИ: {label}", fill=risk_color, font=small)
     footer = "Оценочный путь" if result.get("estimated") else "Статистическая проекция"
-    draw.text((740 if markers else left, height-58), f"{footer} · не торговая гарантия",
+    draw.text((740 if markers else left, 688), f"{footer} · не торговая гарантия",
               fill="#9aa4b5", font=small)
     output = io.BytesIO()
     output.name = f"next_pivot_{result['symbol'].replace('/', '')}_{result['pivot_dt'].replace(':', '-')}.png"

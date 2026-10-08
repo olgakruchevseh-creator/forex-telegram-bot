@@ -161,12 +161,16 @@ def swing_character(candles: list[Candle], tf: str) -> dict | None:
     }
 
 
-def zigzag(candles: list[Candle], pct: float, min_bars: int) -> list[Swing]:
+def zigzag(candles: list[Candle], pct: float, min_bars: int, scale: float = 1.0) -> list[Swing]:
     """Подтверждённые экстремумы без использования незакрытых будущих свечей.
 
     Старый алгоритм начинал поиск от первой свечи выборки и на спокойном рынке
     мог месяцами не завершать первый разворот. Теперь сначала находятся локальные
     pivot-точки, после чего шум фильтруется адаптивным порогом процент + ATR.
+
+    ``scale`` — множитель ансамбля (быстрый/базовый/медленный). Он масштабирует
+    и процентную часть, и пол ATR, иначе при доминировании ATR три масштаба
+    схлопываются в один и тот же набор точек.
     """
     pivot_bars = max(2, int(min_bars))
     if len(candles) < pivot_bars * 2 + 8:
@@ -193,7 +197,8 @@ def zigzag(candles: list[Candle], pct: float, min_bars: int) -> list[Swing]:
     pct_part = candles[-1].close * max(float(pct), 0.01) / 100.0
     factor = float(getattr(cfg, "ZIGZAG_ADAPTIVE_PCT_FACTOR", 0.55))
     atr_factor = float(getattr(cfg, "ZIGZAG_MIN_MOVE_ATR", 0.55))
-    threshold = max(pct_part * factor, av * atr_factor)
+    scale = max(0.35, float(scale or 1.0))
+    threshold = max(pct_part * factor, av * atr_factor) * scale
 
     def normalize(need: float) -> list[Swing]:
         out: list[Swing] = []
