@@ -239,6 +239,56 @@ def _source_event_dt(text: str) -> str:
         return ""
 
 
+
+def _card_tf(text: str) -> str:
+    match = re.search(r"Таймфрейм:\s*([WDMH][0-9]*)", text or "")
+    return match.group(1) if match else "H1"
+
+
+def _append_target(targets: list[dict], price: float, label: str, anchor: float, direction: int, tolerance: float) -> None:
+    if (price - anchor) * direction <= max(abs(anchor) * 1e-7, 1e-9):
+        return
+    if any(abs(price - float(item["price"])) <= tolerance for item in targets):
+        return
+    targets.append({"price": float(price), "tf": label})
+
+
+def _module_targets(symbol: str, side: str, by_tf: dict, source_text: str, anchor: float, h1_atr: float) -> list[dict]:
+    """Цель из геометрии источника, а не из общей лестницы всех модулей."""
+    direction = 1 if side == "LONG" else -1
+    family = _source_name(source_text)
+    tf = _card_tf(source_text)
+    bars = movement_progress._bars(by_tf, tf) or movement_progress._bars(by_tf, "H1")
+    if len(bars) < 20:
+        return []
+    local_atr = movement_progress.atr(bars, 14) or h1_atr
+    tolerance = local_atr * float(getattr(cfg, "NAVIGATOR_TARGET_MIN_GAP_ATR", .35))
+    key = _float_line(source_text, "Ключевой уровень")
+    targets: list[dict] = []
+    swings = movement_progress._swings(tf, bars)
+    ahead = [s for s in swings if (s.kind == ("high" if direction > 0 else "low")) and (s.price - anchor) * direction > 0]
+    behind = [s for s in swings if (s.price - anchor) * direction < 0]
+    if family == "Patterns" and key > 0:
+        extreme = max((s.price for s in behind), default=0.0) if direction > 0 else min((s.price for s in behind), default=0.0)
+        if not extreme and behind:
+            extreme = behind[-1].price
+        height = abs(extreme - key) if extreme else 0.0
+        if height >= local_atr * .35:
+            _append_target(targets, key + direction * height, f"измеренная фигура {tf}", anchor, direction, tolerance)
+            _append_target(targets, key + direction * height * 1.272, f"расширение 1.272 {tf}", anchor, direction, tolerance)
+    elif family == "Fibonacci" and len(swings) >= 2:
+        leg = abs(swings[-1].price - swings[-2].price)
+        base = swings[-2].price
+        if leg >= local_atr * .35:
+            _append_target(targets, base + direction * leg * 1.272, f"Фибо 1.272 {tf}", anchor, direction, tolerance)
+            _append_target(targets, base + direction * leg * 1.618, f"Фибо 1.618 {tf}", anchor, direction, tolerance)
+    elif family in {"Liquidity Sweep", "Daily High/Low"} and ahead:
+        _append_target(targets, ahead[0].price, f"встречный пул {tf}", anchor, direction, tolerance)
+    elif family in {"Order Block", "Breaker Block", "Imbalance/FVG", "BPR", "Disbalance"} and key > 0:
+        _append_target(targets, key, f"граница модуля {tf}", anchor, direction, tolerance)
+    return targets
+
+
 def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dict | None:
     """Строит маршрут от цены свежего модульного события без повторного veto."""
     h1 = movement_progress._bars(by_tf, "H1")
@@ -301,24 +351,19 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         if mode == "PULLBACK" or len(targets) == 3:
             break
 
-    # Если впереди недостаточно готовых H4/D1-экстремумов, недостающие этапы
-    # рассчитываются от волатильности H1. Это сохраняет TR1–TR3 для каждого
-    # принятого события, не выдавая арифметическую цель за структурный уровень.
-    step = .75
-    distance = step
-    # ATR extension is valid for an impulse/local route.  For a pullback it
-    # could place TR2/TR3 beyond the protected senior swing and silently turn
-    # a correction into a reversal forecast, so no synthetic deep targets are
-    # added once a senior boundary exists.
-    fill_limit = 1 if mode == "PULLBACK" and targets else 3
-    while len(targets) < fill_limit:
-        price = anchor + direction * av * distance
-        if ((direction > 0 and price > current) or (direction < 0 and price < current)) and not any(
-                abs(price-item["price"]) <= tolerance for item in targets):
-            targets.append({"price": price, "tf": "H1 ATR"})
-        distance += step
+    # Сначала геометрия самого сигнала и его таймфрейма. Общая лестница H4/D1
+    # только дополняет её отдельными уровнями. Третья цель не добирается ATR.
+    for item in _module_targets(symbol, side, by_tf, source_text, anchor, av):
+        if not any(abs(item["price"] - float(old["price"])) <= tolerance for old in targets):
+            targets.append(item)
     targets.sort(key=lambda item: abs(float(item["price"]) - anchor))
-    targets = targets[:3]
+    if mode == "PULLBACK":
+        targets = targets[:1] or targets
+    else:
+        targets = targets[:3]
+    if not targets:
+        price = anchor + direction * av
+        targets.append({"price": price, "tf": f"{_card_tf(source_text)} ATR"})
 
     gap = movement_progress._strength_ok(symbol, side, {})[1]
     try:
@@ -1020,7 +1065,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"Осталось до TR1: {route['remaining']}%", "",
         f"Оценка: {assessment}",
         final_fact,
-        "Процент показывает расстояние до структурной цели H4/D1 либо расчётной цели H1 ATR, а не гарантирует продолжение движения.",
+        "Процент показывает долю пути до последней цели этого сигнала. Цена берётся из геометрии модуля и его таймфрейма, а не из общей сетки. Это не гарантия движения.",
         "", "━━━━━━━━━━━━━━━━━━",
     ])
     return "\n".join(lines)
