@@ -58,6 +58,7 @@ import fib_smc
 import ats_reversal_point
 import market_schedule
 import master_direction
+import edge_estimator
 import signal_navigator
 import signal_journal
 import decision_journal
@@ -1039,7 +1040,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             "ORDER_BLOCK_ENABLED", "BREAKER_BLOCK_ENABLED", "SMART_MONEY_62_26_ENABLED",
             "SILVER_BULLET_ENABLED", "DAILY_HIGH_LOW_ENABLED", "CHAIN_ENTRIES_ENABLED",
             "RETEST_CONFIRMATION_ENABLED", "FIBONACCI_ENABLED", "ATS_REVERSAL_ENABLED",
-            "FIB_SMC_ENABLED", "LEVELS_ENABLED", "ZIGZAG_SCANNER_ENABLED", "PATTERNS_ENABLED",
+            "FIB_SMC_ENABLED", "LEVELS_ENABLED", "ZIGZAG_SCANNER_ENABLED", "EDGE_ESTIMATOR_ENABLED", "PATTERNS_ENABLED",
         )
         for flag in enabled_flags:
             if getattr(cfg, flag, True):
@@ -1241,6 +1242,13 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     module_alerts.append((2, text))
             except Exception:
                 scan_stats.note_fail("zigzag"); log.exception("Ошибка отдельного ZigZag-сканера")
+
+        if getattr(cfg, "EDGE_ESTIMATOR_ENABLED", True):
+            try:
+                for text in edge_estimator.process_market(market, strength):
+                    module_alerts.append((1, text))
+            except Exception:
+                scan_stats.note_fail("edge"); log.exception("Ошибка модуля короткого преимущества")
 
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
