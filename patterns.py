@@ -175,14 +175,14 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     return out
 
 
-def _pivots(bars: list[Candle], n: int = 3) -> list[tuple[int, float, str]]:
+def _pivots(bars: list[Candle], n: int = 3, limit: int = 12) -> list[tuple[int, float, str]]:
     out = []
     for i in range(n, len(bars) - n):
         if bars[i].high >= max(x.high for x in bars[i-n:i+n+1]):
             out.append((i, bars[i].high, "H"))
         if bars[i].low <= min(x.low for x in bars[i-n:i+n+1]):
             out.append((i, bars[i].low, "L"))
-    return sorted(out, key=lambda x: x[0])[-12:]
+    return sorted(out, key=lambda x: x[0])[-max(4, limit):]
 
 
 def _alternating_pivots(pivots: list[tuple[int, float, str]]) -> list[tuple[int, float, str]]:
@@ -310,12 +310,13 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     Очертание фигуры само по себе не отправляется: последняя закрытая свеча
     обязана впервые пробить расчётную границу телом.
     """
+    hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {}).get(tf, 42) or 42)
     if len(bars) < 45:
         return []
     out, previous, last = [], bars[-2], bars[-1]
-    history = bars[-42:-1]
+    history = bars[-(hist_n + 1):-1] if len(bars) > hist_n + 1 else bars[:-1]
     av = atr(bars, 14) or _range(last)
-    piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(tf, 3)))
+    piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(tf, 3)), int(getattr(cfg, "PATTERN_CHART_PIVOT_LIMIT", 16)))
     highs = [(i, price) for i, price, kind in piv if kind == "H"]
     lows = [(i, price) for i, price, kind in piv if kind == "L"]
     upper_fit, lower_fit = _line_fit(highs, len(history)), _line_fit(lows, len(history))
@@ -531,10 +532,15 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
                       abs(c[1]-b[1]), abs(d[1]-c[1]))
     if min(xa, ab, bc, cd) <= 0:
         return out
+    xc = abs(c[1] - x[1]) / xa
     ratios = {"xb": ab/xa, "ac": bc/ab, "bd": cd/bc,
               # XD is measured from X to D relative to XA.  The previous A→D
               # numerator was dimensionally plausible but geometrically wrong.
-              "xd": abs(d[1]-x[1])/xa, "cd": cd/bc}
+              "xd": abs(d[1]-x[1])/xa, "cd": cd/bc,
+              # Сайфер: C относительно XA, D относительно XC.
+              "xc": xc, "dxc": cd / max(abs(c[1]-x[1]), 1e-12),
+              # Акула: расширение AB относительно XA в разметке 0-X-A-B-C.
+              "bc_xa": bc / xa}
     last = bars[-1]
     side = "LONG" if d[2] == "L" else "SHORT"
     if not (_bull(last) if side == "LONG" else _bear(last)):
@@ -774,7 +780,7 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "🧩 ПАТТЕРН ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {symbol}", f"Паттерн: {p.name}", f"Таймфрейм: {p.tf} ({TF_LABEL[p.tf]})",
-        f"Направление: {p.side} {side_icon}", f"Качество: {p.quality}/100", f"Вероятность: {p.confidence}%",
+        f"Направление: {p.side} {side_icon}", f"Сходство фигуры: {p.quality}/100", f"Уверенность чертежа: {p.confidence}/100",
         *([f"🕐 Время закрытия: {close_time}"] if close_time else []),
         *([f"Цена закрытия: {close_price}"] if close_price else []),
         f"Ключевой уровень: {price}",

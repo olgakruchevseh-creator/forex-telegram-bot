@@ -544,8 +544,11 @@ HARMONIC_RATIOS = {
     "butterfly": {"xb": (0.76, 0.81), "ac": (0.382, 0.886), "bd": (1.618, 2.24), "xd": (1.20, 1.50)},
     "crab": {"xb": (0.382, 0.618), "ac": (0.382, 0.886), "bd": (2.24, 3.618), "xd": (1.55, 1.68)},
     "deep_crab": {"xb": (0.84, 0.924), "ac": (0.382, 0.886), "bd": (2.0, 3.618), "xd": (1.55, 1.68)},
-    "shark": {"xb": (0.382, 0.618), "ac": (1.13, 1.618), "xd": (0.86, 1.13)},
-    "cypher": {"xb": (0.382, 0.618), "ac": (1.13, 1.414), "xd": (0.75, 0.81)},
+    # Акула в разметке XABCD = 0-X-A-B-C: AB расширяет XA, BC расширяет AB,
+    # точка C завершается на 0.886-1.13 ноги 0X. Старый откат XB был другой фигурой.
+    "shark": {"bc_xa": (1.13, 1.618), "bd": (1.618, 2.24), "xd": (0.886, 1.13)},
+    # Сайфер: B откатывает XA, C — расширение XA (не AB), D — откат XC около 0.786.
+    "cypher": {"xb": (0.382, 0.618), "xc": (1.272, 1.414), "dxc": (0.75, 0.82)},
     "five_o": {"xb": (1.13, 1.618), "ac": (1.618, 2.24), "cd": (0.48, 0.62)},
     "abcd": {"bc": (0.382, 0.886), "cd_ab": (1.0, 1.68)},
 }
@@ -554,6 +557,8 @@ PATTERN_MAIN_TFS = ["W1", "D1", "H4", "H1"]
 PATTERN_CONFIRM_TFS = ["M15", "M5"]
 PATTERN_CHART_IMAGES_ENABLED = True
 PATTERN_CHART_LOOKBACK = 55
+PATTERN_CHART_HISTORY = {"W1": 100, "D1": 120, "H4": 80, "H1": 60, "M15": 48, "M5": 42}
+PATTERN_CHART_PIVOT_LIMIT = 16
 PATTERN_CHART_BREAK_BUFFER_ATR = 0.05
 PATTERN_CHART_BREAK_MIN_BODY_ATR = 0.35
 PATTERN_LINE_MIN_R2 = 0.55
@@ -575,8 +580,8 @@ PATTERN_123_BREAK_BUFFER_ATR = 0.05
 PATTERN_123_INVALIDATION_ATR = 0.05
 PATTERN_123_RETEST_POCKET_ATR = 0.20
 # Head & Shoulders geometry. ATR-normalized so the same rules work on W1/D1/H4/H1.
-PATTERN_HS_SHOULDER_TOL_ATR = 0.75
-PATTERN_HS_HEAD_MIN_ATR = 0.35
+PATTERN_HS_SHOULDER_TOL_ATR = 0.40
+PATTERN_HS_HEAD_MIN_ATR = 0.60
 PATTERN_HS_MAX_TIME_RATIO = 3.0
 # Гармоническая геометрия сама по себе не является торговым сигналом.
 # Для отправки требуется подтвержденный импульс H1 и слом структуры M15,
