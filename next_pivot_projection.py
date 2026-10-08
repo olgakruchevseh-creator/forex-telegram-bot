@@ -249,7 +249,7 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
         middle = current + direction * travel
         half = max(av * float(getattr(cfg, "NEXT_PIVOT_MIN_ZONE_ATR", .25)) / 2, av * .18)
         zone_low, zone_high = sorted((middle-half, middle+half))
-        probability = int(round(51 + 10 * agreement))
+        estimate_score = int(round(51 + 10 * agreement))
         inside = zone_low <= current <= zone_high
         result = {
             "tf": "H1", "side": "LONG" if direction > 0 else "SHORT",
@@ -258,13 +258,13 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
             "zone_low": zone_low, "zone_high": zone_high,
             "bars_low": max(1, min(int(session_hours), 2)),
             "bars_high": max(3, int(session_hours)), "samples": 0,
-            "probability": probability, "near": inside,
+            "probability": None, "estimate_score": estimate_score, "near": inside,
             "distance_atr": round(abs(middle-current)/av, 2),
             "pivot_dt": bars[-1].dt, "current": current, "symbol": symbol,
             "aligned": sum(1 for vote in votes if vote == direction), "available": len(votes),
             "closed_h1": bars[-1].dt, "estimated": True,
-            "main_score": probability, "flat_score": max(25, 100-probability),
-            "reaction_score": max(20, 80-probability),
+            "main_score": None, "flat_score": None,
+            "reaction_score": None,
             "zone_quality": {"score": 50, "adjust": 0, "touches": 0, "violations": 0,
                              "recency": 0.0, "confirmed": False},
         }
@@ -302,7 +302,10 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
                 zz_adjust = {0: -16, 1: -8, 2: 4, 3: 8}.get(agree, 0)
             else:
                 zz_adjust = int(round((agree/max(1, len(checks))-.5)*16))
-            result["probability"] = max(35, min(92, int(result["probability"]) + zz_adjust))
+            if result.get("estimated"):
+                result["estimate_score"] = max(0, min(100, int(result.get("estimate_score") or 0) + zz_adjust))
+            else:
+                result["probability"] = max(35, min(92, int(result["probability"]) + zz_adjust))
     except Exception:
         log.exception("NEXT_PIVOT_ZIGZAG_CONTEXT_FAILED symbol=%s", symbol)
         result["zigzag_check"] = "ошибка сверки"
@@ -376,23 +379,33 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
             ohlc_adjust = min(ohlc_adjust, -5)
     except Exception:
         oc, ohlc_adjust = {"available": False}, 0
-    result["probability"] = max(30, min(94, int(result["probability"]) + smc_adjust + ohlc_adjust))
-    if result["outside_session"]:
-        result["probability"] = max(30, int(result["probability"]) - 12)
     if result.get("estimated"):
-        result["probability"] = min(int(result["probability"]), 62)
+        # Diagnostic score may absorb bounded context, but it is not a probability
+        # and never enters the statistical Pivot probability field.
+        estimate = int(result.get("estimate_score") or 0) + smc_adjust + ohlc_adjust
+        if result["outside_session"]:
+            estimate -= 12
+        result["estimate_score"] = max(0, min(100, estimate))
+        result["probability"] = None
+    else:
+        result["probability"] = max(30, min(94, int(result["probability"]) + smc_adjust + ohlc_adjust))
+        if result["outside_session"]:
+            result["probability"] = max(30, int(result["probability"]) - 12)
     result["smc_confirmations"] = sorted(set(confirmations))
     result["smc_cautions"] = sorted(set(cautions))
     result["smc_adjust"] = smc_adjust
     result["ohlc"] = oc
     result["ohlc_adjust"] = ohlc_adjust
-    main = max(1, int(result["probability"]))
-    flat = max(1, int(result.get("flat_score") or max(15, 100 - main)))
-    react = max(1, int(result.get("reaction_score") or max(15, 90 - main)))
-    total = main + flat + react
-    result["main_score"] = int(round(100 * main / total))
-    result["flat_score"] = int(round(100 * flat / total))
-    result["reaction_score"] = max(0, 100 - result["main_score"] - result["flat_score"])
+    if result.get("estimated"):
+        result["main_score"] = result["flat_score"] = result["reaction_score"] = None
+    else:
+        main = max(1, int(result["probability"]))
+        flat = max(1, int(result.get("flat_score") or max(15, 100 - main)))
+        react = max(1, int(result.get("reaction_score") or max(15, 90 - main)))
+        total = main + flat + react
+        result["main_score"] = int(round(100 * main / total))
+        result["flat_score"] = int(round(100 * flat / total))
+        result["reaction_score"] = max(0, 100 - result["main_score"] - result["flat_score"])
     try:
         import pair_character_matrix
         result["pair_character"] = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength or {}), by_tf=by_tf)
@@ -408,9 +421,12 @@ def compact_line(result: dict | None) -> str:
     if not result:
         return "нет надёжной проекции"
     kind = "ВЕРШИНА" if result["kind"] == "high" else "ОСНОВАНИЕ"
+    metric = (f"оценка, не вероятность · {int(result.get('estimate_score') or 0)}/100"
+              if result.get("estimated") else
+              f"частота исторической проекции · {int(result.get('probability') or 0)}%")
     return (f"{kind} {result['structure']} · {_price(result['symbol'], result['zone_low'])}–"
             f"{_price(result['symbol'], result['zone_high'])} · через {result['bars_low']}–"
-            f"{result['bars_high']} H1 · {result['probability']}% · ТФ {result['aligned']}/{result['available']}")
+            f"{result['bars_high']} H1 · {metric} · ТФ {result['aligned']}/{result['available']}")
 
 
 def format_near(result: dict) -> str:
@@ -537,7 +553,8 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.rectangle((zone_x1, y_at(result["zone_high"]), zone_x2, y_at(result["zone_low"])),
                    fill="#4aa3ff35", outline="#62b0ff", width=3)
     target_x = (zone_x1+zone_x2)/2
-    display_probability = int(result.get("display_probability", result.get("probability", 0)))
+    display_probability = int(result.get("display_probability") if result.get("display_probability") is not None
+                              else (result.get("estimate_score") if result.get("estimated") else result.get("probability") or 0))
     weak_projection = bool(result.get("weak_projection", display_probability < 50))
     main_color = "#ffd44d" if weak_projection else ("#42e889" if direction > 0 else "#ff6575")
     # Основной путь к зоне. Вместо безымянных технических маркеров
@@ -563,7 +580,8 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.rounded_rectangle((legend_x-14, legend_y-12, legend_right, legend_y+92), radius=10,
                            fill="#171c29dd", outline="#353d50", width=2)
     draw.text((legend_x, legend_y),
-              f"К Pivot: {zone_mid:.{decimals}f} · {display_probability}%",
+              (f"К Pivot: {zone_mid:.{decimals}f} · оценка {display_probability}/100" if result.get("estimated")
+               else f"К Pivot: {zone_mid:.{decimals}f} · ист. частота {display_probability}%"),
               fill=main_color, font=small)
     draw.text((legend_x, legend_y+31),
               f"Через откат: {pullback_price:.{decimals}f} · {result.get('flat_score', 0)}%",
@@ -582,7 +600,8 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     draw.line((start_x, top, start_x, bottom), fill="#8b95a8", width=2)
     draw.text((max(left, start_x-88), bottom-28), "СТАРТ ПРОЕКЦИИ", fill="#c9d1df", font=small)
     zone_label = "ОЖИДАЕМАЯ ВЕРШИНА" if direction > 0 else "ОЖИДАЕМОЕ ОСНОВАНИЕ"
-    zone_text = f"{zone_label} · {display_probability}%"
+    zone_text = (f"{zone_label} · оценка {display_probability}/100" if result.get("estimated")
+                 else f"{zone_label} · ист. частота {display_probability}%")
     zone_bbox = draw.textbbox((0, 0), zone_text, font=small)
     zone_w = zone_bbox[2] - zone_bbox[0]
     zone_text_x = max(left, min(right-zone_w-8, zone_x1))

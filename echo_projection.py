@@ -242,7 +242,11 @@ def _smc_overlay(symbol: str, by_tf: dict, side: int) -> dict:
     return {"score": max(-12, min(18, score)), "notes": sorted(set(notes))}
 
 def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], strength=None, dxy_bias=0) -> dict | None:
-    """Context-only hint. Ambiguous context stays silent instead of inventing a side."""
+    """Explicit neutral state when historical analogs are insufficient.
+
+    Context remains diagnostic only: it must not choose LONG/SHORT and must not be
+    exposed as a direction probability.
+    """
     bars = closed_candles(by_tf.get("H1") or [], 60)
     if len(bars) < 30 or not horizons:
         return None
@@ -252,27 +256,22 @@ def _context_fallback(symbol: str, by_tf: dict, horizons: tuple[int, ...], stren
     long_score = long_ctx["score"] + long_smc["score"]
     short_score = short_ctx["score"] + short_smc["score"]
     margin = abs(long_score - short_score)
-    # Слишком близкие оценки — это «не знаю», а не 51% в случайную сторону.
-    if margin < float(getattr(cfg, "ECHO_CONTEXT_MIN_MARGIN", 8)):
-        return None
-    side = "LONG" if long_score >= short_score else "SHORT"
-    side_sign = 1 if side == "LONG" else -1
-    ctx = long_ctx if side_sign > 0 else short_ctx
-    smc = long_smc if side_sign > 0 else short_smc
-    confidence = max(51, min(62, 51 + int(round(margin * .25))))
-    av = _atr_at(bars, len(bars)-1)
     max_h = max(horizons)
+    av = _atr_at(bars, len(bars)-1)
     data_quality = max(20, min(45, 22 + int(round(min(18, margin * .25)))))
     return {
-        "symbol": symbol, "side": side,
-        "confidence": confidence, "direction_probability": confidence,
-        "raw_confidence": confidence, "data_quality": data_quality,
-        "context": ctx, "smc_context": smc, "sample": 0, "estimated": True,
-        "weak": True, "trajectory_available": False, "trajectory_source": "context_only",
+        "symbol": symbol, "side": None,
+        "confidence": None, "direction_probability": None,
+        "raw_confidence": None, "data_quality": data_quality,
+        "context": {"long": long_ctx, "short": short_ctx},
+        "smc_context": {"long": long_smc, "short": short_smc},
+        "sample": 0, "estimated": True, "weak": True,
+        "trajectory_available": False, "trajectory_source": "insufficient_analogs",
+        "fallback_reason": "недостаточно аналогов, направление не выбрано",
         "horizons": {}, "expected_atr": None,
-        "session_hours": int(max_h), "session_end_probability": confidence,
+        "session_hours": int(max_h), "session_end_probability": None,
         "expected_by_horizon": {}, "atr": av, "current": bars[-1].close,
-        "closed_h1": bars[-1].dt, "context_support": int(ctx.get("score") or 0),
+        "closed_h1": bars[-1].dt, "context_support": 0,
     }
 
 def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
@@ -398,7 +397,8 @@ def compact_text(result: dict | None) -> str:
         return "нет надёжной выборки"
     values = result.get("horizons") or {}
     horizons = " · ".join(f"{h}ч {values.get(str(h), 0)}%" for h in (1, 2, 4, 8) if str(h) in values)
-    return f"{result['side']} {result['confidence']}% ({horizons}; аналогов {result['sample']})"
+    return (f"{result['side']} · доля похожих путей {result['confidence']}% ({horizons}; аналогов {result['sample']})"
+            if result.get("side") else "НЕЙТРАЛЬНО · недостаточно аналогов, направление не выбрано")
 
 
 def format_alert(result: dict) -> str:
@@ -408,10 +408,10 @@ def format_alert(result: dict) -> str:
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "🔭 ЭХО — ВЕРОЯТНОСТНАЯ ПРОЕКЦИЯ", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {result['symbol']}", f"Направление: {result['side']} {icon}",
-        f"Вероятность сценария: {result['confidence']}%",
+        f"Доля похожих исторических путей: {result.get('raw_confidence', result['confidence'])}%",
         f"Горизонты: {forecast}", f"Исторических аналогов: {result['sample']}",
         f"Ожидаемое движение к 4ч: {result['expected_atr']:.2f} ATR", "",
-        "⚠️ Факт: линия на графике показывает медианный путь похожих исторических ситуаций. Это вероятностная проекция, а не гарантированный маршрут цены.",
+        "⚠️ Факт: линия на графике показывает медианный путь похожих исторических ситуаций. Доля аналогов не является вероятностью сделки.",
         "", "━━━━━━━━━━━━━━━━━━",
     ])
 
@@ -567,7 +567,7 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
                       f"{marker.get('time','')} · {marker.get('currency','')} · {marker.get('impact','')}",
                       fill="#ffdca0", font=small)
             y += 25
-    draw.text((left, height-55), f"Аналогов: {result['sample']} · вероятностная проекция, не гарантия", fill="#9aa4b5", font=small)
+    draw.text((left, height-55), f"Аналогов: {result['sample']} · доля похожих путей, не вероятность сделки", fill="#9aa4b5", font=small)
     output = io.BytesIO()
     output.name = f"echo_{result['symbol'].replace('/', '')}_{result['closed_h1'].replace(':', '-')}.png"
     image.save(output, format="PNG", optimize=True)

@@ -203,8 +203,9 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
     )))
     result = echo_projection.analyze(
         symbol, by_tf, checkpoints, strength=strength or {}, dxy_bias=int(dxy_bias or 0))
-    news = _news_context(symbol, events, result["direction_probability"] if result else None, hours)
-    if result:
+    echo_probability = result.get("direction_probability") if result else None
+    news = _news_context(symbol, events, echo_probability, hours)
+    if result and result.get("side"):
         weak = bool(result.get("weak") or result.get("estimated"))
         side = result["side"]
         icon = "🟡" if weak else ("🟢" if side == "LONG" else "🔴")
@@ -227,8 +228,8 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
         scenario = [
             f"Режим расчёта: {mode}",
             f"Направление к границе следующей сессии: {side} {icon}",
-            f"Вероятность направления: {direction_probability}%",
-            f"Аналоги / контекст: {analog_pct}% / {context_support:+d}",
+            f"Доля похожих исторических путей: {analog_pct}%",
+            f"Контекстная поправка: {context_support:+d} · не вероятность сделки",
             f"Достаточность данных для траектории: {data_quality}%",
             f"Новостной слой: {news_split}",
         ]
@@ -273,7 +274,8 @@ def _echo_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hour
             image = _minimal_echo_ray(symbol, by_tf, side)
     else:
         scenario = ["Направление: НЕЙТРАЛЬНО 🟡",
-                    "Вероятность: недостаточно надёжных исторических совпадений"]
+                    "Недостаточно аналогов: направление не выбрано",
+                    "Процент направления не рассчитывается из контекстного fallback"]
         if session_side:
             scenario.append(
                 f"Сверка с брифингом: тезис сессии {session_side} сохраняется; "
@@ -292,11 +294,14 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
                   current_name: str, next_name: str, strength: dict | None = None,
                   dxy_bias: int = 0, session_side: str | None = None) -> dict:
     result = next_pivot_projection.analyze_session_symbol(symbol, by_tf, hours, strength=strength or {})
-    news = _news_context(symbol, events, result["probability"] if result else None, hours, confidence_floor=30)
+    pivot_probability = result.get("probability") if result else None
+    news = _news_context(symbol, events, pivot_probability, hours, confidence_floor=30)
     if result:
         side = result["side"]
-        probability = int(news["confidence"] or result["probability"])
-        weak = bool(probability < 50 or result.get("estimated") or result.get("outside_session"))
+        estimated = bool(result.get("estimated"))
+        probability = None if estimated else int(news["confidence"] if news["confidence"] is not None else result["probability"])
+        estimate_score = int(result.get("estimate_score") or 0)
+        weak = bool(estimated or (probability is not None and probability < 50) or result.get("outside_session"))
         icon = "🟡" if weak else ("🟢" if side == "LONG" else "🔴")
         reaction = "SHORT" if side == "LONG" else "LONG"
         reaction_icon = "🔴" if reaction == "SHORT" else "🟢"
@@ -362,12 +367,15 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
             zone_quality_line,
             f"SMC-подтверждения: {confirms}",
             f"SMC-предупреждения: {cautions}",
-            f"Вероятность первичного движения к Pivot: {probability}%",
-            f"Ожидаемая реакция после зоны: {reaction} {reaction_icon} · вероятность {result.get('reaction_score', 0)}% · только после M15/H1",
+            (f"Оценка пути к Pivot: {estimate_score}/100 · оценка, не вероятность" if estimated
+             else f"Частота исторической проекции к Pivot: {probability}%"),
+            (f"Ожидаемая реакция после зоны: {reaction} {reaction_icon} · без вероятностного процента · только после M15/H1"
+             if estimated else
+             f"Ожидаемая реакция после зоны: {reaction} {reaction_icon} · историческая оценка {result.get('reaction_score', 0)}% · только после M15/H1"),
             f"Связка Echo → Pivot: {link}",
         ]
         chart_result = dict(result)
-        chart_result["display_probability"] = probability
+        chart_result["display_probability"] = estimate_score if estimated else probability
         chart_result["weak_projection"] = weak
         chart_result["news_risk"] = news.get("risk", "NONE")
         chart_result["news_markers"] = [
@@ -468,7 +476,7 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     # intentionally restricted to these three engine rows.
     lines = [f"Пара: {symbol}"]
     if eside:
-        lines.append(f"Эхо: {_side_badge(eside)} · вероятность {er.get('direction_probability', '—')}%")
+        lines.append(f"Эхо: {_side_badge(eside)} · доля похожих путей {er.get('raw_confidence', er.get('direction_probability', '—'))}%")
     else:
         lines.append(f"Эхо: {_side_badge(None)}")
 

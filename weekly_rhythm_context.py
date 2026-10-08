@@ -306,12 +306,23 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
             return run
         up_run=run_after(up,lambda c: float(c.close)>mt_hi+tol)
         dn_run=run_after(dn,lambda c: float(c.close)<mt_lo-tol)
+        tolerance_atr=float(getattr(cfg,"WEEKLY_RHYTHM_TRAP_TOLERANCE_ATR",0.10))
+        def trap_quality_from_depth(depth_atr, structure_agrees):
+            # Zero at the noise boundary; smooth bounded growth thereafter.
+            excess=max(0.0,float(depth_atr)-tolerance_atr)
+            base=100.0*excess/(1.0+excess)
+            structure_bonus=5.0 if structure_agrees and excess>0 else 0.0
+            return max(0,min(100,int(round(base+structure_bonus))))
         if up and up_run<2 and float(last.close)<mt_hi-tol:
             depth=max(float(c.high)-mt_hi for c in recent[max(0,up[-1]-1):])/max(av,1e-12)
-            weekly_trap="ЛОВУШКА_ВЫШЕ_MON_TUE"; trap_side=-1; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside<0 else 0))))
+            if depth>tolerance_atr:
+                weekly_trap="ЛОВУШКА_ВЫШЕ_MON_TUE"; trap_side=-1
+                trap_quality=trap_quality_from_depth(depth,sside<0)
         elif dn and dn_run<2 and float(last.close)>mt_lo+tol:
             depth=max(mt_lo-float(c.low) for c in recent[max(0,dn[-1]-1):])/max(av,1e-12)
-            weekly_trap="ЛОВУШКА_НИЖЕ_MON_TUE"; trap_side=1; trap_quality=min(100,int(round(65+min(20,depth*18)+(10 if sside>0 else 0))))
+            if depth>tolerance_atr:
+                weekly_trap="ЛОВУШКА_НИЖЕ_MON_TUE"; trap_side=1
+                trap_quality=trap_quality_from_depth(depth,sside>0)
         elif up_run>=2 or dn_run>=2:
             weekly_trap="ПРОБОЙ_ПРИНЯТ"; trap_quality=0
             acceptance_side=1 if up_run>=2 and up_run>=dn_run else -1
@@ -380,12 +391,14 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     # Mathematical health is explicit: history depth + robust baseline + ATR + HTF
     # location. Low math quality cannot silently masquerade as high confidence.
     math_quality=0
-    math_quality += 30 if len(completed)>=6 else 20 if len(completed)>=3 else 8
-    math_quality += 25 if av and av>0 else 0
-    math_quality += 20 if h4pd!="UNKNOWN" else 0
-    math_quality += 20 if d1pd!="UNKNOWN" else 0
+    # ATR is a scale input, not evidence of mathematical completeness.
+    math_quality += 45 if len(completed)>=6 else 28 if len(completed)>=3 else 10
+    math_quality += 25 if h4pd!="UNKNOWN" else 0
+    math_quality += 25 if d1pd!="UNKNOWN" else 0
     math_quality += 5 if len(current)>=4 else 0
     math_quality=max(0,min(100,math_quality))
+    if len(completed)<6 or h4pd=="UNKNOWN" or d1pd=="UNKNOWN":
+        confidence=min(confidence, int(getattr(cfg,"WEEKLY_RHYTHM_LOW_MATH_CONFIDENCE_CAP",57)))
     if math_quality < int(getattr(cfg,"WEEKLY_RHYTHM_MIN_MATH_QUALITY",65)):
         confidence=min(confidence, int(getattr(cfg,"WEEKLY_RHYTHM_LOW_MATH_CONFIDENCE_CAP",57)))
         if expansion_side and confidence < min_conf:
