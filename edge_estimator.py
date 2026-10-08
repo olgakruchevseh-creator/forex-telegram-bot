@@ -40,6 +40,7 @@ class EdgeView:
     paper_dd: float
     dt: str
     price: float
+    target: float
 
 
 def _state_path() -> Path:
@@ -203,6 +204,8 @@ def format_message(view: EdgeView) -> str:
         f"Издержки: {_pct(view.cost)}",
         f"Запас после издержек: {_pct(view.edge)}",
         f"Цена закрытия: {_fmt(view.symbol, view.price)}",
+        f"Цель часа: {_fmt(view.symbol, view.target)}",
+        "Это одна цена на условный сдвиг следующего часа, не TR1–TR3.",
         f"ATR: {_fmt(view.symbol, view.atr)}",
         f"Размер: {view.size:.2f} условной единицы риска",
         f"Окно: {view.n} баров, коэффициент b={view.b:+.4f}",
@@ -255,6 +258,7 @@ def analyze_symbol(symbol: str, by_tf: dict, state: dict) -> EdgeView | None:
         paper_dd=dd,
         dt=bars[-1].dt,
         price=price,
+        target=price * math.exp(expected),
     )
 
 
