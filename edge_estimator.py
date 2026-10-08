@@ -196,6 +196,70 @@ def _settle(state: dict, symbol: str, last_close: float, last_dt: str) -> None:
     book["muted"] = dd >= limit or dead
 
 
+def _observe_calibration(state: dict, symbol: str, bars: list[Candle]) -> None:
+    """OBSERVE_ONLY walk-forward journal for candidate windows/embargos.
+
+    It never gates or changes the live EDGE message. Each candidate forecast is
+    settled on the next closed H1 bar and stored per symbol/configuration.
+    """
+    if not bool(getattr(cfg, "EDGE_CALIBRATION_OBSERVE_ONLY", False)) or len(bars) < 40:
+        return
+    root = state.setdefault("calibration_observe", {})
+    pair = root.setdefault(symbol, {"candidates": {}})
+    candidates = pair.setdefault("candidates", {})
+    last = bars[-1]
+    price = float(last.close)
+    dt = last.dt
+    returns = log_returns([c.close for c in bars])
+    windows = tuple(int(x) for x in getattr(cfg, "EDGE_CALIBRATION_WINDOWS", (120, 240, 480)))
+    embargos = tuple(int(x) for x in getattr(cfg, "EDGE_CALIBRATION_EMBARGOS", (1, 3, 6)))
+    keep = max(20, int(getattr(cfg, "EDGE_CALIBRATION_RECENT", 100)))
+
+    for train in windows:
+        for embargo in embargos:
+            key = f"w{train}_e{embargo}"
+            slot = candidates.setdefault(key, {"recent": [], "open": None})
+            old = slot.get("open")
+            if isinstance(old, dict) and old.get("dt") != dt:
+                entry = float(old.get("price", 0.0))
+                if entry > 0 and price > 0:
+                    actual = math.log(price / entry)
+                    pred = float(old.get("expected", 0.0))
+                    cost = float(old.get("cost", 0.0))
+                    side = 1.0 if pred >= 0 else -1.0
+                    net = side * actual - cost
+                    rec = slot.setdefault("recent", [])
+                    rec.append({
+                        "forecast_dt": old.get("dt"), "settled_dt": dt,
+                        "expected": pred, "actual": actual, "cost": cost,
+                        "net": net, "hit": bool(side * actual > 0),
+                    })
+                    slot["recent"] = rec[-keep:]
+                    slot["n_settled"] = int(slot.get("n_settled", 0)) + 1
+                    slot["hits"] = int(slot.get("hits", 0)) + int(side * actual > 0)
+                    slot["net_sum"] = float(slot.get("net_sum", 0.0)) + net
+            # Do not overwrite an already-created forecast for this same H1 close.
+            if isinstance(slot.get("open"), dict) and slot["open"].get("dt") == dt:
+                continue
+            fitted = fit_edge(returns, embargo, train)
+            if not fitted:
+                slot["open"] = None
+                continue
+            a, b, holdout = fitted
+            expected = predict(returns, a, b)
+            cost = cost_return(symbol, price)
+            slot["open"] = {
+                "dt": dt, "price": price, "expected": expected, "cost": cost,
+                "edge": abs(expected) - cost, "a": a, "b": b,
+                "holdout": holdout,
+            }
+            n = int(slot.get("n_settled", 0))
+            slot["hit_rate"] = (float(slot.get("hits", 0)) / n) if n else None
+            slot["mean_net"] = (float(slot.get("net_sum", 0.0)) / n) if n else None
+
+    pair["last_dt"] = dt
+
+
 def format_message(view: EdgeView) -> str:
     return "\n".join([
         f"📐 EDGE H1 · {view.symbol} · {view.side}",
@@ -271,7 +335,10 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     messages: list[str] = []
     for symbol in cfg.PAIRS:
         try:
-            view = analyze_symbol(symbol, market.get(symbol) or {}, state)
+            symbol_market = market.get(symbol) or {}
+            observe_bars = closed_candles(symbol_market.get("H1") or [], TF_MINUTES["H1"])
+            _observe_calibration(state, symbol, observe_bars)
+            view = analyze_symbol(symbol, symbol_market, state)
             if not view:
                 continue
             key = f"{symbol}|{view.dt}|{view.side}"
