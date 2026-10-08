@@ -822,7 +822,7 @@ CONTEXT_PULLBACK_MAX_PROGRESS_PCT = 25
 CONTEXT_PULLBACK_MAX_OPPOSITE_GAP = 0.12
 
 SIGNAL_SIGNIFICANCE_GATE_ENABLED = True
-SIGNAL_MIN_REMAINING_H1 = 3
+SIGNAL_MIN_REMAINING_H1 = 2
 # A strong fresh OHLC/displacement event must not wait for another H1 candle.
 SIGNAL_EARLY_OHLC_SCORE = 68
 # If a source explicitly carries its close time, never present it as a NEW entry
@@ -842,7 +842,7 @@ EARLY_IMPULSE_MIN_BODY_ATR = 1.15
 EARLY_IMPULSE_MIN_RANGE_ATR = 1.30
 EARLY_IMPULSE_LOOKBACK_H1 = 10
 EARLY_IMPULSE_MAX_AGE_BARS = 1
-EARLY_MAX_TRAVEL_ATR = 1.35
+EARLY_MAX_TRAVEL_ATR = 2.0
 EARLY_ORIGIN_RETEST_ATR = 0.40
 # Fresh displacement is not automatically an early entry. If the just-closed
 # H1 candle itself has already consumed an abnormal amount of movement and
@@ -854,7 +854,7 @@ EARLY_FRESH_CLOSE_EDGE_PCT = 0.22
 # Also block a mature 4-H1 staircase even without one giant candle.
 EARLY_RUN_BARS_H1 = 4
 EARLY_RUN_MIN_DIRECTIONAL_BARS = 3
-EARLY_RUN_MAX_TRAVEL_ATR = 1.55
+EARLY_RUN_MAX_TRAVEL_ATR = 2.2
 
 # Unified OHLC movement layer (ZIP 30 -> 31). Internal filter, never a standalone alert.
 OHLC_MOVEMENT_FILTER_ENABLED = True
