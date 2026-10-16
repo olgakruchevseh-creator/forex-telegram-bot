@@ -1,0 +1,8 @@
+Изменённые/новые файлы:
+1. bot.py
+2. config.py
+3. .env.example
+4. README.md
+5. test_runtime_silence_recovery.py
+6. RUNTIME_SILENCE_RECOVERY_AUDIT_2026-10-16_RU.md
+7. RUNTIME_SILENCE_RECOVERY_CHANGED_FILES.txt

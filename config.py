@@ -50,6 +50,15 @@ SCAN_EVERY_MINUTES = 1
 MARKET_REQUIRE_COMPLETE = True
 MARKET_REQUIRED_TFS = ("H1", "M15", "M5", "H4")
 MARKET_MIN_CLOSED_H1 = 20
+# Operational recovery only: when Twelve Data returns a partial multi-symbol
+# payload, retry only the missing symbols instead of accepting an incomplete
+# basket and silencing the whole scan.
+MARKET_RETRY_MISSING_SYMBOLS = True
+# A persistent market-data outage must never look like a dead Telegram bot.
+# Send one compact technical notice on transition and then at most once per
+# this many minutes while the outage remains unresolved.
+SYSTEM_HEALTH_ALERTS_ENABLED = True
+SYSTEM_HEALTH_ALERT_REPEAT_MINUTES = 180
 # Если доля сканеров с исключением выше порога — торговые карточки в этот тик не шлём.
 SCAN_FAIL_ABORT_RATIO = 0.35
 # Автоматические сканы и уведомления: только понедельник–пятница.
@@ -146,9 +155,10 @@ SIGNAL_SETUP_COOLDOWN_HOURS = 1.5
 # После склейки одной идеи на пару общий числовой потолок отключён: каждый уникальный прошедший сигнал может быть доставлен.
 MAX_MODULE_ALERTS_PER_H1 = 0
 SIGNAL_JOURNAL_ENABLED = True
-# Legacy journal still records outcomes, but its separate daily/weekly Telegram summaries are disabled.
-# Daily Calibration Report is the single statistical Telegram report.
-SIGNAL_JOURNAL_REPORTS_ENABLED = False
+# Journal keeps its own final daily/weekly summaries in addition to the
+# OBSERVE_ONLY Daily Calibration report. The two reports answer different
+# questions: outcome journal vs decision/replay calibration.
+SIGNAL_JOURNAL_REPORTS_ENABLED = True
 # Passive calibration dataset; never sends Telegram messages or changes scanner decisions.
 DECISION_JOURNAL_ENABLED = True
 # Passive replay/calibration: observe outcomes only; never changes live verdicts.

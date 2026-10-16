@@ -112,17 +112,28 @@ def load_state() -> dict:
             dest.write_text(src.read_text())
         except Exception:
             log.exception("Не удалось перенести state.json")
+    state = None
     if dest.exists():
         try:
-            return json.loads(dest.read_text())
+            loaded = json.loads(dest.read_text())
+            state = loaded if isinstance(loaded, dict) else None
         except Exception:
             log.exception("Повреждён state.json")
-    return {
-        "chat_id": os.getenv("TELEGRAM_CHAT_ID") or None,
-        "last_signals": {},
-        "last_rank": [],
-        "last_strength_ts": 0,
-    }
+    if state is None:
+        state = {
+            "chat_id": None,
+            "last_signals": {},
+            "last_rank": [],
+            "last_strength_ts": 0,
+        }
+    # Railway restart/redeploy must not leave a healthy process permanently
+    # silent just because state.json was lost or an older state did not contain
+    # chat_id.  TELEGRAM_CHAT_ID is an emergency durable fallback.
+    if not state.get("chat_id"):
+        fallback = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if fallback:
+            state["chat_id"] = fallback
+    return state
 
 
 def save_state(state: dict) -> None:
@@ -176,17 +187,31 @@ def _extract_pairs(data: dict) -> dict[str, list[Candle]]:
 
 
 def fetch_tf_batch(tf: dict, api_key: str) -> dict[str, list[Candle]]:
-    """Сначала пакет из 7 пар, если пусто — по одной."""
+    """Сначала пакет из 7 пар, затем точечно добрать недостающие символы.
+
+    Twelve Data иногда возвращает валидный multi-symbol JSON только для части
+    корзины. Раньше любой непустой ``out`` считался успехом, из-за чего одна
+    пропавшая пара затем блокировала весь scan_job через MARKET_INCOMPLETE.
+    """
+    out: dict[str, list[Candle]] = {}
     try:
         data = _request_series(",".join(cfg.PAIRS), tf, api_key)
         out = _extract_pairs(data)
-        if out:
+        missing = [symbol for symbol in cfg.PAIRS if not out.get(symbol)]
+        if not missing:
             return out
+        if out:
+            log.warning(
+                "PARTIAL_BATCH tf=%s present=%s/%s missing=%s",
+                tf["key"], len(out), len(cfg.PAIRS), ",".join(missing),
+            )
     except Exception as e:
         log.warning("Пакет %s не вышел: %s", tf["key"], e)
 
-    out: dict[str, list[Candle]] = {}
-    for symbol in cfg.PAIRS:
+    if not getattr(cfg, "MARKET_RETRY_MISSING_SYMBOLS", True):
+        return out
+    missing = [symbol for symbol in cfg.PAIRS if not out.get(symbol)]
+    for symbol in missing:
         try:
             data = _request_series(symbol, tf, api_key)
             if isinstance(data, dict) and isinstance(data.get("values"), list):
@@ -219,9 +244,20 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
         try:
             batch = fetch_tf_batch(tf, api_key)
             ts = time.time()
-            for s, candles in batch.items():
-                CACHE[(s, tf["key"])] = {"ts": ts, "candles": candles}
-                market[s][tf["key"]] = candles
+            for s in cfg.PAIRS:
+                candles = batch.get(s) or []
+                if candles:
+                    CACHE[(s, tf["key"])] = {"ts": ts, "candles": candles}
+                    market[s][tf["key"]] = candles
+                    continue
+                # The targeted retry may still fail transiently. Preserve a
+                # previously fetched series for this tick instead of dropping
+                # the symbol from an otherwise usable basket. Exact freshness
+                # guards inside signal modules still decide tradeability.
+                hit = CACHE.get((s, tf["key"]))
+                if hit and hit.get("candles"):
+                    market[s][tf["key"]] = hit["candles"]
+                    log.warning("CACHE_FALLBACK symbol=%s tf=%s", s, tf["key"])
             time.sleep(cfg.REQUEST_PAUSE_SEC)
         except Exception as e:
             log.warning("Пакет %s: %s", tf["key"], e)
@@ -386,6 +422,18 @@ async def send(app: Application, chat_id: int, text: str):
     return mid
 
 
+def _remember_effective_chat(update: Update) -> dict:
+    """Any successful manual command heals a lost persistent chat_id."""
+    state = load_state()
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id and str(state.get("chat_id") or "") != str(chat_id):
+        state["chat_id"] = chat_id
+        save_state(state)
+        log.info("CHAT_ID_RECOVERED source=manual_command chat_id=%s", chat_id)
+    return state
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = load_state()
     state["chat_id"] = update.effective_chat.id
@@ -405,13 +453,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Работаю. 7 мажоров × W1/D1/H4/H1/M15/M5.\n"
-        "Полный брифинг — на открытии сессии, не после каждой H1."
-    )
+    state = _remember_effective_chat(update)
+    lines = ["Статус worker: Telegram polling отвечает."]
+    try:
+        market = fetch_market(env("TWELVE_DATA_API_KEY"))
+        coverage = market_coverage(market)
+        h1 = h1_series(market)
+        latest = last_closed_h1_dt(h1) or "—"
+        lines.append(
+            "Корзина Twelve Data: "
+            + ("полная" if coverage["complete"] else f"НЕПОЛНАЯ {coverage['present']}/{coverage['expected']}")
+        )
+        if coverage["missing"]:
+            lines.append("Нет: " + ", ".join(coverage["missing"][:8]))
+        if coverage["short_h1"]:
+            lines.append("Мало H1: " + ", ".join(coverage["short_h1"][:8]))
+        lines.append(f"Последняя закрытая H1: {latest} UTC")
+    except Exception as exc:
+        log.exception("STATUS market health")
+        lines.append(f"Twelve Data: ошибка {type(exc).__name__}")
+    lines.append(f"Последний брифинг: {state.get('last_briefing_id') or '—'}")
+    lines.append(f"STATE_DIR: {os.getenv('STATE_DIR', '').strip() or 'НЕ ЗАДАН'}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _remember_effective_chat(update)
     await update.message.reply_text("Считаю силу валют по H1…")
     market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
     h1 = h1_series(market)
@@ -426,6 +493,7 @@ async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _remember_effective_chat(update)
     raw = " ".join(context.args).upper().replace(" ", "")
     if not raw:
         await update.message.reply_text("Напиши так: /pair EUR/USD")
@@ -452,6 +520,7 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _remember_effective_chat(update)
     await update.message.reply_text("Собираю брифинг сессии…")
     try:
         api_key = env("TWELVE_DATA_API_KEY")
@@ -501,6 +570,163 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
     text = localize_telegram(text)
     for part in briefing.split_telegram(text):
         await send(app, chat_id, part)
+
+
+async def _deliver_scheduled_reports(app: Application, chat_id: int) -> None:
+    """Reports are operationally independent from trade-basket completeness."""
+    if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True) and getattr(
+        cfg, "SIGNAL_JOURNAL_REPORTS_ENABLED", False
+    ):
+        try:
+            for report_id, report_text in signal_journal.pending_reports(datetime.now(timezone.utc)):
+                await _send_parts(app, int(chat_id), report_text)
+                signal_journal.mark_report_sent(report_id)
+        except Exception:
+            log.exception("Отправка отчёта журнала")
+
+    if getattr(cfg, "DAILY_CALIBRATION_REPORT_ENABLED", True):
+        try:
+            for report_id, report_text in daily_calibration_report.pending_reports(datetime.now(timezone.utc)):
+                await _send_parts(app, int(chat_id), report_text)
+                daily_calibration_report.mark_report_sent(report_id)
+        except Exception:
+            log.exception("Отправка Daily Calibration Report")
+
+
+def _coverage_signature(coverage: dict) -> str:
+    missing = ",".join(sorted(coverage.get("missing") or []))
+    short_h1 = ",".join(sorted(coverage.get("short_h1") or []))
+    return f"missing={missing}|short_h1={short_h1}"
+
+
+async def _publish_market_health(app: Application, chat_id: int, state: dict, coverage: dict) -> None:
+    """Expose a persistent data outage instead of silently returning forever."""
+    if not getattr(cfg, "SYSTEM_HEALTH_ALERTS_ENABLED", True):
+        return
+    now_ts = time.time()
+    health = state.setdefault("runtime_health", {})
+    was_degraded = health.get("market_status") == "degraded"
+    if coverage.get("complete"):
+        if was_degraded:
+            try:
+                await _send_parts(
+                    app,
+                    int(chat_id),
+                    "✅ ТЕХНИЧЕСКОЕ ВОССТАНОВЛЕНИЕ\n"
+                    "Полная корзина Twelve Data снова доступна. Автоматические брифинги и торговые сканы возобновлены.",
+                )
+            except Exception:
+                log.exception("SYSTEM_HEALTH_RECOVERY_SEND_FAILED")
+        health.update({"market_status": "ok", "market_signature": "", "market_notice_ts": now_ts})
+        return
+
+    signature = _coverage_signature(coverage)
+    repeat_sec = max(60, int(getattr(cfg, "SYSTEM_HEALTH_ALERT_REPEAT_MINUTES", 180)) * 60)
+    last_notice = float(health.get("market_notice_ts") or 0)
+    changed = signature != health.get("market_signature") or not was_degraded
+    if changed or now_ts - last_notice >= repeat_sec:
+        missing = ", ".join((coverage.get("missing") or [])[:10]) or "—"
+        short_h1 = ", ".join((coverage.get("short_h1") or [])[:8]) or "—"
+        try:
+            await _send_parts(
+                app,
+                int(chat_id),
+                "⚠️ ТЕХНИЧЕСКИЙ СТАТУС БОТА\n"
+                "Worker отвечает, но полная рыночная корзина не собрана.\n"
+                f"Данные: {coverage.get('present', 0)}/{coverage.get('expected', 0)} TF-серий.\n"
+                f"Отсутствуют: {missing}\n"
+                f"Недостаточно H1: {short_h1}\n"
+                "Торговые сигналы временно fail-safe заблокированы; журнальные отчёты продолжают отправляться.",
+            )
+        except Exception:
+            log.exception("SYSTEM_HEALTH_DEGRADED_SEND_FAILED")
+        health["market_notice_ts"] = now_ts
+    health.update({"market_status": "degraded", "market_signature": signature})
+
+
+async def _maybe_send_session_briefing(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict,
+    market: dict,
+    strength: dict | None = None,
+    rank: list | None = None,
+) -> bool:
+    """One deduplicated session briefing, callable from both scheduler jobs."""
+    if not getattr(cfg, "BRIEFING_ENABLED", True):
+        return False
+    chat_id = state.get("chat_id")
+    if not chat_id:
+        return False
+    strength = strength if strength is not None else currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
+    rank = rank if rank is not None else rank_currencies(strength)
+    h1 = h1_series(market)
+    closed_dt = last_closed_h1_dt(h1)
+    empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
+    session_only = bool(getattr(cfg, "BRIEFING_SESSION_ONLY", True))
+    session_due = briefing.just_opened(
+        window_min=int(getattr(cfg, "BRIEFING_OPEN_WINDOW_MIN", 15))
+    ) or bool(getattr(cfg, "BRIEFING_SESSION_CATCH_UP", True))
+    if session_only:
+        iid = briefing.briefing_id() if rank and not empty else ""
+    else:
+        iid = briefing.issue_id(closed_dt, chat_id) if closed_dt else ""
+    log.info(
+        "briefing_key=%s pid=%s reason=session_helper h1=%s session_only=%s due=%s empty=%s",
+        iid, briefing.instance_id(), closed_dt, session_only, session_due, empty,
+    )
+    briefing_ok = bool(iid and not empty and rank)
+    if session_only:
+        briefing_ok = briefing_ok and session_due
+    else:
+        briefing_ok = briefing_ok and closed_dt and briefing.h1_is_current(
+            closed_dt, cfg.BRIEFING_OPEN_WINDOW_MIN
+        )
+    if not briefing_ok:
+        return False
+    if briefing.issue_sent(state, iid):
+        log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=already_sent", iid, briefing.instance_id())
+        return False
+    if not briefing.claim_issue(state, iid):
+        log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=claim_failed", iid, briefing.instance_id())
+        save_state(state)
+        return False
+    save_state(state)
+    sent_ok = False
+    try:
+        api_key = env("TWELVE_DATA_API_KEY")
+        try:
+            dxy = briefing.collect_extras(api_key, h1_dt=closed_dt, market=market)
+        except Exception:
+            log.exception("DXY сессионного брифинга")
+            dxy = None
+        try:
+            all_events = newsmod.load_events()
+            events = briefing.session_events(all_events)
+            upcoming_events = briefing.events_until_next_briefing(all_events)
+        except Exception:
+            log.exception("новости сессионного брифинга")
+            events = []
+            upcoming_events = []
+        delivered = await _send_briefing_sequence(
+            context.application, int(chat_id), market, strength, rank, dxy, events, upcoming_events
+        )
+        briefing.mark_issue_sent(state, iid, delivered)
+        state["last_rank"] = [c for c, _ in rank]
+        state["last_strength_h1"] = closed_dt
+        state["last_strength_ts"] = time.time()
+        state["last_briefing_id"] = briefing.briefing_id()
+        state["last_briefing_sent_ts"] = time.time()
+        if closed_dt:
+            SENT_H1.add(closed_dt)
+        sent_ok = True
+        log.info("брифинг отправлен issue=%s parts=%s", iid, delivered)
+    except Exception:
+        log.exception("отправка сессионного брифинга")
+        briefing.release_issue(state, iid)
+    if not sent_ok:
+        briefing.release_issue(state, iid)
+    save_state(state)
+    return sent_ok
 
 
 class ScanStats:
@@ -879,8 +1105,15 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     api_key = env("TWELVE_DATA_API_KEY")
     try:
         market = fetch_market(api_key)
+        coverage = market_coverage(market)
+        await _publish_market_health(context.application, int(chat_id), state, coverage)
+        save_state(state)
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
+        # Independent scheduler path: even if scan_job later fails inside a
+        # scanner, the session briefing still has its own chance to publish.
+        if coverage["complete"]:
+            await _maybe_send_session_briefing(context, state, market, strength, rank)
         dxy = briefing.collect_extras(api_key, market=market)
         all_events = newsmod.load_events()
         now_utc = datetime.now(timezone.utc)
@@ -942,7 +1175,17 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             robustness_audit.update()
         except Exception:
             log.exception("Replay/Calibration update skipped")
+        # Journals must continue maturing and scheduled summaries must still be
+        # delivered even when a market-data gap blocks live trading.
+        if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
+            try:
+                signal_journal.update_market(market)
+            except Exception:
+                log.exception("Обновление журнала сигналов")
+        await _deliver_scheduled_reports(context.application, int(chat_id))
         coverage = market_coverage(market)
+        await _publish_market_health(context.application, int(chat_id), state, coverage)
+        save_state(state)
         if not coverage["complete"]:
             log.warning(
                 "MARKET_INCOMPLETE present=%s/%s missing=%s short_h1=%s",
@@ -956,79 +1199,9 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
-
         h1 = h1_series(market)
         closed_dt = last_closed_h1_dt(h1)
-        empty = bool(rank) and (max(s for _, s in rank) - min(s for _, s in rank) < 1e-12)
-        session_only = bool(getattr(cfg, "BRIEFING_SESSION_ONLY", True))
-        session_due = briefing.just_opened(
-            window_min=int(getattr(cfg, "BRIEFING_OPEN_WINDOW_MIN", 15))
-        ) or bool(getattr(cfg, "BRIEFING_SESSION_CATCH_UP", True))
-        if session_only:
-            iid = briefing.briefing_id() if rank and not empty else ""
-        else:
-            iid = briefing.issue_id(closed_dt, chat_id) if closed_dt else ""
-        log.info(
-            "briefing_key=%s pid=%s reason=scan_job h1=%s session_only=%s due=%s empty=%s",
-            iid,
-            briefing.instance_id(),
-            closed_dt,
-            session_only,
-            session_due,
-            empty,
-        )
-        briefing_ok = bool(iid and not empty and rank)
-        if session_only:
-            briefing_ok = briefing_ok and session_due
-        else:
-            briefing_ok = briefing_ok and closed_dt and briefing.h1_is_current(
-                closed_dt, cfg.BRIEFING_OPEN_WINDOW_MIN
-            )
-        if briefing_ok:
-            if briefing.issue_sent(state, iid):
-                log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=already_sent", iid, briefing.instance_id())
-            elif not briefing.claim_issue(state, iid):
-                log.info("DUPLICATE_SKIPPED briefing_key=%s pid=%s reason=claim_failed", iid, briefing.instance_id())
-                save_state(state)
-            else:
-                save_state(state)
-                sent_ok = False
-                try:
-                    api_key = env("TWELVE_DATA_API_KEY")
-                    try:
-                        dxy = briefing.collect_extras(
-                            api_key,
-                            h1_dt=closed_dt,
-                            market=market,
-                        )
-                    except Exception:
-                        log.exception("DXY сессионного брифинга")
-                        dxy = None
-                    try:
-                        all_events = newsmod.load_events()
-                        events = briefing.session_events(all_events)
-                        upcoming_events = briefing.events_until_next_briefing(all_events)
-                    except Exception:
-                        log.exception("новости сессионного брифинга")
-                        events = []; upcoming_events = []
-                    delivered = await _send_briefing_sequence(
-                        context.application, int(chat_id), market, strength, rank, dxy, events, upcoming_events
-                    )
-                    briefing.mark_issue_sent(state, iid, delivered)
-                    state["last_rank"] = [c for c, _ in rank]
-                    state["last_strength_h1"] = closed_dt
-                    state["last_strength_ts"] = time.time()
-                    state["last_briefing_id"] = briefing.briefing_id()
-                    state["last_briefing_sent_ts"] = time.time()
-                    SENT_H1.add(closed_dt)
-                    sent_ok = True
-                    log.info("брифинг отправлен issue=%s parts=%s", iid, len(parts))
-                except Exception:
-                    log.exception("отправка сессионного брифинга")
-                    briefing.release_issue(state, iid)
-                if not sent_ok:
-                    briefing.release_issue(state, iid)
-                save_state(state)
+        await _maybe_send_session_briefing(context, state, market, strength, rank)
 
         module_alerts: list[tuple[int, str]] = []
         mandatory_pdh_pdl: list[str] = []
@@ -1363,11 +1536,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Они не расходуют лимит новых исходных сигналов.
         await _flush_source_outbox(context.application, int(chat_id), state)
         await _flush_navigator_outbox(context.application, int(chat_id), state)
-        if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
-            try:
-                signal_journal.update_market(market)
-            except Exception:
-                log.exception("Обновление журнала сигналов")
         # ZIP 31: направленный факт модуля остаётся внутренним, пока его
         # не подтвердит Master. Navigator снова только сопровождает вход.
         proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + mandatory_pdh_pdl + [
@@ -1653,22 +1821,6 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                                       bundle.get("key", "unknown"), briefing.instance_id())
             except Exception:
                 log.exception("SESSION_REPORT_SCAN_FAILED")
-
-        if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True) and getattr(cfg, "SIGNAL_JOURNAL_REPORTS_ENABLED", False):
-            try:
-                for report_id, report_text in signal_journal.pending_reports(datetime.now(timezone.utc)):
-                    await _send_parts(context.application, int(chat_id), report_text)
-                    signal_journal.mark_report_sent(report_id)
-            except Exception:
-                log.exception("Отправка отчёта журнала")
-
-        if getattr(cfg, "DAILY_CALIBRATION_REPORT_ENABLED", True):
-            try:
-                for report_id, report_text in daily_calibration_report.pending_reports(datetime.now(timezone.utc)):
-                    await _send_parts(context.application, int(chat_id), report_text)
-                    daily_calibration_report.mark_report_sent(report_id)
-            except Exception:
-                log.exception("Отправка Daily Calibration Report")
 
         save_state(state)
         log.info(
