@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import asyncio
+import gc
 import logging
 import os
 import re
@@ -77,6 +79,11 @@ except ImportError:
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# httpx logs full request URLs at INFO level; Telegram embeds the bot token in
+# that URL. Keep transport chatter out of production logs so secrets are not
+# copied into Railway Log Explorer.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("fxbot")
 
 DEFAULT_STATE_FILE = Path(__file__).parent / "state.json"
@@ -1090,7 +1097,7 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
     return sent
 
 
-async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _briefing_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Выход до чтения API-ключа и запросов: в выходные нет расхода кредитов.
     if not market_schedule.automatic_jobs_allowed():
         return
@@ -1157,7 +1164,7 @@ async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("Ошибка брифинга")
 
 
-async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Автоматические брифинги, новости и все модули молчат в субботу/воскресенье.
     if not market_schedule.automatic_jobs_allowed():
         return
@@ -1833,6 +1840,115 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         log.exception("Ошибка скана")
 
+
+
+_RUNTIME_JOB_LOCK: asyncio.Lock | None = None
+_RUNTIME_CHART_CACHE_LIMIT = max(4, int(os.getenv("RUNTIME_CHART_CACHE_LIMIT", "16")))
+
+
+def _job_lock() -> asyncio.Lock:
+    global _RUNTIME_JOB_LOCK
+    if _RUNTIME_JOB_LOCK is None:
+        _RUNTIME_JOB_LOCK = asyncio.Lock()
+    return _RUNTIME_JOB_LOCK
+
+
+def _current_rss_mb() -> float | None:
+    """Current Linux RSS for Railway telemetry; never affects trading logic."""
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return round(float(line.split()[1]) / 1024.0, 1)
+    except Exception:
+        pass
+    return None
+
+
+def _trim_mapping(mapping: dict, limit: int) -> int:
+    """Bound insertion-ordered runtime caches, evicting oldest presentation cards."""
+    removed = 0
+    while len(mapping) > limit:
+        try:
+            mapping.pop(next(iter(mapping)))
+            removed += 1
+        except (StopIteration, RuntimeError):
+            break
+    return removed
+
+
+def _trim_runtime_chart_caches(limit: int | None = None) -> int:
+    """Prevent blocked/duplicate chart snapshots from accumulating for days.
+
+    These dicts are presentation-only caches. Durable lifecycle state stays in
+    STATE_DIR JSON/SQLite and is not touched here.
+    """
+    cap = max(4, int(limit or _RUNTIME_CHART_CACHE_LIMIT))
+    specs = (
+        (silver_bullet_ict, "_PENDING_CARDS"),
+        (liquidity_sweep, "_LAST_CHART_CARDS"),
+        (bpr, "_PENDING_CARDS"),
+        (quasimodo_engine, "_PENDING_CARDS"),
+        (retest_confirmation, "_RETEST_CHART_CACHE"),
+        (chain_entries, "_PENDING_CARDS"),
+        (daily_high_low, "_PENDING_CARDS"),
+        (accumulation_distribution, "_PENDING_CARDS"),
+        (ats_reversal_point, "_LAST_CHART_CARDS"),
+        (imbalance, "_PENDING_CARDS"),
+        (crt_candle_range, "_PENDING_CARDS"),
+        (smart_money_62_26, "_LAST_CHART_CARDS"),
+        (breaker_block, "_LAST_CHART_CARDS"),
+        (disbalance, "_PENDING_CARDS"),
+        (order_block, "_LAST_CHART_CARDS"),
+        (poc_profile, "_LAST_CHART_CARDS"),
+        (fibonacci_grid, "_PENDING_CARDS"),
+        (amd_power_of_three, "_PENDING_CARDS"),
+        (zigzag_scanner, "_PENDING_CARDS"),
+        (consolidation_zone, "_PENDING_CARDS"),
+        (weekly_rhythm_context, "_PENDING_CARDS"),
+        (levels, "_PENDING_CARDS"),
+        (fib_smc, "_PENDING_CARDS"),
+    )
+    if patterns is not None:
+        specs = specs + ((patterns, "_PENDING_CARDS"),)
+    removed = 0
+    for module, attr in specs:
+        cache = getattr(module, attr, None)
+        if isinstance(cache, dict):
+            removed += _trim_mapping(cache, cap)
+    return removed
+
+
+async def _run_serialized_runtime_job(name: str, impl, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run only one heavy Forex runtime pass at once.
+
+    scan_job and briefing_job are offset by seconds but both build the full market
+    snapshot. If one is still alive when the other starts, skip the duplicate pass
+    instead of holding two full analysis trees/images in RAM simultaneously.
+    """
+    lock = _job_lock()
+    if lock.locked():
+        log.warning("RUNTIME_JOB_SKIPPED_BUSY name=%s", name)
+        return
+    async with lock:
+        before = _current_rss_mb()
+        try:
+            await impl(context)
+        finally:
+            removed = _trim_runtime_chart_caches()
+            gc.collect()
+            after = _current_rss_mb()
+            log.info(
+                "RUNTIME_MEMORY name=%s rss_before_mb=%s rss_after_mb=%s chart_cache_evicted=%s",
+                name, before, after, removed,
+            )
+
+
+async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_serialized_runtime_job("briefing_job", _briefing_job_impl, context)
+
+
+async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_serialized_runtime_job("scan_job", _scan_job_impl, context)
 
 def main() -> None:
     token = env("TELEGRAM_TOKEN")
