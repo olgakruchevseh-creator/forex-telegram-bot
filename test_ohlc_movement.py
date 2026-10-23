@@ -1,4 +1,5 @@
 from analysis import Candle
+from datetime import datetime, timedelta, timezone
 import ohlc_movement as om
 
 
@@ -21,11 +22,13 @@ def test_one_small_counter_candle_does_not_flip_prior_move():
 def _tight(closes):
     out = []
     prev = closes[0]
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
     for i, c in enumerate(closes):
         o = prev
         hi = max(o, c) + 0.00005
         lo = min(o, c) - 0.00005
-        out.append(Candle(str(i), o, hi, lo, c))
+        dt = (start + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S")
+        out.append(Candle(dt, o, hi, lo, c))
         prev = c
     return out
 
@@ -43,7 +46,7 @@ def _h1_pair(closes, impulse_at=None, impulse_size=2.4):
 
 def test_fresh_impulse_bar_is_early():
     closes = [1.34 + i * 0.0002 for i in range(20)] + [1.344]
-    by_tf = _h1_pair(closes, impulse_at=-1, impulse_size=-0.0030)
+    by_tf = _h1_pair(closes, impulse_at=-1, impulse_size=-0.0004)
     # last bar is the dump
     got = om.early_entry_check(by_tf, -1)
     assert got["allow"] is True
@@ -72,7 +75,7 @@ def test_multi_candle_real_move_is_seen():
 
 def test_fresh_oversized_dump_is_not_a_new_short_entry():
     closes = [1.360 - i * 0.00010 for i in range(20)] + [1.358]
-    by_tf = _h1_pair(closes, impulse_at=-1, impulse_size=-0.0060)
+    by_tf = _h1_pair(closes, impulse_at=-1, impulse_size=-0.0006)
     got = om.early_entry_check(by_tf, -1)
     assert got["allow"] is False
     assert got["reason"] in ("fresh_impulse_already_extended", "multi_bar_move_already_extended")

@@ -24,6 +24,17 @@ def _read_jsonl(path, limit=12000):
         try: out.append(json.loads(line))
         except Exception: pass
     return out
+
+def _dedupe(rows):
+    out=[]; seen=set()
+    for r in rows:
+        eid=r.get('event_id') if isinstance(r,dict) else None
+        if eid:
+            if eid in seen: continue
+            seen.add(eid)
+        out.append(r)
+    return out
+
 def _load_state():
     try:return json.loads(_state().read_text(encoding='utf-8'))
     except Exception:return {}
@@ -36,8 +47,11 @@ def _local_date(raw):
         return d.astimezone(ZoneInfo(getattr(cfg,'LOCAL_TZ_NAME','Europe/Amsterdam'))).date().isoformat()
     except Exception:return ''
 def _pct(a,b): return f'{round(100*a/b)}%' if b else '—'
-def _top(counter, n=3):
-    return ', '.join(f'{k} {v}' for k,v in counter.most_common(n)) if counter else '—'
+def _top(counter, n=6):
+    if not counter:return '—'
+    common=counter.most_common(n); shown=sum(v for _k,v in common); total=sum(counter.values())
+    text=', '.join(f'{k} {v}' for k,v in common)
+    return text + (f', прочие {total-shown}' if total>shown else '')
 def _bucket(v):
     try:v=float(v)
     except (TypeError,ValueError):return '—'
@@ -62,14 +76,17 @@ def _metric_eff(sent,outcomes,extract,bucket):
     return ', '.join(f'{k}: n={v[0]}, eff={v[1]/v[0]*100:.0f}%' for k,v in groups.items()) or '—'
 
 def _report(day):
-    decisions=[r for r in _read_jsonl(_journal()) if _local_date(r.get('recorded_utc'))==day]
+    raw_decisions=[r for r in _read_jsonl(_journal()) if _local_date(r.get('recorded_utc'))==day]
+    decisions=_dedupe(raw_decisions)
     outcomes_all=_read_jsonl(_replay())
     outcomes={r.get('decision_id'):r for r in outcomes_all if r.get('decision_id')}
     counts=Counter(r.get('status','?') for r in decisions)
+    raw_counts=Counter(r.get('status','?') for r in raw_decisions)
     unique_counts=Counter()
     for status in ('ALLOWED','BLOCKED','MASTER_CONFIRMED','SENT'):
         unique_counts[status]=len({r.get('event_id') for r in decisions if r.get('status')==status and r.get('event_id')})
     sent=[r for r in decisions if r.get('status')=='SENT']
+    sent_timing=Counter(r.get('entry_timing') or 'unknown' for r in sent)
     sent_out=[outcomes.get(r.get('event_id')) for r in sent if outcomes.get(r.get('event_id'))]
     target=Counter(); mfe=[]; mae=[]; timing=Counter(); by_pair=defaultdict(list); by_src=defaultdict(list); by_tf=defaultdict(list); by_reg=defaultdict(list); by_session=defaultdict(list)
     for d in sent:
@@ -130,21 +147,22 @@ def _report(day):
     if not problems: problems=['явных систематических проблем по доступной выборке не выявлено']
     return '\n'.join([
       '━━━━━━━━━━━━━━━━━━','📊 DAILY CALIBRATION · OBSERVE_ONLY','━━━━━━━━━━━━━━━━━━',f'Дата: {day} · Europe/Amsterdam','',
-      f"Воронка: CONTEXT_ALLOWED {counts['ALLOWED']} (уник. {unique_counts['ALLOWED']}) · MASTER_CONFIRMED {counts['MASTER_CONFIRMED']} (уник. {unique_counts['MASTER_CONFIRMED']}) · SENT {counts['SENT']} (уник. {unique_counts['SENT']})",
-      f"BLOCKED: {counts['BLOCKED']} решений (уник. {unique_counts['BLOCKED']})",
+      f"Воронка (уникальные решения): CONTEXT_ALLOWED {counts['ALLOWED']} · MASTER_ПОДТВЕРЖДЕНО {counts['MASTER_CONFIRMED']} · SENT {counts['SENT']}",
+      f"ЗАБЛОКИРОВАНО: {counts['BLOCKED']} уникальных решений",
+      (f"Технические повторные записи от повторных сканов: {len(raw_decisions)-len(decisions)}" if len(raw_decisions)>len(decisions) else "Технические повторные записи: 0"),
       f'Фактический replay SENT: {len(sent_out)} · ещё без полного окна: {pending}',
       f"TR1: {target['TR1']}/{target['TR1_known']} · TR2: {target['TR2']}/{target['TR2_known']} · TR3: {target['TR3']}/{target['TR3_known']}",
       f"MFE: {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
-      f"Вход: early {timing['early']} · timely {timing['timely']} · late {timing['late']} · residual avg {sum(residual)/len(residual):.0f}%" if residual else f"Вход: early {timing['early']} · timely {timing['timely']} · late {timing['late']}",'',
-      group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Regime',by_reg),group_line('Сессии',by_session),'',
-      f'Блокировки: полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
+      f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']} · residual avg {sum(residual)/len(residual):.0f}%" if residual else f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']}",'',
+      group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Режим',by_reg),group_line('Сессии',by_session),'',
+      f'Блокировки (уникальные, 3H excursion proxy): полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
       f'Master ranges: {master_ranges}',f'KILLER ranges: {killer_ranges}',
       f'Progress ranges: {progress_ranges}',f'Strength ranges: {strength_ranges}',
       (f'Подтверждения: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f}' if source_counts else 'Подтверждения: —'),
       f"Контроль: {'; '.join(problems)}",'',
       'Коррелированные подтверждения учитываются по семействам; число источников не трактуется как число независимых голосов.',
-      'OBSERVE_ONLY: отчёт ничего автоматически не меняет в торговой логике, порогах, LONG/SHORT или Navigator.'
+      'OBSERVE_ONLY: отчёт ничего автоматически не меняет в торговой логике, порогах, ЛОНГ/ШОРТ или Navigator.'
     ])
 
 def pending_reports(now_utc=None):

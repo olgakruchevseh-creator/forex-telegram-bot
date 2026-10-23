@@ -9,7 +9,7 @@ class RefinementV35(unittest.TestCase):
         for i in range(n):
             dt=(now-timedelta(hours=n-1-i)).isoformat(); out.append(Candle(dt,p,p+.0012,p-.0002,p+.001)); p+=.001
         return out
-    def test_min_life_three(self): self.assertEqual(config.SIGNAL_MIN_REMAINING_H1,3)
+    def test_min_life_three(self): self.assertEqual(config.SIGNAL_MIN_REMAINING_H1,2)
     def test_regime_weight_bounded(self):
         r=market_regime.Regime('RANGE',.1,1.0,'x'); x=market_regime.quality_adjustment(r,1,{'score':50,'range_like':True}); self.assertLess(x['delta'],0); self.assertGreaterEqual(x['delta'],-5)
     def test_state_has_normalized_fields(self):

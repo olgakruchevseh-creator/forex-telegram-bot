@@ -42,3 +42,18 @@ def test_replay_carries_frozen_character_features_only_after_horizon():
     out=rc._evaluate(rec,bars)
     assert out['character_features']['trend_persistence']==77.0
     assert out['character_features']['observe_only'] is True
+
+
+def test_replay_uses_observed_h1_anchor_and_causal_atr():
+    rec={'event_id':'anchor','recorded_utc':'2026-09-17T10:05:00+00:00','observed_h1_dt':'2026-09-17T10:00:00+00:00',
+         'pair':'EUR/USD','side':'LONG','source':'Patterns','status':'SENT','h1_close_price':1.1100,'targets':{}}
+    bars=[]
+    for i in range(20):
+        close=1.1000+i*.001
+        # Make post-signal ranges huge; causal ATR must not absorb them.
+        width=.0005 if i<=10 else .02
+        bars.append(Candle(f'2026-09-17T{i:02d}:00:00+00:00',close,close+width,close-width,close))
+    out=rc._evaluate(rec,bars)
+    assert out and out['replay_anchor']=='observed_h1'
+    assert out['entry']==1.1100
+    assert out['atr_h1'] < .01

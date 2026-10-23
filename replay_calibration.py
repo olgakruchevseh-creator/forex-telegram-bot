@@ -53,7 +53,7 @@ def _records(limit=4000):
     return out
 
 def _entry(rec,bars):
-    for key in ('confirmation_price','trigger_price'):
+    for key in ('confirmation_price','h1_close_price','trigger_price'):
         try:
             v=float(rec.get(key) or 0)
             if v>0:return v
@@ -71,17 +71,29 @@ def _regime(rec):
 def _evaluate(rec,h1):
     side=rec.get('side'); direction=1 if side=='LONG' else -1 if side=='SHORT' else 0
     if not direction:return None
-    start=_dt(rec.get('recorded_utc'))
+    # Prefer the exact closed-H1 observation used by the decision. Using
+    # recorded_utc (often several minutes later) skips the first full H1 after
+    # the signal and biases replay. Legacy rows fall back conservatively.
+    observed=_dt(rec.get('observed_h1_dt'))
+    recorded=_dt(rec.get('recorded_utc'))
+    start=observed or recorded
     bars=closed_candles(h1 or [],60)
     if not start or not bars:return None
-    future=[]
+    future=[]; prior=[]
     for b in bars:
         d=_dt(b.dt)
-        if d and d>start: future.append(b)
+        if not d: continue
+        if observed:
+            if d>start: future.append(b)
+            else: prior.append(b)
+        else:
+            # Legacy journal rows have no exact H1 anchor. Do not use the
+            # partially elapsed H1 containing recorded_utc as prior/future data.
+            if d>start: future.append(b)
+            if (d.timestamp()+3600)<=start.timestamp(): prior.append(b)
     if len(future)<max(HORIZONS):return None
     entry=_entry(rec,future)
     if not entry:return None
-    prior=closed_candles(h1 or [],60)
     a=atr(prior[-30:]) if len(prior)>=14 else max(abs(entry)*0.001,1e-6)
     horizons={}
     for n in HORIZONS:
@@ -115,9 +127,21 @@ def _evaluate(rec,h1):
       'session':rec.get('session'),'timeframe':rec.get('timeframe'),
       'quality':rec.get('quality'),'probability':rec.get('probability'),'regime':_regime(rec),'entry':entry,'atr_h1':round(a,7),
       'character_features':rec.get('character_features') or {},
+      'observed_h1_dt':rec.get('observed_h1_dt') or '',
+      'replay_anchor':'observed_h1' if observed else 'legacy_recorded_utc',
       'horizons_h1':horizons,'targets_hit_8h':hit,'target_hit_time':hit_time,'target_hit_minutes':hit_minutes,'efficiency_3h':round(efficiency,3),'timing_class':timing}
 
 def _build_calibration(outcomes):
+    # Defensive de-duplication for legacy replay files. Rows without an id are
+    # preserved so synthetic/tests and very old data remain backward compatible.
+    dedup=[]; seen=set()
+    for r in outcomes:
+        did=r.get('decision_id') if isinstance(r,dict) else None
+        if did:
+            if did in seen: continue
+            seen.add(did)
+        dedup.append(r)
+    outcomes=dedup
     groups=defaultdict(lambda:{'n':0,'mfe':0.0,'mae':0.0,'eff':0.0,'tr1':0,'tr1_known':0,'weak':0})
     for r in outcomes:
         key='|'.join(str(x or '-') for x in (r.get('source'),r.get('pair'),r.get('status'),r.get('regime'),r.get('session'),r.get('timeframe')))

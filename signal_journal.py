@@ -151,31 +151,17 @@ def _future_bars(record: dict, bars: list[Candle]) -> list[Candle]:
 
 
 def _update_record(record: dict, bars: list[Candle]) -> None:
-    future = _future_bars(record, bars)
-    if not future:
+    future_all = _future_bars(record, bars)
+    if not future_all:
         return
+    # The standardized journal has an 8H evaluation horizon. Excursions must
+    # never keep growing for days after the scenario was already resolved.
+    future8 = future_all[:8]
     wanted = 1 if record["side"] == "LONG" else -1
     entry, av = float(record["entry"]), float(record["atr"])
-    favorable_values = [((bar.high-entry) if wanted > 0 else (entry-bar.low)) for bar in future]
-    adverse_values = [((entry-bar.low) if wanted > 0 else (bar.high-entry)) for bar in future]
-    favorable = max(favorable_values); adverse = max(adverse_values)
-    mfe_i = favorable_values.index(favorable) + 1; mae_i = adverse_values.index(adverse) + 1
-    record["mfe_atr"] = round(max(float(record.get("mfe_atr") or 0), favorable / av), 3)
-    record["mae_atr"] = round(max(float(record.get("mae_atr") or 0), adverse / av), 3)
-    record["mfe_bar"] = mfe_i; record["mae_bar"] = mae_i
-    record["mfe_before_mae"] = bool(mfe_i <= mae_i)
-    denom = max(float(record["mfe_atr"]) + float(record["mae_atr"]), 1e-9)
-    record["excursion_efficiency"] = round(float(record["mfe_atr"]) / denom, 3)
-    for hours in (1, 4, 8):
-        key = str(hours)
-        if key not in record.setdefault("horizons", {}) and len(future) >= hours:
-            move = (future[hours - 1].close - entry) * wanted / av
-            record["horizons"][key] = round(move, 3)
-            if hours == 8:
-                record["realized_8h_atr"] = round(move, 3)
 
     if record.get("status") == "OPEN":
-        for bar in future:
+        for bar in future8:
             target_hit = bar.high >= record["target"] if wanted > 0 else bar.low <= record["target"]
             invalid_hit = bar.low <= record["invalidation"] if wanted > 0 else bar.high >= record["invalidation"]
             if target_hit and invalid_hit:
@@ -187,9 +173,39 @@ def _update_record(record: dict, bars: list[Candle]) -> None:
             if invalid_hit:
                 record["status"], record["resolved_dt"] = "INVALIDATED", bar.dt
                 break
-        if record.get("status") == "OPEN" and "8" in record.get("horizons", {}):
+        if record.get("status") == "OPEN" and len(future8) >= 8:
             record["status"] = "CLOSED_8H"
-            record["resolved_dt"] = future[7].dt
+            record["resolved_dt"] = future8[7].dt
+
+    # MFE/MAE describe the live scenario only: to the first resolution bar, or
+    # to 8H when no target/invalidation happened. Recompute (do not max with an
+    # old value) so previously inflated persistent records self-heal.
+    excursion = future8
+    resolved_dt = str(record.get("resolved_dt") or "")
+    if resolved_dt and record.get("status") in ("TARGET", "INVALIDATED", "AMBIGUOUS"):
+        clipped=[bar for bar in future8 if str(bar.dt) <= resolved_dt]
+        excursion=clipped  # empty means history no longer reaches the resolution bar; preserve stored excursion
+    if excursion:
+        favorable_values = [((bar.high-entry) if wanted > 0 else (entry-bar.low)) for bar in excursion]
+        adverse_values = [((entry-bar.low) if wanted > 0 else (bar.high-entry)) for bar in excursion]
+        favorable = max(favorable_values); adverse = max(adverse_values)
+        mfe_i = favorable_values.index(favorable) + 1; mae_i = adverse_values.index(adverse) + 1
+        record["mfe_atr"] = round(max(0.0, favorable / av), 3)
+        record["mae_atr"] = round(max(0.0, adverse / av), 3)
+        record["mfe_bar"] = mfe_i; record["mae_bar"] = mae_i
+        record["mfe_before_mae"] = bool(mfe_i <= mae_i)
+        denom = max(float(record["mfe_atr"]) + float(record["mae_atr"]), 1e-9)
+        record["excursion_efficiency"] = round(float(record["mfe_atr"]) / denom, 3)
+
+    # Horizon closes are research descriptors of the first 8H after entry and
+    # are intentionally independent from the earlier target/invalidation exit.
+    for hours in (1, 4, 8):
+        key = str(hours)
+        if len(future8) >= hours:
+            move = (future8[hours - 1].close - entry) * wanted / av
+            record.setdefault("horizons", {})[key] = round(move, 3)
+            if hours == 8:
+                record["realized_8h_atr"] = round(move, 3)
 
 
 def update_market(market: dict) -> None:
@@ -213,11 +229,13 @@ def _summary(records: list[dict], title: str) -> str:
     timed = sum(r.get("status") == "CLOSED_8H" for r in records)
     resolved = targets + invalid
     success = round(targets / resolved * 100) if resolved else 0
-    avg_mfe = sum(float(r.get("mfe_atr") or 0) for r in records) / len(records) if records else 0
-    avg_mae = sum(float(r.get("mae_atr") or 0) for r in records) / len(records) if records else 0
-    avg_eff = sum(float(r.get("excursion_efficiency") or 0) for r in records) / len(records) if records else 0
-    favorable_first = sum(r.get("mfe_before_mae") is True for r in records)
-    timed_exc = sum(r.get("mfe_before_mae") is not None for r in records)
+    mature_exc=[r for r in records if r.get("status") in ("TARGET","INVALIDATED","CLOSED_8H")]
+    avg_mfe = sum(float(r.get("mfe_atr") or 0) for r in mature_exc) / len(mature_exc) if mature_exc else 0
+    avg_mae = sum(float(r.get("mae_atr") or 0) for r in mature_exc) / len(mature_exc) if mature_exc else 0
+    avg_eff = sum(float(r.get("excursion_efficiency") or 0) for r in mature_exc) / len(mature_exc) if mature_exc else 0
+    favorable_first = sum(r.get("mfe_before_mae") is True for r in mature_exc)
+    timed_exc = sum(r.get("mfe_before_mae") is not None for r in mature_exc)
+    target_atr=float(getattr(cfg,"JOURNAL_TARGET_ATR",1.0)); invalid_atr=float(getattr(cfg,"JOURNAL_INVALIDATION_ATR",.75))
     sources: dict[str, list[int]] = {}
     pairs: dict[str, list[int]] = {}
     for r in records:
@@ -229,18 +247,18 @@ def _summary(records: list[dict], title: str) -> str:
     best_pair = max(pairs, key=lambda key: (sum(pairs[key]), len(pairs[key]))) if pairs else "—"
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
-        f"Записано сигналов: {len(records)}", f"Цель достигнута: {targets}",
-        f"Сценарий отменён: {invalid}", f"Остались в работе: {active}",
+        f"Записано сигналов: {len(records)}", f"Стандартная цель журнала (+{target_atr:.2f} ATR) достигнута: {targets}",
+        f"Стандартная отмена журнала (−{invalid_atr:.2f} ATR): {invalid}", f"Остались в работе: {active}",
         f"Завершены по 8 часам: {timed}", f"Неоднозначные H1: {ambiguous}",
-        f"Результативность завершённых: {success}%" if resolved else "Результативность завершённых: пока нет данных",
-        f"Среднее движение в плюс: {avg_mfe:.2f} ATR",
-        f"Среднее движение против: {avg_mae:.2f} ATR",
-        f"Эффективность экскурсии MFE/(MFE+MAE): {avg_eff*100:.0f}%",
+        f"Результативность стандартного теста TARGET/INVALIDATED: {success}%" if resolved else "Результативность стандартного теста: пока нет данных",
+        (f"Среднее движение в плюс по зрелым сценариям: {avg_mfe:.2f} ATR" if mature_exc else "Среднее движение в плюс: пока нет зрелых данных"),
+        (f"Среднее движение против по зрелым сценариям: {avg_mae:.2f} ATR" if mature_exc else "Среднее движение против: пока нет зрелых данных"),
+        (f"Эффективность экскурсии MFE/(MFE+MAE), зрелые: {avg_eff*100:.0f}%" if mature_exc else "Эффективность экскурсии: пока нет зрелых данных"),
         (f"Сначала движение в пользу сигнала: {round(favorable_first/timed_exc*100)}%"
          if timed_exc else "Сначала движение в пользу сигнала: пока нет данных"),
         f"Лучшая пара по завершённым: {best_pair}",
         f"Лучший модуль по завершённым: {best_source}", "",
-        "Примечание: проценты рассчитаны только по уже завершённым сценариям; открытые и неоднозначные в результативность не включены.",
+        "Примечание: TARGET/INVALIDATED — стандартизированный журнальный тест, а не frozen TR1/invalidation торговой карточки. CLOSED_8H не входит в win-rate, но входит в зрелую MFE/MAE-статистику; открытые и неоднозначные исключены.",
     ])
 
 

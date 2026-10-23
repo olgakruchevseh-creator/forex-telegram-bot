@@ -6,6 +6,7 @@ module never sends Telegram messages or changes a scanner verdict.
 """
 from __future__ import annotations
 import hashlib, json, logging, os, re
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -76,6 +77,41 @@ def _families(sources):
   f=FAMILY.get(src,'other'); fam.setdefault(f,[]).append(src)
  return {'by_family':fam,'independent_family_count':len(fam),'source_count':len(sources),
          'correlated_source_count':sum(max(0,len(v)-1) for v in fam.values())}
+def _observed_h1(by_tf):
+ # Stable decision anchor: the last H1 candle that was already closed when the
+ # candidate was evaluated. Candle.dt is the H1 opening timestamp; replay uses
+ # bars strictly after it, so the first post-decision H1 is not skipped.
+ bars=closed_candles((by_tf or {}).get('H1') or [],60)
+ if not bars:
+  return {'dt':'','close':None}
+ bar=bars[-1]
+ try: close=float(bar.close)
+ except (TypeError,ValueError): close=None
+ return {'dt':str(bar.dt or ''),'close':close}
+
+_SEEN_PATH=None
+_SEEN_EVENT_IDS=set()
+
+def _ensure_seen_ids(path):
+ global _SEEN_PATH,_SEEN_EVENT_IDS
+ key=str(path)
+ if _SEEN_PATH==key:
+  return
+ _SEEN_PATH=key; _SEEN_EVENT_IDS=set()
+ if not path.exists():
+  return
+ try:
+  with path.open('r',encoding='utf-8',errors='replace') as f:
+   tail=deque(f,maxlen=50000)
+  for line in tail:
+   try:
+    eid=json.loads(line).get('event_id')
+    if eid:_SEEN_EVENT_IDS.add(eid)
+   except Exception:
+    pass
+ except Exception:
+  log.exception('DECISION_JOURNAL_DEDUP_LOAD_SKIPPED')
+
 def _character_snapshot(pair, by_tf, strength, ctx):
  # Delayed-calibration features only. They are sampled from already-closed H1
  # data and never returned to the live decision path.
@@ -105,8 +141,16 @@ def _character_snapshot(pair, by_tf, strength, ctx):
 def _append(rec):
  try:
   p=_path(); p.parent.mkdir(parents=True,exist_ok=True)
+  _ensure_seen_ids(p)
+  eid=rec.get('event_id') if isinstance(rec,dict) else None
+  if eid and eid in _SEEN_EVENT_IDS:
+   return False
   with p.open('a',encoding='utf-8') as f: f.write(json.dumps(rec,ensure_ascii=False,separators=(',',':'))+'\n')
- except Exception: log.exception('DECISION_JOURNAL_WRITE_SKIPPED')
+  if eid:_SEEN_EVENT_IDS.add(eid)
+  return True
+ except Exception:
+  log.exception('DECISION_JOURNAL_WRITE_SKIPPED')
+  return False
 def _calibration_metrics(text, by_tf, direction, ctx):
  # Pure telemetry: calculations below cannot affect the caller's decision.
  route=(ctx or {}).get('route') or {}
@@ -157,13 +201,21 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
  sources=[source]+[signal_context.source_name(x) for x in (allies or [])]
  sources=list(dict.fromkeys(sources)); by_tf=(market or {}).get(pair) or {}; direction=1 if side=='LONG' else -1 if side=='SHORT' else 0
  now=_now(); local_now=now.astimezone(ZoneInfo(getattr(cfg,'LOCAL_TZ_NAME','Europe/Amsterdam'))); snap={}
+ obs=_observed_h1(by_tf)
  if pair and direction:
   try: snap=market_state.build(pair,by_tf,direction).as_dict()
   except Exception: log.exception('DECISION_JOURNAL_MARKET_STATE_SKIPPED pair=%s',pair)
- event_basis=f'{pair}|{side}|{source}|{_price(text,["Подтверждение","Ключевой уровень","Уровень"])}|{reason}|{status}'
- return {'schema':1,'event_id':hashlib.sha256(event_basis.encode()).hexdigest()[:24],
+ # scenario_id links the same market fact across ALLOWED/BLOCKED/MASTER/SENT,
+ # while event_id remains stage-specific for replay and funnel accounting. H1 is
+ # part of the identity so repeated scanner passes of the same closed candle do
+ # not manufacture thousands of independent observations.
+ scenario_basis='|'.join([pair,side,source,obs.get('dt') or '',signal_context.event_fingerprint(text)])
+ scenario_id=hashlib.sha256(scenario_basis.encode()).hexdigest()[:24]
+ event_basis=f'{scenario_id}|{status}|{reason}'
+ return {'schema':2,'event_id':hashlib.sha256(event_basis.encode()).hexdigest()[:24],'scenario_id':scenario_id,
   'recorded_utc':now.isoformat(timespec='seconds'),'recorded_local':_local(now),'status':status,'reason':reason,
   'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(sources),
+  'observed_h1_dt':obs.get('dt') or '','h1_close_price':obs.get('close'),
   'quality':_num(text,'Качество'),'probability':_num(text,'Вероятность'),'timeframe':_tf(text),'session':_session(local_now),
   'entry_timing':('late' if str(reason).startswith('late_') else 'early' if (ctx or {}).get('progress') is not None and float((ctx or {}).get('progress') or 0)<=15 else 'timely'),
   'residual_potential_pct':(round(max(0.0,100.0-float((ctx or {}).get('progress'))),1) if (ctx or {}).get('progress') is not None else None),
