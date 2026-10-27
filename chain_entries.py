@@ -13,6 +13,7 @@ from pathlib import Path
 import config as cfg
 import ohlc_movement
 import market_regime
+import structure_break_quality
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.chain_entries")
@@ -34,6 +35,7 @@ class Setup:
     retest_seen: bool = False
     entry_sent: bool = False
     invalid: bool = False
+    quality_contract_version: int = 0
 
 
 def _path() -> Path:
@@ -95,7 +97,7 @@ def detect_bos(symbol: str, tf: str, bars: list[Candle]) -> Setup | None:
         return None
     precision = 3 if "JPY" in symbol else 5
     setup_id = f"{symbol}|{tf}|{side}|{level:.{precision}f}|{current.dt}"
-    return Setup(setup_id, symbol, tf, side, level, current.dt, current.dt)
+    return Setup(setup_id, symbol, tf, side, level, current.dt, current.dt, quality_contract_version=1)
 
 
 def _bias(tf: str, bars: list[Candle]) -> int:
@@ -170,6 +172,17 @@ def confirm_entry(setup: Setup, bars: list[Candle], by_tf: dict, strength: dict[
     if not (setup.retest_seen and touched and held):
         return None
 
+    # Shared "real structure break" contract.  This does not create a new
+    # BOS/MSS engine: it validates the already-detected break by HTF reaction
+    # context, displacement, structural close, PD-array/breaker zone and this
+    # exact later H1 retest/reclaim.
+    break_quality = structure_break_quality.assess(
+        by_tf, setup.side, setup.level, setup.bos_dt,
+        break_tf=setup.tf, retest_dt=current.dt,
+    )
+    if setup.quality_contract_version >= 1 and not break_quality.confirmed:
+        return None
+
     # Continuation is not allowed inside a box/compression.  Invalidation above
     # is evaluated first so a broken setup is retired even when regime is poor.
     regime = market_regime.analyze_symbol(setup.symbol, by_tf)
@@ -221,6 +234,9 @@ def confirm_entry(setup: Setup, bars: list[Candle], by_tf: dict, strength: dict[
         "quality": quality, "confidence": min(92, quality - 4),
         "number": chain_number, "advance_atr": round(advance_atr, 2),
         "regime": regime_name, "close_distance_atr": round(close_distance_atr, 2),
+        "structure_break_quality": break_quality.as_dict(),
+        "structure_break_score": break_quality.score,
+        "structure_break_signs": break_quality.sign_count,
     }
 
 
@@ -238,7 +254,8 @@ def format_message(event: dict, number: int) -> str:
         f"Подтверждение таймфреймов: {event['confirmations']}/3",
         f"Режим рынка: {event.get('regime', 'UNKNOWN')}",
         f"Продвижение от прошлой ступени: {event.get('advance_atr', 0):.2f} ATR",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
+        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%",
+        f"Настоящий слом: {event.get('structure_break_signs', 0)}/5 · качество {event.get('structure_break_score', 0)}/100", "",
         f"Факт: структура сломана {direction}; цена вернулась к пробитому уровню, удержала его и закрылась с подтверждением {event['side']}.",
     ])
 

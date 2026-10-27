@@ -13,6 +13,7 @@ from pathlib import Path
 import config as cfg
 import ohlc_movement
 import pullback_regime
+import structure_break_quality
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
 log = logging.getLogger("fxbot.retest_confirmation")
@@ -38,6 +39,7 @@ class RetestSetup:
     hold_dt: str = ""
     sent: bool = False
     invalid: bool = False
+    quality_contract_version: int = 0
 
 
 def _path() -> Path:
@@ -100,7 +102,7 @@ def detect_bos(symbol: str, tf: str, bars: list[Candle]) -> RetestSetup | None:
     precision = 3 if "JPY" in symbol else 5
     setup_id = f"{symbol}|{tf}|{side}|{level:.{precision}f}|{current.dt}"
     return RetestSetup(setup_id, symbol, tf, side, level, current.dt, current.dt,
-                       bos_atr=av, bos_body_atr=body / av)
+                       bos_atr=av, bos_body_atr=body / av, quality_contract_version=1)
 
 
 def _bias(tf: str, bars: list[Candle]) -> int:
@@ -182,6 +184,13 @@ def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
     if not reaction or directional_body < min_body:
         return None
 
+    break_quality = structure_break_quality.assess(
+        by_tf, setup.side, setup.level, setup.bos_dt,
+        break_tf=setup.tf, retest_dt=current.dt,
+    )
+    if setup.quality_contract_version >= 1 and not break_quality.confirmed:
+        return None
+
     # H4 is context, not an unconditional veto when the shared classifier identifies
     # a legitimate counter-trend route. M15/M5 can only reject obviously opposite timing.
     m15 = _bars(by_tf, "M15")
@@ -217,6 +226,9 @@ def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
         "pullback_mode": pb.mode, "pullback_bars": pb.bars,
         "pullback_move_atr": pb.move_atr, "pullback_efficiency": pb.efficiency,
         "market_regime": pb.regime, "early_reason": early.get("reason", ""),
+        "structure_break_quality": break_quality.as_dict(),
+        "structure_break_score": break_quality.score,
+        "structure_break_signs": break_quality.sign_count,
     }
 
 
@@ -235,7 +247,8 @@ def format_message(event: dict) -> str:
         f"✅ Подтверждение ретеста: следующая закрытая {event.get('confirm_tf', 'H1')}-свеча",
         f"💵 Цена закрытия: {_price(event['symbol'], event['close'])}",
         f"💪 Разница силы валют: {event['gap']:+.2f}",
-        f"⭐ Качество: {event['quality']}/100", f"📈 Вероятность: {event['confidence']}%", "",
+        f"⭐ Качество: {event['quality']}/100", f"📈 Вероятность: {event['confidence']}%",
+        f"🧱 Настоящий слом: {event.get('structure_break_signs', 0)}/5 · качество {event.get('structure_break_score', 0)}/100", "",
         f"Факт: после BOS цена отдельной {event.get('confirm_tf', 'H1')}-свечой удержалась {direction} уровня, затем вернулась к нему и закрылась с подтверждением {event['side']}.",
     ])
 
