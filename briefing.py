@@ -33,6 +33,9 @@ import pump_dump_context
 import divergence_context
 import market_regime
 import pullback_regime
+import market_direction_regime
+import weekly_bias_context
+import weekly_rhythm_context
 
 log = logging.getLogger("fxbot.briefing")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
@@ -85,6 +88,9 @@ class PairBrief:
     strength_relation: str = ""
     character_matrix_score: float = 50.0
     character_matrix_band: str = "СМЕШАННО"
+    weekly_bias: dict | None = None
+    adaptive_direction: dict | None = None
+    weekly_rhythm: object | None = None
 
 
 def now_local() -> datetime:
@@ -727,6 +733,23 @@ def build_pair_briefs(
             amd_status = amd_power_of_three.briefing_status(symbol, market.get(symbol) or {}, strength)
         except Exception:
             log.exception("AMD для брифинга %s", symbol)
+        try:
+            adaptive_direction = market_direction_regime.analyze_symbol(symbol, market.get(symbol) or {}, strength)
+        except Exception:
+            log.exception("Adaptive Direction для брифинга %s", symbol)
+            adaptive_direction = {}
+        try:
+            weekly_bias = weekly_bias_context.analyze_symbol(
+                symbol, market.get(symbol) or {}, events=events, as_of=now_utc
+            )
+        except Exception:
+            log.exception("Weekly Bias для брифинга %s", symbol)
+            weekly_bias = {}
+        try:
+            weekly_rhythm = weekly_rhythm_context.analyze_symbol(symbol, market.get(symbol) or {})
+        except Exception:
+            log.exception("Weekly Rhythm для брифинга %s", symbol)
+            weekly_rhythm = None
         brief = PairBrief(
             symbol=symbol,
             stack=stack,
@@ -748,6 +771,9 @@ def build_pair_briefs(
             m5=_tf_label(stack, "M5"),
             position=current_position(stack, zigzag_h4_side, market.get(symbol) or {}, symbol),
             amd=amd_status,
+            weekly_bias=weekly_bias,
+            adaptive_direction=adaptive_direction,
+            weekly_rhythm=weekly_rhythm,
         )
         technical_side = technical_pair_side(brief)
         brief.strength_relation = _strength_relation(brief.gap, technical_side)
@@ -998,6 +1024,12 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         direction_text = _ru_display(direction) if direction else "НЕЙТРАЛЬНО"
         lines.append(f"{direction_icon} НАПРАВЛЕНИЕ: {direction_text}")
         lines.append(f"W1 {_ru_display(b.w1)} · D1 {_ru_display(b.d1)} · H4 {_ru_display(b.h4)} · H1 {_ru_display(b.h1)} · M15 {_ru_display(b.m15)} · M5 {_ru_display(b.m5)}")
+        lines.append(weekly_bias_context.compact_ru(b.weekly_bias))
+        if b.weekly_rhythm:
+            wr = b.weekly_rhythm
+            wr_dir = "ЛОНГ" if getattr(wr, "expansion_side", 0) > 0 else ("ШОРТ" if getattr(wr, "expansion_side", 0) < 0 else "НЕЙТРАЛЬНО")
+            lines.append(f"📅 Ритм недели: {getattr(wr, 'day_name', '—')} · {getattr(wr, 'phase', '—')} · {wr_dir} · реализация {float(getattr(wr, 'realization', 0) or 0)*100:.0f}%")
+        lines.append(f"🧠 Основа рынка: {market_direction_regime.compact_ru(b.adaptive_direction)}")
         zz_icon = "🟢" if b.zigzag_h4_side > 0 else ("🔴" if b.zigzag_h4_side < 0 else "🟡")
         position_upper = (b.position or "").upper()
         if "SHORT" in position_upper:

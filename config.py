@@ -1459,3 +1459,9 @@ EDGE_CALIBRATION_OBSERVE_ONLY = True
 EDGE_CALIBRATION_WINDOWS = (120, 240, 480)
 EDGE_CALIBRATION_EMBARGOS = (1, 3, 6)
 EDGE_CALIBRATION_RECENT = 100
+
+# ── SP500 book-logic parity layer for Forex (2026-10-27) ────────────────
+# Soft shared context only. These layers do not create their own signals/targets.
+MARKET_DIRECTION_REGIME_ENABLED = True
+WEEKLY_BIAS_CONTEXT_ENABLED = True
+STRATEGY_BOOK_POLICY_ENABLED = True

@@ -23,6 +23,9 @@ import structure_context
 import weekly_rhythm_context
 import premium_discount
 import market_regime
+import market_direction_regime
+import weekly_bias_context
+import strategy_book_policy
 import market_state
 import imd
 import auction_context
@@ -258,6 +261,10 @@ def analyze_symbol(
     continuation_liq_ctx = continuation_liquidity_context.analyze_symbol(symbol, by_tf, side, alerts)
     premium_discount_ctx = premium_discount.analyze_symbol(symbol, by_tf, side)
     regime_ctx = market_regime.analyze_symbol(symbol, by_tf)
+    direction_regime_ctx = (market_direction_regime.analyze_symbol(symbol, by_tf, strength)
+                            if getattr(cfg, "MARKET_DIRECTION_REGIME_ENABLED", True) else {})
+    weekly_bias_ctx = (weekly_bias_context.analyze_symbol(symbol, by_tf, events=events or [], as_of=now_utc)
+                       if getattr(cfg, "WEEKLY_BIAS_CONTEXT_ENABLED", True) else {})
     state_ctx = market_state.build(symbol, by_tf, side, events or [], now_utc) if getattr(cfg, "MARKET_STATE_ENABLED", True) else None
     imd_ctx = imd.analyze_symbol(symbol, market or {}, side) if market else None
     auction_ctx = auction_context.analyze_symbol(symbol, by_tf, side) if getattr(cfg, "AUCTION_CONTEXT_ENABLED", True) else None
@@ -300,7 +307,12 @@ def analyze_symbol(
         return None
 
     usd_expected = _usd_expected(symbol, side)
-    higher_conflict = senior_side == -side or h4_zz == -side
+    adaptive_main = str((direction_regime_ctx or {}).get("main_direction") or "NEUTRAL")
+    adaptive_main_i = 1 if adaptive_main == "LONG" else -1 if adaptive_main == "SHORT" else 0
+    # H4 structural consensus, H4 ZigZag and adaptive H4/KAMA are one parent
+    # direction family.  They can strengthen a conflict, but never count as
+    # several independent vetoes.
+    higher_conflict = senior_side == -side or h4_zz == -side or adaptive_main_i == -side
     dxy_conflict = bool(usd_expected and dxy_bias and dxy_bias != usd_expected)
     # Старшие ТФ и H4 ZigZag — одна структурная группа. Одиночная группа
     # задаёт откат/штраф; сигнал блокируют только две независимые группы.
@@ -345,6 +357,12 @@ def analyze_symbol(
     decision_quality_ctx = decision_quality_context.analyze_symbol(symbol, by_tf, side)
     turtle_ctx = turtle_breakout_context.analyze_symbol(symbol, by_tf, side)
     pattern_failure_ctx = pattern_failure_context.analyze_symbol(symbol, by_tf, side)
+    strategy_policy_ctx = (
+        strategy_book_policy.assess_candidate(
+            symbol, "LONG" if side > 0 else "SHORT", alerts, direction_regime_ctx,
+            weekly_bias=weekly_bias_ctx, turtle_context=turtle_ctx, pattern_failure=pattern_failure_ctx,
+        ) if getattr(cfg, "STRATEGY_BOOK_POLICY_ENABLED", True) else {}
+    )
     # KILLER already applied the same book-context stack to become eligible.
     # Do not pay those coins again on the same pair/side.
     killer_already = any(
@@ -366,6 +384,10 @@ def analyze_symbol(
         quality += 2
     if state_ctx and state_ctx.exhaustion and state_ctx.exhaustion.exhausted:
         quality -= 6
+    quality = min(94, quality)
+    # Strategy/book coordination is one bounded soft adjustment. Books are
+    # sequential roles, not extra votes, so the delta is applied once.
+    quality += int((strategy_policy_ctx or {}).get("quality_delta", 0) or 0)
     quality = min(94, quality)
     # Штрафы применяются после верхнего лимита, чтобы сильная базовая оценка
     # не скрывала одиночное противоречие за значением 94/100.
@@ -479,6 +501,10 @@ def analyze_symbol(
         "premium_discount": premium_discount.describe(premium_discount_ctx), "pd_alignment": premium_discount_ctx.alignment if premium_discount_ctx else 0,
         "inducement": idm.describe(idm_sweep_ctx), "inducement_alignment": idm_sweep_ctx.alignment if idm_sweep_ctx else 0,
         "market_regime": market_regime.describe(regime_ctx),
+        "market_direction_regime": direction_regime_ctx,
+        "weekly_bias": weekly_bias_ctx,
+        "strategy_book_policy": strategy_policy_ctx,
+        "master_strategy_cycle": (strategy_policy_ctx or {}).get("master_cycle"),
         "market_regime_weight": regime_weight,
         "imd": imd.describe(imd_ctx),
         "imd_alignment": imd_ctx.alignment if imd_ctx else 0,
