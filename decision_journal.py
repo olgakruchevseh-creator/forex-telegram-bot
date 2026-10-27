@@ -117,6 +117,37 @@ def _character_snapshot(pair, by_tf, strength, ctx):
  # data and never returned to the live decision path.
  if not pair:
   return {}
+
+def _manipulation_snapshot(ctx):
+ p=(ctx or {}).get('manipulation_projection') or {}
+ if not isinstance(p,dict): return {}
+ levels=p.get('levels') if isinstance(p.get('levels'),dict) else {}
+ obs=p.get('observations') if isinstance(p.get('observations'),dict) else {}
+ obs_levels=obs.get('levels') if isinstance(obs.get('levels'),dict) else {}
+ return {
+  'direction':p.get('direction'),'confirmation_h1':p.get('confirmation_h1'),
+  'confirmation_age_h1':int(p.get('confirmation_age_h1') or 0),
+  'origin_h1':p.get('origin_h1'),'origin_price':p.get('origin_price'),
+  'sweep_h1':p.get('sweep_h1'),'sweep_price':p.get('sweep_price'),
+  'leg_size':p.get('leg_size'),'leg_atr':p.get('leg_atr'),
+  'levels':{str(k):v for k,v in levels.items()},
+  'observations':{
+   'closed_h1_after_confirmation':int(obs.get('closed_h1_after_confirmation') or 0),
+   'primary_zone_entered':bool(obs.get('primary_zone_entered')),
+   'primary_zone_completed':bool(obs.get('primary_zone_completed')),
+   'extended_zone_entered':bool(obs.get('extended_zone_entered')),
+   'extended_zone_completed':bool(obs.get('extended_zone_completed')),
+   'levels':{
+    str(k):{
+     'touched':bool(v.get('touched')),'first_touch_h1':v.get('first_touch_h1'),
+     'close_through':bool(v.get('close_through')),'reaction_atr':v.get('reaction_atr'),
+     'reaction_leg_fraction':v.get('reaction_leg_fraction'),
+     'reaction_ge_0_25_leg':bool(v.get('reaction_ge_0_25_leg')),
+    } for k,v in obs_levels.items() if isinstance(v,dict)
+   },
+  },
+  'mode':'OBSERVE_ONLY','live_effect':'NONE',
+ }
  try:
   p=pair_character_matrix.analyze(pair, by_tf or {}, strength or {})
   if not p.get('ready'):
@@ -192,6 +223,7 @@ def _calibration_metrics(text, by_tf, direction, ctx):
   # conclusion so replay can test whether it has predictive value before any
   # future decision authority is considered.
   'mathematical_consensus':(ctx or {}).get('mathematical_consensus_summary') or {},
+  'manipulation_projection':_manipulation_snapshot(ctx),
  }
 
 def _base(text,market,strength,status,reason='',allies=None,ctx=None):

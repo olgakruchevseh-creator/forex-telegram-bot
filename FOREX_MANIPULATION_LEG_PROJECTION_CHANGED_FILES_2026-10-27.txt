@@ -1,0 +1,9 @@
+cisd.py
+manipulation_leg_projection.py
+signal_context.py
+decision_journal.py
+daily_calibration_report.py
+test_cisd.py
+test_manipulation_leg_projection.py
+FOREX_MANIPULATION_LEG_PROJECTION_2026-10-27_RU.md
+FOREX_MANIPULATION_LEG_PROJECTION_CHANGED_FILES_2026-10-27.txt

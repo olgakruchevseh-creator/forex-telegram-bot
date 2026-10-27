@@ -60,6 +60,7 @@ import layer43_asymmetry
 import layer44_aggregator_agreement
 import layer45_final_mathematical_consensus
 import mathematical_consensus_bridge
+import manipulation_leg_projection
 from analysis import analyze_tf
 
 log = logging.getLogger("fxbot.context")
@@ -191,6 +192,10 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
         if route and route.get("side") != side:
             route = None
     progress = int((route or {}).get("progress") or 0)
+    manipulation_projection = manipulation_leg_projection.analyze(symbol, by_tf, direction)
+    manipulation_target_alignment = manipulation_leg_projection.target_alignment(
+        (route or {}).get("targets") or [], manipulation_projection
+    )
     junior_n = sum(views[tf] == direction for tf in ("H1", "M15", "M5"))
     senior_n = sum(views[tf] == direction for tf in ("D1", "H4", "H1"))
     ohlc = {"available": False}
@@ -223,6 +228,8 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
         "senior_n": senior_n,
         "progress": progress,
         "route": route,
+        "manipulation_projection": manipulation_projection,
+        "manipulation_target_alignment": manipulation_target_alignment,
         "ohlc": ohlc,
         "weak_reversal": bool(ohlc.get("weak_reversal")),
     }

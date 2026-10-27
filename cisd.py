@@ -25,7 +25,53 @@ class CISDContext:
     body_ratio:float
     anchor_age:int
     reason:str
+    sweep_h1:str=""
+    sweep_price:float|None=None
+    manipulation_origin_h1:str=""
+    manipulation_origin_price:float|None=None
+    manipulation_leg_size:float|None=None
+    manipulation_leg_atr:float|None=None
     family:str="structure_delivery_shift"
+
+
+def _manipulation_geometry(q, raid_window, side:int, av:float):
+    """Past-only swing-to-sweep geometry for an already confirmed CISD.
+
+    The sweep comes from the detector's existing raid window. The opposite
+    extreme that starts the manipulation leg is searched only in completed
+    bars preceding that sweep; future bars are never consulted.
+    """
+    if not q or not raid_window or side not in (-1,1):
+        return None
+    raid_start=max(0,len(q)-len(raid_window))
+    if side==1:
+        rel=min(range(len(raid_window)),key=lambda i:float(raid_window[i].low))
+    else:
+        rel=max(range(len(raid_window)),key=lambda i:float(raid_window[i].high))
+    sweep_idx=raid_start+rel
+    sweep=q[sweep_idx]
+    if sweep_idx<=0:return None
+    origin_start=max(0,sweep_idx-8)
+    candidates=q[origin_start:sweep_idx]
+    if not candidates:return None
+    if side==1:
+        origin=max(candidates,key=lambda b:float(b.high))
+        origin_price=float(origin.high); sweep_price=float(sweep.low)
+        if origin_price<=sweep_price:return None
+    else:
+        origin=min(candidates,key=lambda b:float(b.low))
+        origin_price=float(origin.low); sweep_price=float(sweep.high)
+        if origin_price>=sweep_price:return None
+    size=abs(origin_price-sweep_price)
+    if size<=0:return None
+    return {
+        "sweep_h1":str(getattr(sweep,"dt","")),
+        "sweep_price":sweep_price,
+        "manipulation_origin_h1":str(getattr(origin,"dt","")),
+        "manipulation_origin_price":origin_price,
+        "manipulation_leg_size":size,
+        "manipulation_leg_atr":size/max(float(av),1e-12),
+    }
 
 
 def _detect(by_tf:dict, tf:str, candidate_side:int)->CISDContext|None:
@@ -69,8 +115,15 @@ def _detect(by_tf:dict, tf:str, candidate_side:int)->CISDContext|None:
     if not (bull or bear):return None
     sweep_level=ref_low if bull else ref_high
     relation="подтверждает кандидата" if candidate_side in (-1,1) else "контекст"
+    geometry=_manipulation_geometry(bars,raid_window,candidate_side,av) or {}
     return CISDContext(1,tf,candidate_side,level,sweep_level,disp,br,age,
-        f"CISD после liquidity sweep: закрытие пересекло open delivery-candle; {relation}")
+        f"CISD после liquidity sweep: закрытие пересекло open delivery-candle; {relation}",
+        sweep_h1=str(geometry.get("sweep_h1") or ""),
+        sweep_price=geometry.get("sweep_price"),
+        manipulation_origin_h1=str(geometry.get("manipulation_origin_h1") or ""),
+        manipulation_origin_price=geometry.get("manipulation_origin_price"),
+        manipulation_leg_size=geometry.get("manipulation_leg_size"),
+        manipulation_leg_atr=geometry.get("manipulation_leg_atr"))
 
 
 def analyze_symbol(symbol:str, by_tf:dict, candidate_side:int)->CISDContext|None:

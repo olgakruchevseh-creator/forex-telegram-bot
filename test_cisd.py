@@ -15,6 +15,10 @@ def test_cisd_never_standalone_and_detects_bullish_sweep_reclaim():
              _c(1.10035,1.1005,1.0995,1.1000,32), _c(1.1000,1.1014,1.0999,1.1013,33)]
     ctx=cisd.analyze_symbol('EUR/USD',{'H1':bars},1)
     assert ctx is not None and ctx.side==1 and ctx.family=='structure_delivery_shift'
+    assert ctx.manipulation_origin_price is not None
+    assert ctx.sweep_price is not None
+    assert ctx.manipulation_leg_size and ctx.manipulation_leg_size > 0
+    assert ctx.manipulation_leg_atr and ctx.manipulation_leg_atr > 0
     assert not hasattr(cisd,'process_candidates')
 
 def test_cisd_requires_liquidity_raid():

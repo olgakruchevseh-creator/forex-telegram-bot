@@ -75,6 +75,34 @@ def _metric_eff(sent,outcomes,extract,bucket):
         groups[name][0]+=1; groups[name][1]+=float(o.get('efficiency_3h') or 0)
     return ', '.join(f'{k}: n={v[0]}, eff={v[1]/v[0]*100:.0f}%' for k,v in groups.items()) or '—'
 
+def _manipulation_summary(decisions):
+    latest={}
+    for d in decisions:
+        p=((d.get('calibration') or {}).get('manipulation_projection') or {}) if isinstance(d,dict) else {}
+        if not isinstance(p,dict) or not p.get('confirmation_h1'): continue
+        key=(str(d.get('pair') or ''),str(p.get('confirmation_h1')),str(p.get('direction') or ''))
+        obs=p.get('observations') if isinstance(p.get('observations'),dict) else {}
+        maturity=int(obs.get('closed_h1_after_confirmation') or 0)
+        prev=latest.get(key) or {}
+        prev_obs=prev.get('observations') if isinstance(prev.get('observations'),dict) else {}
+        if not prev or maturity>=int(prev_obs.get('closed_h1_after_confirmation') or 0): latest[key]=p
+    names=('-1','-1.5','-2','-2.25','-2.5','-4','-4.25','-4.5')
+    levels={n:{'touched':0,'close_through':0,'reaction_ge_0_25_leg':0} for n in names}
+    zones=Counter()
+    for p in latest.values():
+        obs=p.get('observations') if isinstance(p.get('observations'),dict) else {}
+        zones['primary_entered']+=int(bool(obs.get('primary_zone_entered')))
+        zones['primary_completed']+=int(bool(obs.get('primary_zone_completed')))
+        zones['extended_entered']+=int(bool(obs.get('extended_zone_entered')))
+        zones['extended_completed']+=int(bool(obs.get('extended_zone_completed')))
+        rows=obs.get('levels') if isinstance(obs.get('levels'),dict) else {}
+        for n in names:
+            r=rows.get(n) if isinstance(rows.get(n),dict) else {}
+            levels[n]['touched']+=int(bool(r.get('touched')))
+            levels[n]['close_through']+=int(bool(r.get('close_through')))
+            levels[n]['reaction_ge_0_25_leg']+=int(bool(r.get('reaction_ge_0_25_leg')))
+    return {'setups':len(latest),'levels':levels,'zones':dict(zones)}
+
 def _report(day):
     raw_decisions=[r for r in _read_jsonl(_journal()) if _local_date(r.get('recorded_utc'))==day]
     decisions=_dedupe(raw_decisions)
@@ -137,6 +165,10 @@ def _report(day):
     strength_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('directed_strength_gap'),lambda v:_named_bucket(v,(-99,0,.03,.05,.12,99),('<0','0–0.02','0.03–0.04','0.05–0.11','≥0.12','≥0.12')))
     family_counts=[int(((r.get('confirmation_families') or {}).get('independent_family_count') or 0)) for r in sent]
     source_counts=[int(((r.get('confirmation_families') or {}).get('source_count') or 0)) for r in sent]
+    manip=_manipulation_summary(decisions)
+    manip_levels=manip.get('levels') or {}
+    manip_zones=manip.get('zones') or {}
+    def _mh(name): return int(((manip_levels.get(name) or {}).get('touched') or 0))
     problems=[]
     if wrong: problems.append(f'ошибочных блокировок {wrong}')
     if ambiguous: problems.append(f'неоднозначных блокировок {ambiguous}')
@@ -152,6 +184,8 @@ def _report(day):
       (f"Технические повторные записи от повторных сканов: {len(raw_decisions)-len(decisions)}" if len(raw_decisions)>len(decisions) else "Технические повторные записи: 0"),
       f'Фактический replay SENT: {len(sent_out)} · ещё без полного окна: {pending}',
       f"TR1: {target['TR1']}/{target['TR1_known']} · TR2: {target['TR2']}/{target['TR2_known']} · TR3: {target['TR3']}/{target['TR3_known']}",
+      f"Манипуляционная проекция: {manip.get('setups',0)} сетапов · касания -1/-1.5/-2/-2.25/-2.5: {_mh('-1')}/{_mh('-1.5')}/{_mh('-2')}/{_mh('-2.25')}/{_mh('-2.5')}",
+      f"Дальняя зона -4/-4.25/-4.5: {_mh('-4')}/{_mh('-4.25')}/{_mh('-4.5')} · входов в -2…-2.5: {manip_zones.get('primary_entered',0)} · в -4…-4.5: {manip_zones.get('extended_entered',0)}",
       f"MFE: {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
       f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']} · residual avg {sum(residual)/len(residual):.0f}%" if residual else f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']}",'',
       group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Режим',by_reg),group_line('Сессии',by_session),'',
