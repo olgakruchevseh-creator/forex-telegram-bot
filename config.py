@@ -196,6 +196,11 @@ ECHO_HORIZONS_H1 = (1, 2, 4, 8)
 ECHO_MIN_ANALOGS = 30
 ECHO_MAX_ANALOGS = 50
 ECHO_MAX_DISTANCE = 2.6
+# Echo Ensemble V4: normalized Top-K analogues are ranked by local shape and
+# market-regime compatibility. These thresholds affect Echo navigation only.
+ECHO_MAX_REGIME_DISTANCE = 0.95
+ECHO_REGIME_DISTANCE_WEIGHT = 0.85
+ECHO_SHAPE_CORRELATION_WEIGHT = 0.70
 ECHO_MIN_CONFIDENCE = 0.62
 ECHO_CONTEXT_MIN_MARGIN = 8
 # Флаг сохранён для совместимости; торговый veto через Echo сейчас выключен.

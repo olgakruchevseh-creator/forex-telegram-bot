@@ -45,6 +45,26 @@ class EchoProjectionTests(unittest.TestCase):
         self.assertGreaterEqual(result["sample"], 30)
         self.assertEqual({"1", "2", "4", "8"}, set(result["horizons"]))
 
+    def test_v4_exposes_empirical_corridor_regime_and_reliability(self):
+        result = echo.analyze("EUR/USD", {"H1": rising_bars(220)})
+        self.assertIsNotNone(result)
+        self.assertEqual({"1", "2", "4", "8"}, set(result["corridor_by_horizon"]))
+        for row in result["corridor_by_horizon"].values():
+            self.assertLessEqual(row["q25_move_atr"], row["q75_move_atr"])
+            self.assertLessEqual(row["q25_price"], row["q75_price"])
+        self.assertGreaterEqual(result["confidence_score"], 35)
+        self.assertLessEqual(result["confidence_score"], 97)
+        self.assertIn("regime_filter_applied", result)
+        self.assertIn("median_shape_correlation", result)
+        self.assertEqual("RELIABILITY_OF_ANALOG_ENSEMBLE_NOT_TRADE_PROBABILITY", result["confidence_score_kind"])
+
+    def test_v4_reuses_next_pivot_as_bounded_read_only_alignment(self):
+        with patch("next_pivot_projection.analyze_symbol", return_value={"side": "LONG", "probability": 71, "zone_low": 1.2, "zone_high": 1.3}):
+            result = echo.analyze("EUR/USD", {"H1": rising_bars(220)})
+        self.assertEqual("LONG", result["side"])
+        self.assertEqual("ALIGNED", result["next_pivot_context"]["alignment"])
+        self.assertEqual(4, result["pivot_support"])
+
     def test_compact_text_never_claims_guarantee(self):
         result = echo.analyze("EUR/USD", {"H1": rising_bars()})
         text = echo.compact_text(result)

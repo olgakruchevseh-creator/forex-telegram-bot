@@ -76,6 +76,90 @@ def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return math.sqrt(sum(w*(a-b)**2 for a, b, w in zip(left, right, weights)))
 
 
+def _quantile(values, q: float) -> float | None:
+    vals = sorted(float(v) for v in values if v is not None and math.isfinite(float(v)))
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    pos = (len(vals)-1) * max(0.0, min(1.0, float(q)))
+    lo, hi = int(math.floor(pos)), int(math.ceil(pos))
+    if lo == hi:
+        return vals[lo]
+    return vals[lo] + (vals[hi]-vals[lo]) * (pos-lo)
+
+
+def _shape_returns(bars: list[Candle], index: int, lookback: int = 12) -> tuple[float, ...] | None:
+    if index < lookback:
+        return None
+    av = _atr_at(bars, index)
+    if av <= 0:
+        return None
+    return tuple((bars[i].close-bars[i-1].close)/av for i in range(index-lookback+1, index+1))
+
+
+def _pearson(left, right) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    n = len(left)
+    lm, rm = sum(left)/n, sum(right)/n
+    lv = sum((x-lm)**2 for x in left)
+    rv = sum((x-rm)**2 for x in right)
+    if lv <= 1e-12 or rv <= 1e-12:
+        return 0.0
+    return max(-1.0, min(1.0, sum((a-lm)*(b-rm) for a,b in zip(left,right))/math.sqrt(lv*rv)))
+
+
+def _session_bucket(value) -> str | None:
+    # Feed timestamps are not reinterpreted here.  The bucket is only a soft
+    # analogue feature; it never changes candle closure or trading-session logic.
+    try:
+        from datetime import datetime
+        if isinstance(value, datetime):
+            d = value
+        else:
+            d = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        h = d.hour
+    except Exception:
+        return None
+    if 0 <= h < 8:
+        return 'ASIA'
+    if 8 <= h < 14:
+        return 'EUROPE'
+    if 14 <= h < 22:
+        return 'AMERICA'
+    return 'OFF_HOURS'
+
+
+def _regime_signature(bars: list[Candle], index: int) -> dict | None:
+    if index < 48:
+        return None
+    av14 = _atr_at(bars, index, 14)
+    av48 = _atr_at(bars, index, 48)
+    if av14 <= 0 or av48 <= 0:
+        return None
+    look = 10
+    net = bars[index].close-bars[index-look].close
+    path = sum(abs(bars[i].close-bars[i-1].close) for i in range(index-look+1, index+1))
+    efficiency = abs(net)/path if path > 0 else 0.0
+    return {
+        'trend_atr': net/av14,
+        'vol_ratio': av14/av48,
+        'efficiency': efficiency,
+        'session': _session_bucket(bars[index].dt),
+    }
+
+
+def _regime_distance(current: dict | None, candidate: dict | None) -> float:
+    if not current or not candidate:
+        return 1.0
+    trend = min(3.0, abs(float(current['trend_atr'])-float(candidate['trend_atr'])))/3.0
+    vol = min(1.5, abs(math.log(max(1e-6, float(current['vol_ratio']))/max(1e-6, float(candidate['vol_ratio'])))))/1.5
+    eff = min(1.0, abs(float(current['efficiency'])-float(candidate['efficiency'])))
+    session_penalty = 0.0 if not current.get('session') or not candidate.get('session') or current.get('session') == candidate.get('session') else 0.45
+    return 0.50*trend + 0.30*vol + 0.20*eff + session_penalty
+
+
 
 def _side_of_view(view) -> int:
     if not view:
@@ -291,30 +375,46 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
                   else getattr(cfg, "ECHO_MIN_ANALOGS", 30))
     if len(bars) < 30 + max_h + minimum:
         return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
-    current = _features(bars, len(bars)-1)
+    current_i = len(bars)-1
+    current = _features(bars, current_i)
     if current is None:
         return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
-    matches = []
+    current_shape = _shape_returns(bars, current_i)
+    current_regime = _regime_signature(bars, current_i)
+    all_matches, regime_matches = [], []
     max_distance = float(max_distance_override if max_distance_override is not None
                          else getattr(cfg, "ECHO_MAX_DISTANCE", 2.6))
-    for index in range(24, len(bars)-max_h-1):
+    max_regime_distance = float(getattr(cfg, 'ECHO_MAX_REGIME_DISTANCE', 0.95))
+    regime_weight = float(getattr(cfg, 'ECHO_REGIME_DISTANCE_WEIGHT', 0.85))
+    correlation_weight = float(getattr(cfg, 'ECHO_SHAPE_CORRELATION_WEIGHT', 0.70))
+    for index in range(48, len(bars)-max_h-1):
         feature = _features(bars, index)
         if feature is None:
             continue
-        distance = _distance(current, feature)
-        if distance <= max_distance:
-            matches.append((distance, index, _atr_at(bars, index)))
-    matches.sort(key=lambda item: item[0])
-    matches = matches[:int(getattr(cfg, "ECHO_MAX_ANALOGS", 50))]
+        feature_distance = _distance(current, feature)
+        if feature_distance > max_distance:
+            continue
+        shape_corr = _pearson(current_shape, _shape_returns(bars, index))
+        regime_distance = _regime_distance(current_regime, _regime_signature(bars, index))
+        combined_distance = feature_distance + regime_weight*regime_distance + correlation_weight*((1.0-shape_corr)/2.0)
+        row = (combined_distance, index, _atr_at(bars, index), feature_distance, regime_distance, shape_corr)
+        all_matches.append(row)
+        if regime_distance <= max_regime_distance:
+            regime_matches.append(row)
+    # Prefer genuinely comparable market regimes. If history is still too small,
+    # fall back to the broader normalized pool instead of inventing a direction.
+    pool = regime_matches if len(regime_matches) >= minimum else all_matches
+    pool.sort(key=lambda item: (item[0], item[1]))
+    matches = pool[:int(getattr(cfg, "ECHO_MAX_ANALOGS", 50))]
     if len(matches) < minimum:
         return _context_fallback(symbol, by_tf, horizons, strength, dxy_bias)
 
-    probabilities, expected = {}, {}
+    probabilities, expected, corridors = {}, {}, {}
     for horizon in horizons:
         up_weight = total_weight = 0.0
         moves = []
-        for distance, index, av in matches:
-            weight = 1.0 / (0.25 + distance)
+        for combined_distance, index, av, _fd, _rd, _corr in matches:
+            weight = 1.0 / (0.25 + combined_distance)
             move = (bars[index+horizon].close-bars[index].close) / av if av else 0.0
             total_weight += weight
             if move > 0:
@@ -324,6 +424,7 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
             moves.append(move)
         probabilities[horizon] = up_weight / total_weight if total_weight else .5
         expected[horizon] = median(moves) if moves else 0.0
+        corridors[horizon] = (_quantile(moves, .25), _quantile(moves, .75))
 
     # ЭХО V3: главная цель — направление ДО СЛЕДУЮЩЕЙ СЕССИИ.
     # Последняя точка — главный голос; промежуточные точки формируют траекторию.
@@ -338,13 +439,10 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     expected_median = {h: expected[h] for h in horizons}
     end_h_path = horizons[-1]
     end_move = expected[end_h_path]
-    path_endpoint_aligned = True
-    if end_move and ((end_move > 0) != (side_sign_path > 0)):
-        # Медиана может смотреть против доли положительных ходов. Конец пути
-        # на графике обязан совпадать со стороной, промежуточные точки остаются
-        # медианой и могут показывать откат.
-        expected[end_h_path] = side_sign_path * abs(end_move)
-        path_endpoint_aligned = False
+    path_endpoint_aligned = not bool(end_move and ((end_move > 0) != (side_sign_path > 0)))
+    # V4: медианный путь больше не подгоняется под выбранную долей аналогов
+    # сторону. Если weighted share и медиана спорят, это честный признак
+    # неоднородности выборки и снижает качество Echo вместо перерисовки пути.
     minimum_confidence = float(minimum_confidence_override if minimum_confidence_override is not None
                                else getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
     side_sign = 1 if side == "LONG" else -1
@@ -353,10 +451,28 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
                     for h in horizons)
     context = _context_score(symbol, by_tf, side_sign, strength, dxy_bias)
     smc = _smc_overlay(symbol, by_tf, side_sign)
-    # Контекст и SMC уточняют уверенность, но не меняют сторону аналогов.
+    pivot_context = {"available": False, "side": None, "alignment": "UNAVAILABLE", "confidence_delta": 0}
+    try:
+        import next_pivot_projection
+        pivot = next_pivot_projection.analyze_symbol(symbol, by_tf)
+        if pivot and pivot.get('side') in ('LONG', 'SHORT'):
+            pivot_side = pivot.get('side')
+            aligned = pivot_side == side
+            pivot_context = {
+                "available": True, "side": pivot_side,
+                "alignment": "ALIGNED" if aligned else "CONFLICT",
+                "confidence_delta": 4 if aligned else -5,
+                "probability": pivot.get('probability'),
+                "zone_low": pivot.get('zone_low'), "zone_high": pivot.get('zone_high'),
+            }
+    except Exception:
+        pass
+    # Контекст, SMC и уже существующий Next Pivot уточняют уверенность, но не
+    # имеют права переворачивать сторону, выбранную историческими аналогами.
     context_delta = max(-18, min(18, int(context["score"]) + int(smc["score"])))
+    pivot_delta = int(pivot_context.get('confidence_delta') or 0)
     raw_pct = int(round(confidence * 100))
-    adjusted = max(50, min(95, raw_pct + context_delta))
+    adjusted = max(50, min(95, raw_pct + context_delta + pivot_delta))
     hard_conflict = (
         context["zigzag_h4"] == -side_sign
         and sum(v == -side_sign for v in context["tf_sides"].values()) >= 2
@@ -365,6 +481,7 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
         confidence < minimum_confidence
         or not endpoint_ok
         or (len(horizons) >= 3 and aligned_h < 2)
+        or not path_endpoint_aligned
         or hard_conflict
         or adjusted < int(round(float(getattr(cfg, "ECHO_CONTEXT_MIN_SCORE", .68)) * 100))
     )
@@ -375,6 +492,22 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     if weak:
         adjusted = min(adjusted, raw_pct, 64)
     trajectory_ok = bool(endpoint_ok and (aligned_h >= 2 or len(horizons) < 3) and not weak)
+    selected_feature_distances = [m[3] for m in matches]
+    selected_regime_distances = [m[4] for m in matches]
+    selected_correlations = [m[5] for m in matches]
+    median_feature_distance = median(selected_feature_distances) if selected_feature_distances else max_distance
+    median_regime_distance = median(selected_regime_distances) if selected_regime_distances else max_regime_distance
+    median_shape_correlation = median(selected_correlations) if selected_correlations else 0.0
+    similarity_quality = int(round(max(35.0, min(98.0, 100.0 - 45.0*median_feature_distance/max(0.1, max_distance) + 12.0*max(0.0, median_shape_correlation)))))
+    regime_quality = int(round(max(30.0, min(98.0, 100.0 - 55.0*median_regime_distance/max(0.1, max_regime_distance)))))
+    end_q25, end_q75 = corridors.get(end_h, (None, None))
+    endpoint_width = abs(float(end_q75)-float(end_q25)) if end_q25 is not None and end_q75 is not None else 2.0
+    corridor_quality = int(round(max(30.0, min(98.0, 100.0 - 28.0*endpoint_width))))
+    sample_quality = int(round(max(45.0, min(98.0, 50.0 + 48.0*min(1.0, len(matches)/max(1.0, float(getattr(cfg, 'ECHO_MAX_ANALOGS', 50))))))))
+    reliability_confidence = int(round(max(35.0, min(97.0,
+        0.42*raw_pct + 0.20*similarity_quality + 0.14*regime_quality + 0.12*corridor_quality + 0.12*sample_quality
+        + (3 if pivot_context.get('alignment') == 'ALIGNED' else (-4 if pivot_context.get('alignment') == 'CONFLICT' else 0))
+    ))))
     try:
         import pair_character_matrix
         character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength or {}), by_tf=by_tf)
@@ -387,10 +520,22 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
         "direction_probability": adjusted,
         "raw_confidence": raw_pct,
         "context_support": context_delta,
+        "pivot_support": pivot_delta,
         "data_quality": max(55, min(95, int(round(55 + min(40, len(matches) / max(1, minimum) * 25))))),
+        "confidence_score": reliability_confidence,
+        "confidence_score_kind": "RELIABILITY_OF_ANALOG_ENSEMBLE_NOT_TRADE_PROBABILITY",
+        "similarity_quality": similarity_quality,
+        "regime_compatibility_pct": regime_quality,
+        "corridor_quality": corridor_quality,
+        "median_feature_distance": round(median_feature_distance, 4),
+        "median_regime_distance": round(median_regime_distance, 4),
+        "median_shape_correlation": round(median_shape_correlation, 4),
+        "regime_filter_applied": pool is regime_matches,
+        "regime_candidates_n": len(regime_matches),
+        "normalized_candidates_n": len(all_matches),
         "trajectory_available": trajectory_ok,
-        "trajectory_source": "historical_analogs",
-        "context": context, "smc_context": smc, "pair_character": character,
+        "trajectory_source": "historical_analogs_topk_regime_filtered",
+        "context": context, "smc_context": smc, "next_pivot_context": pivot_context, "pair_character": character,
         "sample": len(matches), "estimated": False, "weak": weak,
         "horizons": {
             str(h): int(round((probabilities[h] if side == "LONG" else 1-probabilities[h])*100))
@@ -402,6 +547,14 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
             (probabilities[end_h] if side == "LONG" else 1-probabilities[end_h]) * 100)),
         "expected_by_horizon": {str(h): round(expected[h], 4) for h in horizons},
         "expected_median_by_horizon": {str(h): round(expected_median[h], 4) for h in horizons},
+        "corridor_by_horizon": {
+            str(h): {
+                "q25_move_atr": round(float(corridors[h][0]), 4) if corridors[h][0] is not None else None,
+                "q75_move_atr": round(float(corridors[h][1]), 4) if corridors[h][1] is not None else None,
+                "q25_price": round(float(bars[-1].close + _atr_at(bars, len(bars)-1)*float(corridors[h][0])), 6) if corridors[h][0] is not None else None,
+                "q75_price": round(float(bars[-1].close + _atr_at(bars, len(bars)-1)*float(corridors[h][1])), 6) if corridors[h][1] is not None else None,
+            } for h in horizons
+        },
         "path_endpoint_aligned": path_endpoint_aligned,
         "atr": _atr_at(bars, len(bars)-1),
         "current": bars[-1].close,
@@ -426,6 +579,7 @@ def format_alert(result: dict) -> str:
         "━━━━━━━━━━━━━━━━━━", "🔭 ЭХО — ВЕРОЯТНОСТНАЯ ПРОЕКЦИЯ", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {result['symbol']}", f"Направление: {result['side']} {icon}",
         f"Доля похожих исторических путей: {result.get('raw_confidence', result['confidence'])}%",
+        f"Надёжность ансамбля Echo: {result.get('confidence_score', result.get('confidence'))}% · режим {result.get('regime_compatibility_pct', '—')}%",
         f"Горизонты: {forecast}", f"Исторических аналогов: {result['sample']}",
         f"Ожидаемое движение к 4ч: {result['expected_atr']:.2f} ATR", "",
         "⚠️ Факт: линия на графике показывает медианный путь похожих исторических ситуаций. Доля аналогов не является вероятностью сделки.",
@@ -496,9 +650,16 @@ def render_chart(result: dict, by_tf: dict) -> io.BytesIO:
     av = float(result.get("atr") or 0)
     current = float(result.get("current") or bars[-1].close)
     projected = [(0, current)] + [(h, current + av*float(expected.get(str(h), 0))) for h in horizons]
-    uncertainty = max(.18, (100-int(result["confidence"]))/100) * av
-    lows = [price-uncertainty*math.sqrt(max(1, h)) for h, price in projected]
-    highs = [price+uncertainty*math.sqrt(max(1, h)) for h, price in projected]
+    empirical_corridor = result.get('corridor_by_horizon') or {}
+    if empirical_corridor and all(str(h) in empirical_corridor for h in horizons):
+        raw_lows = [current] + [current + av*float((empirical_corridor.get(str(h)) or {}).get('q25_move_atr') or 0.0) for h in horizons]
+        raw_highs = [current] + [current + av*float((empirical_corridor.get(str(h)) or {}).get('q75_move_atr') or 0.0) for h in horizons]
+        lows = [min(a,b) for a,b in zip(raw_lows, raw_highs)]
+        highs = [max(a,b) for a,b in zip(raw_lows, raw_highs)]
+    else:
+        uncertainty = max(.18, (100-int(result["confidence"]))/100) * av
+        lows = [price-uncertainty*math.sqrt(max(1, h)) for h, price in projected]
+        highs = [price+uncertainty*math.sqrt(max(1, h)) for h, price in projected]
     prices = [v for bar in bars for v in (bar.low, bar.high)] + lows + highs
     pmin, pmax = min(prices), max(prices)
     pad = max((pmax-pmin)*.08, av*.2)
