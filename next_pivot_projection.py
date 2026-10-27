@@ -301,6 +301,14 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
     )
     result["inside_session"] = bool(result["pivot_active"] or int(result.get("bars_low", 999)) <= session_hours)
     result["outside_session"] = not result["inside_session"]
+    try:
+        import classic_pivot_points
+        result["classic_pivots"] = classic_pivot_points.build(
+            symbol, by_tf, float(result.get("current") or 0), result.get("side")
+        )
+    except Exception:
+        log.exception("NEXT_PIVOT_CLASSIC_LEVELS_FAILED symbol=%s", symbol)
+        result["classic_pivots"] = {"available": False, "reason": "error"}
     if not result.get("side"):
         result["estimated"] = True
         result["probability"] = None

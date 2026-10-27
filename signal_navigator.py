@@ -92,6 +92,8 @@ def _source_name(text: str) -> str:
     names = (
         ("ICT SILVER BULLET", "Silver Bullet ICT"),
         ("POWER OF THREE", "AMD"), ("СНЯТИЕ ЛИКВИДНОСТИ", "Liquidity Sweep"),
+        ("СНЯТИЕ PDL", "Daily High/Low"), ("СНЯТИЕ PDH", "Daily High/Low"),
+        ("ПРОБОЙ PDL", "Daily High/Low"), ("ПРОБОЙ PDH", "Daily High/Low"),
         ("ORDER BLOCK", "Order Block"), ("ВЫХОД ИЗ ФАЗЫ", "Accumulation/Distribution"),
         ("CHAIN ENTRY", "Chain Entries"), ("ПАТТЕРН", "Patterns"),
         ("QUASIMODO — QM", "Quasimodo"), ("BALANCED PRICE RANGE", "BPR"), ("ДИСБАЛАНС", "Disbalance"), ("IMBALANCE", "Imbalance/FVG"),
@@ -239,6 +241,42 @@ def _source_event_dt(text: str) -> str:
         return ""
 
 
+def _source_price(text: str) -> float:
+    """Best event-time price printed by the source module.
+
+    Different modules name the same concept differently.  Prefer the actual
+    close when present, then the confirmed event price, then the explicit entry.
+    Do not use a later generic market price as the route anchor.
+    """
+    for label in ("Цена закрытия", "Цена подтверждения", "Вход"):
+        value = _float_line(text, label)
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _route_geometrically_compatible(active: dict, source_price: float) -> bool:
+    """Whether a new same-side event still belongs to the active price route."""
+    if not active or source_price <= 0:
+        return False
+    try:
+        anchor = float(active.get("anchor") or 0)
+        targets = active.get("targets") or []
+        prices = [float(item.get("price") or 0) for item in targets if float(item.get("price") or 0) > 0]
+        side = str(active.get("side") or "")
+    except (TypeError, ValueError):
+        return False
+    if anchor <= 0 or not prices or side not in {"LONG", "SHORT"}:
+        return False
+    first_span = abs(prices[0] - anchor)
+    multiplier = max(1.0, float(getattr(cfg, "NAVIGATOR_ROUTE_MERGE_SPAN_MULTIPLIER", 1.50)))
+    tolerance = max(anchor * 1e-7, first_span * (multiplier - 1.0))
+    far = max(prices) if side == "LONG" else min(prices)
+    if side == "LONG":
+        return anchor - tolerance <= source_price <= far + tolerance
+    return far - tolerance <= source_price <= anchor + tolerance
+
+
 
 def _card_tf(text: str) -> str:
     match = re.search(r"Таймфрейм:\s*([WDMH][0-9]*)", text or "")
@@ -265,6 +303,12 @@ def _module_targets(symbol: str, side: str, by_tf: dict, source_text: str, ancho
     tolerance = local_atr * float(getattr(cfg, "NAVIGATOR_TARGET_MIN_GAP_ATR", .35))
     key = _float_line(source_text, "Ключевой уровень")
     targets: list[dict] = []
+    # If the source module owns an explicit TR1, preserve it.  The old code
+    # discarded Daily High/Low TR1 and silently substituted a farther H4/D1
+    # ladder, which could make a tiny local reaction pass the fresh-entry gate.
+    explicit_tr1 = _float_line(source_text, "TR1")
+    if explicit_tr1 > 0:
+        _append_target(targets, explicit_tr1, f"TR1 источника {tf}", anchor, direction, tolerance)
     swings = movement_progress._swings(tf, bars)
     ahead = [s for s in swings if (s.kind == ("high" if direction > 0 else "low")) and (s.price - anchor) * direction > 0]
     behind = [s for s in swings if (s.price - anchor) * direction < 0]
@@ -296,7 +340,7 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         return None
     direction = 1 if side == "LONG" else -1
     h1_close = float(h1[-1].close)
-    source_close = _float_line(source_text, "Цена закрытия")
+    source_close = _source_price(source_text)
     # У M15-события цена подтверждения свежее последней закрытой H1. Маршрут
     # начинается именно от факта сигнала, поэтому первая карточка честно имеет
     # 0% пройденного пути, а не считает старую H1-цену движением назад/вперёд.
@@ -585,12 +629,15 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
     # Market State.  Do not mix candles fetched/closed at different moments.
     by_tf = freeze_by_tf(market.get(symbol) or {})
     active = (_load().get("active") or {}).get(symbol) or {}
-    same_active = bool(active.get("status") == "ACTIVE" and active.get("side") == side)
+    source_price = _source_price(source_text)
+    same_active = bool(
+        active.get("status") == "ACTIVE" and active.get("side") == side
+        and _route_geometrically_compatible(active, source_price)
+    )
     route = None
     if same_active and active.get("anchor") and active.get("targets"):
         h1 = movement_progress._bars(by_tf, "H1")
-        source_close = _float_line(source_text, "Цена закрытия")
-        current = source_close if source_close > 0 else (float(h1[-1].close) if h1 else float(active["anchor"]))
+        current = source_price if source_price > 0 else (float(h1[-1].close) if h1 else float(active["anchor"]))
         route = {
             "symbol": symbol, "side": side, "anchor": float(active["anchor"]),
             "current": current, "target": float(active.get("target") or active["targets"][0]["price"]),
@@ -1152,7 +1199,19 @@ def mark_delivered(text: str) -> bool:
             old["status"] = "REPLACED"
             old["resolved_at"] = time.time()
             state.setdefault("history", []).append(old)
-        if old and old.get("side") == scenario.get("side") and old.get("status") == "ACTIVE":
+        same_route = bool(
+            old and old.get("side") == scenario.get("side") and old.get("status") == "ACTIVE"
+            and _route_geometrically_compatible(old, float(scenario.get("anchor") or 0))
+        )
+        if (old and old.get("side") == scenario.get("side") and old.get("status") == "ACTIVE"
+                and not same_route):
+            # Same direction does not automatically mean the same trade.  A
+            # fresh source behind/outside the old route gets its own anchor and
+            # targets instead of inheriting stale H4/D1 geometry.
+            old["status"] = "SUPERSEDED"
+            old["resolved_at"] = time.time()
+            state.setdefault("history", []).append(old)
+        if same_route:
             # Повторный модуль подтверждает уже существующий маршрут. Не
             # сбрасываем anchor, цели и достигнутые TR новой поздней ценой.
             old_sources = [part.strip() for part in str(old.get("sources") or "").split("·") if part.strip()]

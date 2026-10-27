@@ -1,0 +1,11 @@
+config.py
+master_direction.py
+signal_navigator.py
+classic_pivot_points.py
+next_pivot_projection.py
+session_projection_reports.py
+zigzag_correction_structure.py
+zigzag_scanner.py
+test_20261027_local_reaction_book_hardening.py
+FOREX_LOCAL_REACTION_BOOK_HARDENING_2026-10-27_RU.md
+FOREX_LOCAL_REACTION_BOOK_HARDENING_CHANGED_FILES_2026-10-27.txt

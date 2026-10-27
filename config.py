@@ -184,6 +184,11 @@ MASTER_REQUIRE_MODULE_TRIGGER = True
 MASTER_MAX_SIGNALS_PER_H1 = 0
 # Направленная торговая карточка в чат только после прохождения Master.
 MASTER_REQUIRE_FOR_DELIVERY = True
+# Локальная реакция (PDH/PDL sweep, Chain Entry, одиночный свечной паттерн)
+# остаётся наблюдаемым фактом, но не становится торговым LONG/SHORT, пока H1
+# не совпал с событием и хотя бы один родительский слой H4/D1/H4-ZigZag не
+# поддерживает его. Это live-gate именно для публикации, а не для детекторов.
+MASTER_LOCAL_REACTION_HTF_GATE_ENABLED = True
 # Echo — сессионная информационная проекция. В Master Direction не вмешивается.
 ECHO_ENABLED = True
 ECHO_SESSION_MODE = True  # прогноз от текущей до следующей сессии
@@ -219,6 +224,9 @@ NEXT_PIVOT_MIN_ZONE_ATR = 0.25
 NEXT_PIVOT_NEAR_ATR = 0.55
 NEXT_PIVOT_ZONE_TOUCH_ATR = 0.35
 NEXT_PIVOT_ZONE_RECENCY_BARS = 96
+# Классические D1/W1 Pivot Points — только read-only контекст Next Pivot.
+# Они не выбирают направление, не меняют вероятность и не владеют TR/отменой.
+NEXT_PIVOT_CLASSIC_LEVELS_ENABLED = True
 # Ранний локальный сценарий: только завершённый AMD, подтверждённые M15/M5
 # и ещё не более 45% уже пройденного структурного маршрута.
 LOCAL_AMD_EARLY_ENABLED = True
@@ -294,6 +302,9 @@ LEVEL_DIRECTION_MEMORY_HOURS = 12
 LEVEL_TOUCH_IS_SIGNAL = False
 LEVEL_TOUCH_COOLDOWN_BARS = 3  # consecutive H1 candles inside one visit count as one test
 ZIGZAG_SCANNER_ENABLED = True
+# Подтверждённая H1 swing-структура и A-B-C — диагностический слой поверх
+# существующего ZigZag. Не имеет права менять сторону/сигнал/цели.
+ZIGZAG_CORRECTION_STRUCTURE_ENABLED = True
 ZIGZAG_CHART_IMAGES_ENABLED = True
 PATTERNS_ENABLED = True
 # Impulse Displacement: shared confirmation layer (not FVG and not Disbalance/BOS).
@@ -401,6 +412,9 @@ MOVEMENT_TARGET_MERGE_ATR = 0.15
 # TR1 closer than this H1 ATR fraction is part of the entry/reaction zone, not a milestone.
 NAVIGATOR_MIN_TR1_ATR = 0.60
 NAVIGATOR_TARGET_MIN_GAP_ATR = 0.35
+# Повторный модуль может присоединиться к уже активному маршруту только если
+# его фактическая цена события геометрически совместима с этим маршрутом.
+NAVIGATOR_ROUTE_MERGE_SPAN_MULTIPLIER = 1.50
 # Fresh-entry quality: a correct direction is not automatically a good new entry.
 SIGNAL_MIN_FINAL_TR1_ATR = 0.60
 SIGNAL_MIN_FINAL_ROUTE_ATR = 1.35

@@ -15,6 +15,7 @@ import briefing
 import echo_projection
 import news as newsmod
 import next_pivot_projection
+import classic_pivot_points
 import zigzag_scanner
 import session_pullback_consensus
 import pair_character_matrix
@@ -362,6 +363,7 @@ def _pivot_report(symbol: str, by_tf: dict, events: list[newsmod.NewsEvent], hou
             primary,
             *((["Статус: 🟡 СЛАБАЯ PIVOT-ГИПОТЕЗА · не отображается как полноценный LONG/SHORT-сигнал"] if (weak or muted) else [])),
             f"Ожидаемая зона {kind}: {result['zone_low']:.{decimals}f}–{result['zone_high']:.{decimals}f}",
+            classic_pivot_points.compact_ru(symbol, result.get("classic_pivots")),
             window_line,
             f"Сверка с ZigZag D1/H4/H1: {result.get('zigzag_check', 'нет данных')}{conflict}",
             zone_quality_line,

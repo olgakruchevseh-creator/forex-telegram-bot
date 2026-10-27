@@ -169,7 +169,7 @@ def _candle_run(bars: list, need: int, min_body_atr: float = 0.0) -> tuple[int, 
 
 def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None = None) -> dict:
     # Lazy import avoids a circular import: analysis uses the same primitives.
-    from analysis import analyze_tf, closed_candles, zigzag
+    from analysis import analyze_tf, atr, closed_candles, zigzag
 
     views, swings_by_tf, bars_by_tf, ensembles_by_tf = {}, {}, {}, {}
     for tf in SCAN_TFS:
@@ -295,6 +295,18 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength or {}))
     except Exception:
         character = {}
+    correction_structure = None
+    if getattr(cfg, "ZIGZAG_CORRECTION_STRUCTURE_ENABLED", True):
+        try:
+            import zigzag_correction_structure
+            h1_bars_for_structure = bars_by_tf.get("H1") or []
+            h1_tolerance = (atr(h1_bars_for_structure, 14) or 0.0) * 0.05 if h1_bars_for_structure else 0.0
+            correction_structure = zigzag_correction_structure.build(
+                confirmed_h1, h1_bars_for_structure, main_side or main, h1_side,
+                tolerance=h1_tolerance,
+            )
+        except Exception:
+            log.exception("ZIGZAG_CORRECTION_STRUCTURE_FAILED symbol=%s", symbol)
     return {
         "symbol": symbol,
         "pair_character": character,
@@ -335,6 +347,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         },
         "swing_profiles": profiles,
         "profile_confirmation": profile_consensus(profiles, side or main_side),
+        "correction_structure": correction_structure,
         "zigzag_ensemble": {
             tf: {
                 "side": int((ensembles_by_tf.get(tf) or {}).get("side") or 0),
@@ -394,6 +407,12 @@ def format_message(s: dict) -> str:
         relation = "выше" if profile.get("current_relation", 0) > 0 else ("ниже" if profile.get("current_relation", 0) < 0 else "у")
         lines.append(f"Профиль свинга {profile['tf']}: контрольная цена {_fmt_price(s['symbol'], profile['control_price'])} · цена {relation} зоны")
         lines.append(f"Давление свечей: {profile['delta_proxy']:+.1f}% · это price/activity proxy, не биржевой объём")
+    if s.get("correction_structure"):
+        try:
+            import zigzag_correction_structure
+            lines.extend(zigzag_correction_structure.compact_lines(s.get("correction_structure")))
+        except Exception:
+            pass
     if s.get("high"):
         lines.append(f"Последний максимум: {_fmt_price(s['symbol'], s['high'])}")
     if s.get("low"):
