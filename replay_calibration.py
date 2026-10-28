@@ -6,12 +6,14 @@ verdicts, routing, or Telegram delivery.
 from __future__ import annotations
 import json, logging, os
 from collections import defaultdict
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from analysis import closed_candles, atr
 import config as cfg
 import layer14_adaptive_confidence
 import system_validation_brain
+import manipulation_leg_projection
 
 log=logging.getLogger('fxbot.replay_calibration')
 HORIZONS=(1,3,8)
@@ -109,6 +111,10 @@ def _evaluate(rec,h1):
     for name,val in targets.items():
         try:t=float(val)
         except (TypeError,ValueError):continue
+        # Ignore impossible/stale route levels on the wrong side of entry.
+        # Otherwise a LONG below entry (SHORT above entry) registers an
+        # immediate, misleading success from high/low alone.
+        if not math.isfinite(t) or (t-entry)*direction<=0:continue
         first_hit=None
         for b in sample:
             if (b.high>=t if direction==1 else b.low<=t):
@@ -122,6 +128,12 @@ def _evaluate(rec,h1):
     timing='timely'
     if h3['mfe_atr']<0.35: timing='weak_or_no_followthrough'
     elif h3['mae_atr']>h3['mfe_atr'] and h3['mae_atr']>=0.6: timing='adverse_first'
+    # Replay the frozen projection rather than re-detecting it with future data.
+    # The first eight post-decision closed H1s are the maximum observation window.
+    proj=((rec.get('calibration') or {}).get('manipulation_projection') or {})
+    projection_obs={}
+    if isinstance(proj,dict) and proj.get('confirmation_h1') and proj.get('levels'):
+        projection_obs=manipulation_leg_projection._level_observations(prior+sample,proj)
     return {'schema':1,'decision_id':rec.get('event_id'),'evaluated_utc':datetime.now(timezone.utc).isoformat(timespec='seconds'),
       'pair':rec.get('pair'),'side':side,'source':rec.get('source'),'status':rec.get('status'),'reason':rec.get('reason',''),
       'session':rec.get('session'),'timeframe':rec.get('timeframe'),
@@ -129,7 +141,7 @@ def _evaluate(rec,h1):
       'character_features':rec.get('character_features') or {},
       'observed_h1_dt':rec.get('observed_h1_dt') or '',
       'replay_anchor':'observed_h1' if observed else 'legacy_recorded_utc',
-      'horizons_h1':horizons,'targets_hit_8h':hit,'target_hit_time':hit_time,'target_hit_minutes':hit_minutes,'efficiency_3h':round(efficiency,3),'timing_class':timing}
+      'horizons_h1':horizons,'manipulation_projection_observations':projection_obs,'targets_hit_8h':hit,'target_hit_time':hit_time,'target_hit_minutes':hit_minutes,'efficiency_3h':round(efficiency,3),'timing_class':timing}
 
 def _build_calibration(outcomes):
     # Defensive de-duplication for legacy replay files. Rows without an id are

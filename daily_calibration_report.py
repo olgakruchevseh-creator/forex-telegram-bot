@@ -75,22 +75,35 @@ def _metric_eff(sent,outcomes,extract,bucket):
         groups[name][0]+=1; groups[name][1]+=float(o.get('efficiency_3h') or 0)
     return ', '.join(f'{k}: n={v[0]}, eff={v[1]/v[0]*100:.0f}%' for k,v in groups.items()) or '—'
 
-def _manipulation_summary(decisions):
+def _manipulation_summary(decisions, outcomes=None):
     latest={}
+    outcomes=outcomes or {}
     for d in decisions:
         p=((d.get('calibration') or {}).get('manipulation_projection') or {}) if isinstance(d,dict) else {}
         if not isinstance(p,dict) or not p.get('confirmation_h1'): continue
         key=(str(d.get('pair') or ''),str(p.get('confirmation_h1')),str(p.get('direction') or ''))
         obs=p.get('observations') if isinstance(p.get('observations'),dict) else {}
+        # Later replay (if available) reconstructs the same frozen setup from
+        # closed candles; the initial signal-time snapshot is often immature.
+        o=outcomes.get(d.get('event_id')) or {}
+        replay_obs=o.get('manipulation_projection_observations') or {}
+        if isinstance(replay_obs,dict) and replay_obs.get('closed_h1_after_confirmation') is not None:
+            if int(replay_obs.get('closed_h1_after_confirmation') or 0) >= int(obs.get('closed_h1_after_confirmation') or 0):
+                p=dict(p,observations=replay_obs)
+                obs=replay_obs
         maturity=int(obs.get('closed_h1_after_confirmation') or 0)
         prev=latest.get(key) or {}
         prev_obs=prev.get('observations') if isinstance(prev.get('observations'),dict) else {}
         if not prev or maturity>=int(prev_obs.get('closed_h1_after_confirmation') or 0): latest[key]=p
     names=('-1','-1.5','-2','-2.25','-2.5','-4','-4.25','-4.5')
     levels={n:{'touched':0,'close_through':0,'reaction_ge_0_25_leg':0} for n in names}
-    zones=Counter()
+    zones=Counter(); eligible=0; unobserved=0; matured=0
     for p in latest.values():
         obs=p.get('observations') if isinstance(p.get('observations'),dict) else {}
+        age=int(obs.get('closed_h1_after_confirmation') or 0)
+        if age: eligible+=1
+        else: unobserved+=1
+        if age>=8: matured+=1
         zones['primary_entered']+=int(bool(obs.get('primary_zone_entered')))
         zones['primary_completed']+=int(bool(obs.get('primary_zone_completed')))
         zones['extended_entered']+=int(bool(obs.get('extended_zone_entered')))
@@ -101,7 +114,7 @@ def _manipulation_summary(decisions):
             levels[n]['touched']+=int(bool(r.get('touched')))
             levels[n]['close_through']+=int(bool(r.get('close_through')))
             levels[n]['reaction_ge_0_25_leg']+=int(bool(r.get('reaction_ge_0_25_leg')))
-    return {'setups':len(latest),'levels':levels,'zones':dict(zones)}
+    return {'setups':len(latest),'levels':levels,'zones':dict(zones),'eligible':eligible,'unobserved':unobserved,'matured':matured}
 
 def _report(day):
     raw_decisions=[r for r in _read_jsonl(_journal()) if _local_date(r.get('recorded_utc'))==day]
@@ -116,7 +129,7 @@ def _report(day):
     sent=[r for r in decisions if r.get('status')=='SENT']
     sent_timing=Counter(r.get('entry_timing') or 'unknown' for r in sent)
     sent_out=[outcomes.get(r.get('event_id')) for r in sent if outcomes.get(r.get('event_id'))]
-    target=Counter(); mfe=[]; mae=[]; timing=Counter(); by_pair=defaultdict(list); by_src=defaultdict(list); by_tf=defaultdict(list); by_reg=defaultdict(list); by_session=defaultdict(list)
+    target=Counter(); mfe=[]; mae=[]; mfe3=[]; mae3=[]; timing=Counter(); by_pair=defaultdict(list); by_src=defaultdict(list); by_tf=defaultdict(list); by_reg=defaultdict(list); by_session=defaultdict(list)
     for d in sent:
         o=outcomes.get(d.get('event_id'))
         if not o: continue
@@ -125,12 +138,16 @@ def _report(day):
             if t in hits: target[t]+=int(bool(hits[t])); target[t+'_known']+=1
         h=(o.get('horizons_h1') or {}).get('8') or (o.get('horizons_h1') or {}).get('3') or {}
         mfe.append(float(h.get('mfe_atr') or 0)); mae.append(float(h.get('mae_atr') or 0))
+        h3=(o.get('horizons_h1') or {}).get('3') or {}
+        if h3:
+            mfe3.append(float(h3.get('mfe_atr') or 0)); mae3.append(float(h3.get('mae_atr') or 0))
         timing[d.get('entry_timing') or o.get('timing_class') or 'unknown']+=1
         for key,val in ((by_pair,d.get('pair') or '—'),(by_src,d.get('source') or '—'),(by_tf,d.get('timeframe') or '—'),(by_reg,o.get('regime') or '—'),(by_session,d.get('session') or '—')): key[val].append(o)
     pending=len(sent)-len(sent_out)
+    target_coverage=Counter(t for r in sent for t in (r.get('targets') or {}) if t in ('TR1','TR2','TR3'))
     residual=[float(r['residual_potential_pct']) for r in sent if r.get('residual_potential_pct') is not None]
     blocks=[r for r in decisions if r.get('status')=='BLOCKED']
-    useful=wrong=ambiguous=block_pending=0; block_reasons=Counter()
+    useful=wrong=ambiguous=block_pending=0; block_reasons=Counter(); wrong_reasons=Counter()
     for d in blocks:
         block_reasons[d.get('reason') or 'unknown']+=1
         o=outcomes.get(d.get('event_id'))
@@ -140,7 +157,8 @@ def _report(day):
         h=(o.get('horizons_h1') or {}).get('3') or {}
         mf=float(h.get('mfe_atr') or 0); ma=float(h.get('mae_atr') or 0)
         if mf < .35 or ma > mf: useful+=1
-        elif mf >= .75 and mf > ma: wrong+=1
+        elif mf >= .75 and mf > ma:
+            wrong+=1; wrong_reasons[d.get('reason') or 'unknown']+=1
         else: ambiguous+=1
     def group_line(name, groups):
         scored=[]
@@ -165,7 +183,7 @@ def _report(day):
     strength_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('directed_strength_gap'),lambda v:_named_bucket(v,(-99,0,.03,.05,.12,99),('<0','0–0.02','0.03–0.04','0.05–0.11','≥0.12','≥0.12')))
     family_counts=[int(((r.get('confirmation_families') or {}).get('independent_family_count') or 0)) for r in sent]
     source_counts=[int(((r.get('confirmation_families') or {}).get('source_count') or 0)) for r in sent]
-    manip=_manipulation_summary(decisions)
+    manip=_manipulation_summary(decisions,outcomes)
     manip_levels=manip.get('levels') or {}
     manip_zones=manip.get('zones') or {}
     def _mh(name): return int(((manip_levels.get(name) or {}).get('touched') or 0))
@@ -184,12 +202,16 @@ def _report(day):
       (f"Технические повторные записи от повторных сканов: {len(raw_decisions)-len(decisions)}" if len(raw_decisions)>len(decisions) else "Технические повторные записи: 0"),
       f'Фактический replay SENT: {len(sent_out)} · ещё без полного окна: {pending}',
       f"TR1: {target['TR1']}/{target['TR1_known']} · TR2: {target['TR2']}/{target['TR2_known']} · TR3: {target['TR3']}/{target['TR3_known']}",
+      f"Покрытие целей в журнале SENT: TR1 {target_coverage['TR1']}/{len(sent)} · TR2 {target_coverage['TR2']}/{len(sent)} · TR3 {target_coverage['TR3']}/{len(sent)} (0/0 выше = нет проверенных данных)",
       f"Манипуляционная проекция: {manip.get('setups',0)} сетапов · касания -1/-1.5/-2/-2.25/-2.5: {_mh('-1')}/{_mh('-1.5')}/{_mh('-2')}/{_mh('-2.25')}/{_mh('-2.5')}",
       f"Дальняя зона -4/-4.25/-4.5: {_mh('-4')}/{_mh('-4.25')}/{_mh('-4.5')} · входов в -2…-2.5: {manip_zones.get('primary_entered',0)} · в -4…-4.5: {manip_zones.get('extended_entered',0)}",
-      f"MFE: {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
+      f"Наблюдение проекций: ≥1 закрытой H1 {manip.get('eligible',0)}/{manip.get('setups',0)} · ≥8 H1 {manip.get('matured',0)} · без последующей H1 {manip.get('unobserved',0)}",
+      f"MFE (до 8 закрытых H1): {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
+      f"MFE/MAE (первые 3 H1): {sum(mfe3)/len(mfe3):.2f} / {sum(mae3)/len(mae3):.2f} ATR · n={len(mfe3)}" if mfe3 else 'MFE/MAE (первые 3 H1): —',
       f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']} · residual avg {sum(residual)/len(residual):.0f}%" if residual else f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']}",'',
       group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Режим',by_reg),group_line('Сессии',by_session),'',
       f'Блокировки (уникальные, 3H excursion proxy): полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
+      f'Ошибочные блокировки (3H proxy) по причинам: {_top(wrong_reasons)}',
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
       f'Master ranges: {master_ranges}',f'KILLER ranges: {killer_ranges}',
       f'Progress ranges: {progress_ranges}',f'Strength ranges: {strength_ranges}',

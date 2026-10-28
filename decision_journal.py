@@ -44,10 +44,15 @@ def _targets(text, ctx=None):
  # Source cards do not always print all Navigator targets. Preserve the route
  # that Signal Context already calculated so replay can measure TR1/TR2/TR3.
  route=(ctx or {}).get('route') or {}
- for item in route.get('targets') or []:
-  name=str(item.get('name') or '').upper()
+ for i,item in enumerate(route.get('targets') or [],start=1):
+  if not isinstance(item,dict): continue
+  # Movement Progress stores the ordered route as {price, tf}, not {name, price}.
+  # These are genuine ranked targets, never fabricate missing TR2/TR3.
+  name=str(item.get('name') or f'TR{i}').upper()
   if name in ('TR1','TR2','TR3'):
-   try: out.setdefault(name,float(item.get('price')))
+   try:
+    price=float(item.get('price'))
+    if price>0: out.setdefault(name,price)
    except (TypeError,ValueError): pass
  return out
 
@@ -113,10 +118,31 @@ def _ensure_seen_ids(path):
   log.exception('DECISION_JOURNAL_DEDUP_LOAD_SKIPPED')
 
 def _character_snapshot(pair, by_tf, strength, ctx):
- # Delayed-calibration features only. They are sampled from already-closed H1
- # data and never returned to the live decision path.
+ # Frozen at signal time; these diagnostics never influence the verdict.
  if not pair:
   return {}
+ try:
+  p=pair_character_matrix.analyze(pair, by_tf or {}, strength or {})
+  if not p.get('ready'):
+   return {}
+  return {
+   'trend_persistence':p.get('trend_persistence'),
+   'mean_reversion':p.get('mean_reversion'),
+   'efficiency_ratio_blend':p.get('efficiency_ratio_blend'),
+   'autocorr_1':p.get('autocorr_1'),
+   'return_sign_entropy':p.get('return_sign_entropy'),
+   'hurst_centered':p.get('hurst_centered'),
+   'character_matrix_score':p.get('character_matrix_score'),
+   'trend_voice':p.get('trend_voice'),
+   'reversion_voice':p.get('reversion_voice'),
+   'h1_closed_at':str(((by_tf or {}).get('H1') or [])[-1].dt) if (by_tf or {}).get('H1') else None,
+   'layer45_summary':(ctx or {}).get('mathematical_consensus_summary') or {},
+   'observe_only':True,
+  }
+ except Exception:
+  log.exception('DECISION_JOURNAL_CHARACTER_SNAPSHOT_SKIPPED pair=%s',pair)
+  return {}
+
 
 def _manipulation_snapshot(ctx):
  p=(ctx or {}).get('manipulation_projection') or {}
@@ -148,27 +174,17 @@ def _manipulation_snapshot(ctx):
   },
   'mode':'OBSERVE_ONLY','live_effect':'NONE',
  }
- try:
-  p=pair_character_matrix.analyze(pair, by_tf or {}, strength or {})
-  if not p.get('ready'):
-   return {}
-  return {
-   'trend_persistence':p.get('trend_persistence'),
-   'mean_reversion':p.get('mean_reversion'),
-   'efficiency_ratio_blend':p.get('efficiency_ratio_blend'),
-   'autocorr_1':p.get('autocorr_1'),
-   'return_sign_entropy':p.get('return_sign_entropy'),
-   'hurst_centered':p.get('hurst_centered'),
-   'character_matrix_score':p.get('character_matrix_score'),
-   'trend_voice':p.get('trend_voice'),
-   'reversion_voice':p.get('reversion_voice'),
-   'h1_closed_at':((p.get('session') or '') and ((by_tf or {}).get('H1') or [])[-1].dt) if (by_tf or {}).get('H1') else None,
-   'layer45_summary':(ctx or {}).get('mathematical_consensus_summary') or {},
-   'observe_only':True,
-  }
- except Exception:
-  log.exception('DECISION_JOURNAL_CHARACTER_SNAPSHOT_SKIPPED pair=%s',pair)
-  return {}
+
+
+def _observed_progress(ctx):
+ # inspect() retains progress=0 for its live decision path when no valid
+ # route exists. Do not record that placeholder as a measured 0%/100%.
+ ctx=ctx or {}
+ if ctx.get('progress_observed',True) is False:return None
+ v=ctx.get('progress')
+ try:return float(v) if v is not None else None
+ except (TypeError,ValueError):return None
+
 def _append(rec):
  try:
   p=_path(); p.parent.mkdir(parents=True,exist_ok=True)
@@ -185,7 +201,7 @@ def _append(rec):
 def _calibration_metrics(text, by_tf, direction, ctx):
  # Pure telemetry: calculations below cannot affect the caller's decision.
  route=(ctx or {}).get('route') or {}
- progress=(ctx or {}).get('progress')
+ progress=_observed_progress(ctx)
  h1=closed_candles((by_tf or {}).get('H1') or [],60)
  av=atr(h1,int(getattr(cfg,'ATR_PERIOD',14))) if h1 else 0.0
  current=float(h1[-1].close) if h1 else None
@@ -233,6 +249,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
  sources=[source]+[signal_context.source_name(x) for x in (allies or [])]
  sources=list(dict.fromkeys(sources)); by_tf=(market or {}).get(pair) or {}; direction=1 if side=='LONG' else -1 if side=='SHORT' else 0
  now=_now(); local_now=now.astimezone(ZoneInfo(getattr(cfg,'LOCAL_TZ_NAME','Europe/Amsterdam'))); snap={}
+ progress=_observed_progress(ctx)
  obs=_observed_h1(by_tf)
  if pair and direction:
   try: snap=market_state.build(pair,by_tf,direction).as_dict()
@@ -249,8 +266,8 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
   'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(sources),
   'observed_h1_dt':obs.get('dt') or '','h1_close_price':obs.get('close'),
   'quality':_num(text,'Качество'),'probability':_num(text,'Вероятность'),'timeframe':_tf(text),'session':_session(local_now),
-  'entry_timing':('late' if str(reason).startswith('late_') else 'early' if (ctx or {}).get('progress') is not None and float((ctx or {}).get('progress') or 0)<=15 else 'timely'),
-  'residual_potential_pct':(round(max(0.0,100.0-float((ctx or {}).get('progress'))),1) if (ctx or {}).get('progress') is not None else None),
+  'entry_timing':('late' if str(reason).startswith('late_') else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
+  'residual_potential_pct':(round(max(0.0,100.0-progress),1) if progress is not None else None),
   'confirmation_price':_price(text,['Подтверждение','Закрытие','close']),
   'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text,ctx),
   'tf_snapshot':_freshness(by_tf),'context_gate':ctx or {},'market_state':snap,

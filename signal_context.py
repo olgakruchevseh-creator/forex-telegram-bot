@@ -227,6 +227,7 @@ def inspect(symbol: str, side: str, by_tf: dict, strength: dict) -> dict:
         "junior_n": junior_n,
         "senior_n": senior_n,
         "progress": progress,
+        "progress_observed": route is not None and route.get("progress") is not None,
         "route": route,
         "manipulation_projection": manipulation_projection,
         "manipulation_target_alignment": manipulation_target_alignment,
