@@ -5,16 +5,14 @@ one stable schema so journals/replay can compare the terminal mathematics with
 real outcomes without parsing implementation-specific layer fields.
 """
 from __future__ import annotations
+from mathematical_input_safety import finite_number
 
 
 def _num(d, key):
     if not isinstance(d, dict):
         return None
-    try:
-        v = d.get(key)
-        return None if v is None else round(float(v), 2)
-    except (TypeError, ValueError):
-        return None
+    value = finite_number(d.get(key))
+    return round(value, 2) if value is not None else None
 
 
 def summarize(ctx: dict | None) -> dict:
@@ -29,7 +27,9 @@ def summarize(ctx: dict | None) -> dict:
         }
 
     state = str(final.get("state") or "NO_FACTS")
-    available = state not in {"NO_FACTS", "DISABLED"}
+    available = (state not in {"NO_FACTS", "DISABLED", "INVALID_INPUT"}
+                 and _num(final, "final_consensus") is not None
+                 and 0.0 <= _num(final, "final_consensus") <= 100.0)
     return {
         "available": available,
         "state": state,

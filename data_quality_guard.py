@@ -7,6 +7,7 @@ left opt-in so this patch cannot silently change current signal flow.
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime
+import math
 from statistics import median
 
 @dataclass
@@ -34,8 +35,8 @@ def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2)
         o,h,l,c=(_get(b,k) for k in ('open','high','low','close'))
         t=_get(b,'dt') or _get(b,'datetime') or _get(b,'time')
         try: o,h,l,c=map(float,(o,h,l,c))
-        except (TypeError,ValueError): impossible+=1; continue
-        if min(o,h,l,c)<=0 or h < max(o,c,l) or l > min(o,c,h): impossible+=1
+        except (TypeError,ValueError,OverflowError): impossible+=1; continue
+        if not all(math.isfinite(v) and v > 0 for v in (o,h,l,c)) or h < max(o,c,l) or l > min(o,c,h): impossible+=1
         if o==h==l==c: flat+=1
         if isinstance(t,str):
             try: t=datetime.fromisoformat(t.replace('Z','+00:00'))
@@ -51,7 +52,7 @@ def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2)
     for b in reversed(bars):
         o,h,l,c=(_get(b,k) for k in ('open','high','low','close'))
         try: is_flat=float(o)==float(h)==float(l)==float(c)
-        except (TypeError,ValueError): is_flat=False
+        except (TypeError,ValueError,OverflowError): is_flat=False
         if is_flat: tail+=1
         else: break
     reasons=[]

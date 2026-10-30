@@ -7,19 +7,15 @@ independent evidence and cannot change live trading behaviour.
 from __future__ import annotations
 import math
 import config as cfg
+from mathematical_input_safety import safe_clip, safe_pct, valid_percentages, unavailable
 
 
 def _clip(x, lo=0.0, hi=1.0):
-    return max(lo, min(hi, float(x)))
+    return safe_clip(x, lo, hi)
 
 
 def _pct(d, key, default=0.0):
-    if not isinstance(d, dict):
-        return default
-    try:
-        return _clip(float(d.get(key, default) or 0.0) / 100.0)
-    except (TypeError, ValueError):
-        return default
+    return safe_pct(d, key, default)
 
 
 def _mean(xs):
@@ -43,6 +39,25 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
     if not getattr(cfg, 'LAYER35_COMPLEXITY_BUDGET_ENABLED', True):
         return {'layer': 35, 'observe_only': True, 'state': 'DISABLED', 'trade_effect': False}
 
+    # Missing or invalid upstream coordinates cannot yield a consensus score.
+    if not valid_percentages((
+        (mathematical_core, 'quality_coordinate'),
+        (mathematical_stability, 'stability_score'),
+        (mathematical_confidence, 'mathematical_confidence'),
+        (mathematical_resilience, 'mathematical_resilience'),
+        (information_value, 'information_value'),
+        (mathematical_coherence, 'mathematical_coherence'),
+        (decision_margin, 'decision_margin'),
+        (support_geometry, 'support_geometry'),
+        (stack_consistency, 'stack_consistency'),
+        (joint_robustness, 'joint_robustness'),
+        (local_stability, 'local_stability'),
+        (dependency_audit, 'dependency_health'),
+        (recursive_echo_guard, 'recursive_echo_health'),
+        (uncertainty_budget, 'uncertainty_budget'),
+    )):
+        return unavailable(35, pair)
+
     core = mathematical_core if isinstance(mathematical_core, dict) else {}
     required = (core, information_value or {}, uncertainty_budget or {}, decision_margin or {},
                 support_geometry or {}, stack_consistency or {}, joint_robustness or {},
@@ -63,7 +78,7 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
         _pct(mathematical_resilience, 'mathematical_resilience'),
         _pct(information_value, 'information_value'),
         _pct(mathematical_coherence, 'mathematical_coherence'),
-        1.0 - _pct(uncertainty_budget, 'uncertainty_budget', 1.0),
+        1.0 - _pct(uncertainty_budget, 'uncertainty_budget', 100.0),
         _pct(decision_margin, 'decision_margin'),
         _pct(support_geometry, 'support_geometry'),
     ]

@@ -61,13 +61,13 @@ def _entry(rec,bars):
         reference=float(rec.get('h1_close_price') or 0)
     except (TypeError,ValueError):
         reference=0.0
-    if reference<=0 and bars:
+    if (not math.isfinite(reference) or reference<=0) and bars:
         reference=float(bars[0].open or 0)
     for key in ('confirmation_price','h1_close_price','trigger_price'):
         try:
             v=float(rec.get(key) or 0)
             if not math.isfinite(v) or v<=0:continue
-            if reference>0 and abs(v-reference)/reference>0.05:continue
+            if math.isfinite(reference) and reference>0 and abs(v-reference)/reference>0.05:continue
             return v
         except (TypeError,ValueError):pass
     return bars[0].open if bars else None
@@ -105,8 +105,16 @@ def _evaluate(rec,h1):
             if (d.timestamp()+3600)<=start.timestamp(): prior.append(b)
     if len(future)<max(HORIZONS):return None
     entry=_entry(rec,future)
-    if not entry:return None
+    if entry is None or not math.isfinite(float(entry)) or float(entry) <= 0:
+        return None
+    # Historical replay never treats flat/invalid ATR as a successful trade.
+    if any(not all(math.isfinite(float(getattr(b, k))) and float(getattr(b, k)) > 0
+                   for k in ('open', 'high', 'low', 'close'))
+           for b in prior[-30:] + future[:max(HORIZONS)]):
+        return None
     a=atr(prior[-30:]) if len(prior)>=14 else max(abs(entry)*0.001,1e-6)
+    if a is None or not math.isfinite(float(a)) or float(a) <= 0:
+        return None
     horizons={}
     for n in HORIZONS:
         sample=future[:n]
@@ -208,7 +216,11 @@ def update(market:dict)->int:
         did=rec.get('event_id')
         if not did or did in done or rec.get('status') not in ('SENT','BLOCKED','ALLOWED'):continue
         pair=rec.get('pair'); h1=(market.get(pair) or {}).get('H1') if pair else None
-        result=_evaluate(rec,h1)
+        try:
+            result=_evaluate(rec,h1)
+        except (ArithmeticError, TypeError, ValueError, OverflowError, AttributeError):
+            log.exception('REPLAY_INVALID_SAMPLE decision_id=%s pair=%s', did, pair)
+            continue
         if result:
             _append(result)
             try:

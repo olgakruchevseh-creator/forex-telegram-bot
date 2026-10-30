@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import hashlib
 import asyncio
 import gc
@@ -148,11 +149,31 @@ def save_state(state: dict) -> None:
 
 
 def _parse_values(values: list) -> list[Candle]:
-    candles = [
-        Candle(dt=v["datetime"], open=float(v["open"]), high=float(v["high"]), low=float(v["low"]), close=float(v["close"]), volume=(float(v["volume"]) if v.get("volume") not in (None, "", "null") else None))
-        for v in values or []
-    ]
+    candles = []
+    invalid = 0
+    for v in values or []:
+        try:
+            o, h, l, c = (float(v[k]) for k in ("open", "high", "low", "close"))
+            if (not all(math.isfinite(x) and x > 0 for x in (o, h, l, c))
+                    or h < max(o, l, c) or l > min(o, h, c)):
+                invalid += 1
+                continue
+            volume = v.get("volume")
+            volume = float(volume) if volume not in (None, "", "null") else None
+            if volume is not None and (not math.isfinite(volume) or volume < 0):
+                volume = None  # Volume is optional; OHLC validity is mandatory.
+            candles.append(Candle(dt=str(v["datetime"]), open=o, high=h, low=l, close=c, volume=volume))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            invalid += 1
+    if invalid:
+        # Reject whole damaged series: removing an internal bar would hide a
+        # missing H1 close and distort ATR / indicators / historical replay.
+        log.warning("MARKET_DATA_INVALID removed=%s of=%s; series rejected", invalid, len(values or []))
+        return []
     candles.sort(key=lambda x: x.dt)
+    if len({b.dt for b in candles}) != len(candles):
+        log.warning("MARKET_DATA_INVALID duplicate candle timestamps; series rejected")
+        return []
     return candles
 
 
@@ -233,6 +254,24 @@ def fetch_tf_batch(tf: dict, api_key: str) -> dict[str, list[Candle]]:
     return out
 
 
+def _cache_fallback(s: str, tf: dict, now: float) -> list[Candle]:
+    """Reject stale cached quotes after API failure before market coverage."""
+    hit = CACHE.get((s, tf["key"])) or {}
+    candles = hit.get("candles") or []
+    try:
+        age = now - float(hit.get("ts"))
+        max_age = float(getattr(cfg, "MARKET_CACHE_FALLBACK_MAX_AGE_MINUTES", {}).get(tf["key"], 0)) * 60
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return []
+    if not candles or not math.isfinite(age) or not math.isfinite(max_age):
+        return []
+    if age < 0 or max_age <= 0 or age > max_age:
+        log.warning("CACHE_EXPIRED symbol=%s tf=%s age_min=%.1f limit_min=%.1f",
+                    s, tf["key"], age/60, max_age/60)
+        return []
+    return candles
+
+
 def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[Candle]]]:
     """symbol -> {tf_key -> candles}. На платном плане — batch по каждому ТФ."""
     market: dict[str, dict[str, list[Candle]]] = {s: {} for s in cfg.PAIRS}
@@ -261,17 +300,17 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                 # previously fetched series for this tick instead of dropping
                 # the symbol from an otherwise usable basket. Exact freshness
                 # guards inside signal modules still decide tradeability.
-                hit = CACHE.get((s, tf["key"]))
-                if hit and hit.get("candles"):
-                    market[s][tf["key"]] = hit["candles"]
+                cached = _cache_fallback(s, tf, time.time())
+                if cached:
+                    market[s][tf["key"]] = cached
                     log.warning("CACHE_FALLBACK symbol=%s tf=%s", s, tf["key"])
             time.sleep(cfg.REQUEST_PAUSE_SEC)
         except Exception as e:
             log.warning("Пакет %s: %s", tf["key"], e)
             for s in cfg.PAIRS:
-                hit = CACHE.get((s, tf["key"]))
-                if hit:
-                    market[s][tf["key"]] = hit["candles"]
+                cached = _cache_fallback(s, tf, time.time())
+                if cached:
+                    market[s][tf["key"]] = cached
     return market
 
 
@@ -1607,8 +1646,13 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             bundles, dropped_facts = signal_context.prepare(delivery_alerts, market, strength)
         except Exception:
-            log.exception("SIGNAL_CONTEXT_FAILED")
-            bundles = [{"primary": t, "source_text": t, "allies": [], "pair": _alert_pair(t), "side": _direct_signal_side(t)} for t in delivery_alerts]
+            log.exception("SIGNAL_CONTEXT_FAILED: new entries are blocked, not bypassed")
+            for t in delivery_alerts:
+                try:
+                    decision_journal.record_stage(t, market, strength, "BLOCKED", [], {}, "context_error")
+                except Exception:
+                    log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
+            bundles = []  # Fail-closed for trade entries; keep rest of scan alive.
             dropped_facts = []
         for reason, raw in dropped_facts:
             log.info(

@@ -54,6 +54,13 @@ MARKET_MIN_CLOSED_H1 = 20
 # payload, retry only the missing symbols instead of accepting an incomplete
 # basket and silencing the whole scan.
 MARKET_RETRY_MISSING_SYMBOLS = True
+# Upper bound on how long a *previously fetched* series may be reused after an
+# API failure. Values are minutes since fetch, NOT the timestamp of its last bar.
+# Strictness is highest on H1/M15/M5, which control intraday entries.
+MARKET_CACHE_FALLBACK_MAX_AGE_MINUTES = {
+    "M5": 20, "M15": 45, "H1": 90,
+    "H4": 300, "D1": 2880, "W1": 14400,
+}
 # A persistent market-data outage must never look like a dead Telegram bot.
 # Send one compact technical notice on transition and then at most once per
 # this many minutes while the outage remains unresolved.

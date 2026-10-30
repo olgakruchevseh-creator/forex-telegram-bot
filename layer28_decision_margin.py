@@ -8,19 +8,15 @@ whole mathematical stack, not the raw evidence families. No live trade effect.
 from __future__ import annotations
 import math
 import config as cfg
+from mathematical_input_safety import safe_clip, safe_pct, valid_percentages, unavailable
 
 
 def _clip(x, lo=0.0, hi=1.0):
-    return max(lo, min(hi, float(x)))
+    return safe_clip(x, lo, hi)
 
 
 def _pct(d, key, default=0.0):
-    if not isinstance(d, dict):
-        return default
-    try:
-        return _clip(float(d.get(key, default) or 0.0) / 100.0)
-    except (TypeError, ValueError):
-        return default
+    return safe_pct(d, key, default)
 
 
 def _weighted_mean(values, weights):
@@ -39,6 +35,18 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
            uncertainty_budget: dict|None) -> dict:
     if not getattr(cfg, 'LAYER28_DECISION_MARGIN_ENABLED', True):
         return {'layer': 28, 'observe_only': True, 'state': 'DISABLED', 'trade_effect': False}
+
+    # Missing or invalid upstream coordinates cannot yield a consensus score.
+    if not valid_percentages((
+        (mathematical_core, 'quality_coordinate'),
+        (mathematical_stability, 'stability_score'),
+        (mathematical_confidence, 'mathematical_confidence'),
+        (mathematical_resilience, 'mathematical_resilience'),
+        (information_value, 'information_value'),
+        (mathematical_coherence, 'mathematical_coherence'),
+        (uncertainty_budget, 'uncertainty_budget'),
+    )):
+        return unavailable(28, pair)
 
     core = mathematical_core if isinstance(mathematical_core, dict) else {}
     stab = mathematical_stability if isinstance(mathematical_stability, dict) else {}
@@ -65,7 +73,7 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
         'resilience': _pct(res, 'mathematical_resilience'),
         'information': _pct(info, 'information_value'),
         'coherence': _pct(coh, 'mathematical_coherence'),
-        'certainty': 1.0 - _pct(unc, 'uncertainty_budget', 1.0),
+        'certainty': 1.0 - _pct(unc, 'uncertainty_budget', 100.0),
     }
     weights = {'core_quality': .15, 'stability': .13, 'confidence': .15,
                'resilience': .16, 'information': .11, 'coherence': .15, 'certainty': .15}

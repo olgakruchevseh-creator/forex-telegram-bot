@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -481,14 +482,22 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
 
     h1 = movement_progress.closed_candles(by_tf.get("H1") or [], 60)
     av = movement_progress.atr(h1, 14) if h1 else 0.0
-    if av <= 0:
-        return {"eligible": False, "reason": "insufficient_atr"}
-    anchor = float(route.get("anchor") or 0)
-    tr1 = float(route.get("target") or anchor)
-    route_atr = abs(tr1 - anchor) / av
-    final_targets = route.get("targets") or []
-    final_price = float(final_targets[-1].get("price")) if final_targets else tr1
+    if not math.isfinite(av) or av <= 0:
+        return {"eligible": False, "reason": "invalid_atr"}
+    try:
+        anchor = float(route.get("anchor") or 0)
+        tr1 = float(route.get("target") or anchor)
+        final_targets = route.get("targets") or []
+        final_price = float(final_targets[-1].get("price")) if final_targets else tr1
+    except (TypeError, ValueError, OverflowError, IndexError, AttributeError):
+        return {"eligible": False, "reason": "invalid_route"}
+    if (not all(math.isfinite(v) and v > 0 for v in (anchor, tr1, final_price))
+            or min((tr1-anchor)*direction, (final_price-anchor)*direction) <= 0):
+        return {"eligible": False, "reason": "invalid_route"}
+    route_atr = abs(tr1-anchor)/av
     final_route_atr = abs(final_price-anchor)/av
+    if not all(math.isfinite(v) for v in (route_atr, final_route_atr)):
+        return {"eligible": False, "reason": "invalid_route"}
     source_disp = None
     m_disp = re.search(r"Размер тела:\s*([0-9]+(?:[.,][0-9]+)?)\s*ATR", source_text or "", re.I)
     if m_disp:
@@ -497,6 +506,8 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
 
     recent = h1[-8:]
     body_ratios = sorted(abs(float(b.close) - float(b.open)) / av for b in recent) if recent else []
+    if not all(math.isfinite(v) for v in body_ratios):
+        return {"eligible": False, "reason": "invalid_h1_prices"}
     median_body_atr = body_ratios[len(body_ratios)//2] if body_ratios else 0.0
     if len(recent) >= 2:
         path = sum(abs(float(recent[i].close) - float(recent[i-1].close)) for i in range(1, len(recent)))
@@ -505,6 +516,8 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
     else:
         efficiency = 0.0
 
+    if not math.isfinite(efficiency) or not math.isfinite(gap):
+        return {"eligible": False, "reason": "invalid_market_math"}
     min_h1 = int(getattr(cfg, "SIGNAL_MIN_REMAINING_H1", 3))
     min_route = float(getattr(cfg, "SIGNAL_MIN_ROUTE_ATR", .75))
     min_body = float(getattr(cfg, "SIGNAL_MIN_MEDIAN_H1_BODY_ATR", .18))

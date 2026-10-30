@@ -7,19 +7,15 @@ forms a persistent cluster.  Diagnostic only; never changes live trading.
 from __future__ import annotations
 import statistics
 import config as cfg
+from mathematical_input_safety import safe_clip, safe_pct, valid_percentages, unavailable
 
 
 def _clip(x, lo=0.0, hi=1.0):
-    return max(lo, min(hi, float(x)))
+    return safe_clip(x, lo, hi)
 
 
 def _pct(d, key, default=0.0):
-    if not isinstance(d, dict):
-        return default
-    try:
-        return _clip(float(d.get(key, default) or 0.0) / 100.0)
-    except (TypeError, ValueError):
-        return default
+    return safe_pct(d, key, default)
 
 
 def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict|None,
@@ -29,6 +25,20 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
            support_geometry: dict|None) -> dict:
     if not getattr(cfg, 'LAYER42_DOWNSIDE_TAIL_ENABLED', True):
         return {'layer':42, 'observe_only':True, 'state':'DISABLED', 'trade_effect':False}
+
+    # Missing or invalid upstream coordinates cannot yield a consensus score.
+    if not valid_percentages((
+        (mathematical_core, 'quality_coordinate'),
+        (mathematical_stability, 'stability_score'),
+        (mathematical_confidence, 'mathematical_confidence'),
+        (mathematical_resilience, 'mathematical_resilience'),
+        (information_value, 'information_value'),
+        (mathematical_coherence, 'mathematical_coherence'),
+        (decision_margin, 'decision_margin'),
+        (support_geometry, 'support_geometry'),
+        (uncertainty_budget, 'uncertainty_budget'),
+    )):
+        return unavailable(42, pair)
 
     core = mathematical_core if isinstance(mathematical_core, dict) else {}
     required = (core, information_value or {}, uncertainty_budget or {},
@@ -51,7 +61,7 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
         'resilience': _pct(mathematical_resilience, 'mathematical_resilience'),
         'information': _pct(information_value, 'information_value'),
         'coherence': _pct(mathematical_coherence, 'mathematical_coherence'),
-        'certainty': 1.0 - _pct(uncertainty_budget, 'uncertainty_budget', 1.0),
+        'certainty': 1.0 - _pct(uncertainty_budget, 'uncertainty_budget', 100.0),
         'margin': _pct(decision_margin, 'decision_margin'),
         'geometry': _pct(support_geometry, 'support_geometry'),
     }

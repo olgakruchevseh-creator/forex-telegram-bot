@@ -7,16 +7,15 @@ estimators disagree.  It never changes live trading behaviour.
 from __future__ import annotations
 import math
 import config as cfg
+from mathematical_input_safety import safe_clip, safe_pct, valid_percentages, unavailable
 
 
 def _clip(x, lo=0.0, hi=1.0):
-    return max(lo, min(hi, float(x)))
+    return safe_clip(x, lo, hi)
 
 
 def _pct(d, key, default=0.0):
-    if not isinstance(d, dict): return default
-    try: return _clip(float(d.get(key, default) or 0.0) / 100.0)
-    except (TypeError, ValueError): return default
+    return safe_pct(d, key, default)
 
 
 def _rms_dispersion(values):
@@ -30,6 +29,21 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
            information_value: dict|None) -> dict:
     if not getattr(cfg, 'LAYER26_MATHEMATICAL_COHERENCE_ENABLED', True):
         return {'layer':26,'observe_only':True,'state':'DISABLED','trade_effect':False}
+
+    # Missing or invalid upstream coordinates cannot yield a consensus score.
+    if not valid_percentages((
+        (mathematical_core, 'quality_coordinate'),
+        (mathematical_stability, 'stability_score'),
+        (mathematical_confidence, 'mathematical_confidence'),
+        (mathematical_resilience, 'mathematical_resilience'),
+        (information_value, 'information_value'),
+        (mathematical_core, 'shadow_probability'),
+        (mathematical_confidence, 'smoothed_directional_support'),
+        (mathematical_core, 'reliability'),
+        (information_value, 'information_sufficiency'),
+        (information_value, 'contradiction_index'),
+    )):
+        return unavailable(26, pair)
 
     core=mathematical_core if isinstance(mathematical_core,dict) else {}
     stab=mathematical_stability if isinstance(mathematical_stability,dict) else {}
@@ -47,13 +61,13 @@ def assess(pair: str, mathematical_core: dict|None, mathematical_stability: dict
 
     # Two estimators arrive at directional support differently: Layer 21 uses
     # structural/calibration shrinkage; Layer 23 uses family-effective Beta shrinkage.
-    shadow=_pct(core,'shadow_probability',0.5)
-    posterior=_pct(conf,'smoothed_directional_support',0.5)
+    shadow=_pct(core,'shadow_probability',50.0)
+    posterior=_pct(conf,'smoothed_directional_support',50.0)
     estimator_gap=abs(shadow-posterior)
 
     reliability=_pct(core,'reliability')
     info_suff=_pct(info,'information_sufficiency')
-    contradiction=_pct(info,'contradiction_index',1.0)
+    contradiction=_pct(info,'contradiction_index',100.0)
     data_readiness=0.55*reliability + 0.45*info_suff
 
     max_gap=max(0.05,float(getattr(cfg,'LAYER26_MAX_ESTIMATOR_GAP_PCT',18.0))/100.0)

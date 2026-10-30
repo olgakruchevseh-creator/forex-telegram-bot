@@ -6,6 +6,7 @@ or Telegram output.
 """
 from __future__ import annotations
 import config as cfg
+from mathematical_input_safety import safe_clip, safe_pct
 
 
 def _side(v):
@@ -14,7 +15,8 @@ def _side(v):
     return 1 if v and v > 0 else -1 if v and v < 0 else 0
 
 
-def _clip(x, lo=0.0, hi=1.0): return max(lo, min(hi, float(x)))
+def _clip(x, lo=0.0, hi=1.0):
+    return safe_clip(x, lo, hi)
 
 
 def _tf_weight(tf):
