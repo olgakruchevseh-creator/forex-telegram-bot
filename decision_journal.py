@@ -5,13 +5,14 @@ read-only with respect to trading logic: failures are swallowed by callers and t
 module never sends Telegram messages or changes a scanner verdict.
 """
 from __future__ import annotations
-import hashlib, json, logging, os, re
+import hashlib, json, logging, math, os, re
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import config as cfg
 import market_state
+import evidence_families
 import numerical_parameter_registry
 import pair_character_matrix
 from analysis import closed_candles, atr
@@ -29,36 +30,78 @@ def _path():
  root=os.getenv('STATE_DIR','').strip(); return (Path(root) if root else Path(__file__).resolve().parent)/'decision_journal.jsonl'
 def _now(): return datetime.now(timezone.utc)
 def _local(dt): return dt.astimezone(ZoneInfo(getattr(cfg,'LOCAL_TZ_NAME','Europe/Amsterdam'))).isoformat(timespec='seconds')
+def _score(text, labels):
+ # Only use an explicit numerical score from a labelled source-card line;
+ # explanatory mentions elsewhere must not impersonate measured scores.
+ for label in labels:
+  m=re.search(rf"^\s*[^\w\n]*{re.escape(label)}:\s*(\d{{1,3}})(?:/100|%)?(?!\d)",text or '',re.M|re.I)
+  if m and 0 <= int(m.group(1)) <= 100:
+   return int(m.group(1)),label
+ return None,''
+
 def _num(text,label):
- m=re.search(rf'{re.escape(label)}:\s*(\d{{1,3}})(?:/100|%)?',text or '',re.I); return int(m.group(1)) if m else None
+ return _score(text,[label])[0]
+
 def _price(text, labels):
  for label in labels:
-  m=re.search(rf'{label}[^\d]*(\d+\.\d+)',text or '',re.I)
+  m=re.search(rf"^\s*[^\w\n]*{label}:\s*(\d+(?:\.\d+))",text or '',re.M|re.I)
   if m:
    try:return float(m.group(1))
    except ValueError:pass
  return None
+
+_TARGET_LINE=re.compile(r"^[ \t]*[•*\-]?[ \t]*(TR[123])(?:[ \t]*\([^\n)]*\))?(?:[ \t]*[:：=→][ \t]*|[ \t]+)(\d+(?:[.,]\d+)?)(?![\d.,])",re.I|re.M)
+
 def _targets(text, ctx=None):
+ # Match complete target lines. Never read a 'до TR3 пройден' sentence or
+ # accidentally skip `TR1 (H4): 1.10250` because H4 contains a digit.
  out={}
- for n,p in re.findall(r'\b(TR[123])\b[^\d]*(\d+\.\d+)',text or '',re.I): out[n.upper()]=float(p)
- # Source cards do not always print all Navigator targets. Preserve the route
- # that Signal Context already calculated so replay can measure TR1/TR2/TR3.
+ for n,p in _TARGET_LINE.findall(text or ''):
+  try:
+   price=float(p.replace(',','.'))
+   if math.isfinite(price) and price>0:out[n.upper()]=price
+  except ValueError:pass
  route=(ctx or {}).get('route') or {}
+ if not isinstance(route,dict):route={}
  for i,item in enumerate(route.get('targets') or [],start=1):
   if not isinstance(item,dict): continue
-  # Movement Progress stores the ordered route as {price, tf}, not {name, price}.
-  # These are genuine ranked targets, never fabricate missing TR2/TR3.
   name=str(item.get('name') or f'TR{i}').upper()
   if name in ('TR1','TR2','TR3'):
    try:
     price=float(item.get('price'))
-    if price>0: out.setdefault(name,price)
-   except (TypeError,ValueError): pass
+    if math.isfinite(price) and price>0:
+     if (ctx or {}).get('route_authoritative'):out[name]=price
+     else:out.setdefault(name,price)
+   except (TypeError,ValueError):pass
  return out
 
+def navigator_route_snapshot(text):
+ """Exact targets printed in the matched Navigator companion, for SENT replay.
+
+ The Navigator final route can differ from a module's original route due to
+ Next Pivot. Do not calculate an unrelated fresh route in telemetry.
+ """
+ values=_targets(text)
+ if not values:return {}
+ route={'targets':[{'name':name,'price':values[name]} for name in ('TR1','TR2','TR3') if name in values]}
+ for label,key in (('Путь от старта до TR1 пройден','tr1_progress'),('Общий маршрут до TR1 пройден','progress')):
+  m=re.search(rf"^{re.escape(label)}:\s*(\d+(?:\.\d+)?)%",text or '',re.M|re.I)
+  if m:route[key]=float(m.group(1))
+ return route
+
 def _tf(text):
- m=re.search(r'(?<![A-Z0-9])(W1|D1|H4|H1|M15|M5)(?![A-Z0-9])', text or '', re.I)
- return m.group(1).upper() if m else ''
+ # Prefer the instrument's *event* timeframe over incidental HTF context.
+ for pattern in (
+  r'^\s*(?:[🕯📊]\s*)?Таймфрейм(?:\s+(?:паттерна|сигнала|события|подтверждения))?\s*:\s*(W1|D1|H4|H1|M15|M5)\b',
+  r'^\s*(?:[🕯📊]\s*)?(?:Рабочий TF|TF сигнала|TF паттерна|TF)\s*:\s*(W1|D1|H4|H1|M15|M5)\b',
+  r'^\s*(?:[🕯📊]\s*)?Подтверждение (?:пробоя|реакции)\s*:\s*закрытая\s+(W1|D1|H4|H1|M15|M5)\b',
+  r'^\s*Структура (W1|D1|H4|H1|M15|M5)\s*:',
+ ):
+  m=re.search(pattern,text or '',re.I|re.M)
+  if m:return m.group(1).upper()
+ # If there is no declared TF, an incidental D1/H4 background is NOT an
+ # observed event timeframe. Mark unknown instead of fabricating a category.
+ return ''
 
 def _session(local_dt):
  h=local_dt.hour
@@ -76,12 +119,35 @@ def _freshness(by_tf):
   except (ValueError,TypeError): pass
   out[tf]={'last_closed':raw,'age_min':round(max(0,(now-dt).total_seconds()/60),1) if dt else None,'close':bars[-1].close}
  return out
-def _families(sources):
+def _families(source_cards):
+ # Use the same one-card/one-family classifier that Master employs.
  fam={}
- for src in sources:
-  f=FAMILY.get(src,'other'); fam.setdefault(f,[]).append(src)
- return {'by_family':fam,'independent_family_count':len(fam),'source_count':len(sources),
+ for card in source_cards:
+  try:
+   import signal_context
+   name=card if card in FAMILY else signal_context.source_name(card)
+  except Exception:
+   name='Модуль'
+  family=FAMILY.get(card) or evidence_families.primary_family(card) or FAMILY.get(name,'unclassified')
+  if family=='unclassified':
+   family=f'unclassified:{name}'  # unclassified cards are NOT independent proof
+  fam.setdefault(family,[]).append(name)
+ return {'by_family':fam,'independent_family_count':len([k for k in fam if not k.startswith('unclassified:')]),
+         'source_count':len(source_cards),
          'correlated_source_count':sum(max(0,len(v)-1) for v in fam.values())}
+
+def _master_snapshot(master):
+ if not isinstance(master,dict):return {}
+ out={}
+ for field in ('quality','confidence','senior_n','junior_n'):
+  value=master.get(field)
+  if isinstance(value,(int,float)) and math.isfinite(value):out[field]=value
+ families=master.get('evidence_families')
+ if isinstance(families,(list,tuple,set)):
+  out['evidence_families']=sorted({str(item) for item in families if item})
+  out['independent_family_count']=len(out['evidence_families'])
+ return out
+
 def _observed_h1(by_tf):
  # Stable decision anchor: the last H1 candle that was already closed when the
  # candidate was evaluated. Candle.dt is the H1 opening timestamp; replay uses
@@ -242,13 +308,15 @@ def _calibration_metrics(text, by_tf, direction, ctx):
   'manipulation_projection':_manipulation_snapshot(ctx),
  }
 
-def _base(text,market,strength,status,reason='',allies=None,ctx=None):
+def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None):
  # local import avoids a circular import at module load
  import signal_context
  pair=signal_context.pair_of(text); side=signal_context.side_of(text); source=signal_context.source_name(text)
- sources=[source]+[signal_context.source_name(x) for x in (allies or [])]
- sources=list(dict.fromkeys(sources)); by_tf=(market or {}).get(pair) or {}; direction=1 if side=='LONG' else -1 if side=='SHORT' else 0
+ source_cards=list(dict.fromkeys([text]+list(allies or [])))
+ sources=list(dict.fromkeys(signal_context.source_name(x) for x in source_cards)); by_tf=(market or {}).get(pair) or {}; direction=1 if side=='LONG' else -1 if side=='SHORT' else 0
  now=_now(); local_now=now.astimezone(ZoneInfo(getattr(cfg,'LOCAL_TZ_NAME','Europe/Amsterdam'))); snap={}
+ quality,quality_label=_score(text,['Качество','Качество реакции','Качество пробоя','Сходство фигуры'])
+ probability,probability_label=_score(text,['Вероятность','Уверенность модели','Уверенность чертежа'])
  progress=_observed_progress(ctx)
  obs=_observed_h1(by_tf)
  if pair and direction:
@@ -263,12 +331,13 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
  event_basis=f'{scenario_id}|{status}|{reason}'
  return {'schema':2,'event_id':hashlib.sha256(event_basis.encode()).hexdigest()[:24],'scenario_id':scenario_id,
   'recorded_utc':now.isoformat(timespec='seconds'),'recorded_local':_local(now),'status':status,'reason':reason,
-  'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(sources),
+  'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(source_cards),
+  'master_snapshot':_master_snapshot(master),
   'observed_h1_dt':obs.get('dt') or '','h1_close_price':obs.get('close'),
-  'quality':_num(text,'Качество'),'probability':_num(text,'Вероятность'),'timeframe':_tf(text),'session':_session(local_now),
-  'entry_timing':('late' if str(reason).startswith('late_') else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
+  'quality':quality,'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'session':_session(local_now),
+  'entry_timing':('late' if 'late_' in str(reason) else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
   'residual_potential_pct':(round(max(0.0,100.0-progress),1) if progress is not None else None),
-  'confirmation_price':_price(text,['Подтверждение','Закрытие','close']),
+  'confirmation_price':_price(text,['Цена подтверждения','Цена закрытия','Вход']),
   'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text,ctx),
   'tf_snapshot':_freshness(by_tf),'context_gate':ctx or {},'market_state':snap,
   'character_features':(_character_snapshot(pair,by_tf,strength,ctx) if status=='SENT' and direction else {}),
@@ -278,13 +347,13 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None):
 def record_decision(text,market,strength,status,reason='',allies=None,ctx=None):
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
  _append(_base(text,market,strength,status,reason,allies,ctx))
-def record_sent(text,market,strength=None,allies=None,ctx=None):
+def record_sent(text,market,strength=None,allies=None,ctx=None,master=None):
  """Record delivery while preserving the Signal Context bundle."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
- rec=_base(text,market,strength or {},'SENT','telegram_delivered',allies,ctx)
+ rec=_base(text,market,strength or {},'SENT','telegram_delivered',allies,ctx,master)
  rec['delivery']=True; _append(rec)
 
-def record_stage(text,market,strength,status,allies=None,ctx=None,reason=''):
+def record_stage(text,market,strength,status,allies=None,ctx=None,reason='',master=None):
  """Passive funnel marker; never participates in a trading verdict."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
- _append(_base(text,market,strength or {},status,reason,allies,ctx))
+ _append(_base(text,market,strength or {},status,reason,allies,ctx,master))

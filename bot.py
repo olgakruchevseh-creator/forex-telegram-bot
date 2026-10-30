@@ -1568,6 +1568,11 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     if early.get("allow", True):
                         significant_alerts.append(source_text)
                     else:
+                        try:
+                            decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                                reason="final_pattern_early_entry_" + str(early.get("reason") or "unknown"))
+                        except Exception:
+                            log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                         log.info(
                             "SIGNAL_INTERNAL_ONLY pair=%s side=%s reason=%s age=%s travel=%s",
                             pair, side, early.get("reason"), early.get("impulse_age"),
@@ -1584,6 +1589,11 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if significance.get("eligible", True):
                     significant_alerts.append(source_text)
                 else:
+                    try:
+                        decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                            reason="final_significance_" + str(significance.get("reason") or "unknown"))
+                    except Exception:
+                        log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                     log.info(
                         "SIGNAL_INTERNAL_ONLY pair=%s side=%s reason=%s status=%s h1=%s route_atr=%s body_atr=%s eff=%s",
                         _alert_pair(source_text), _direct_signal_side(source_text),
@@ -1625,12 +1635,27 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             direct_side = bundle.get("side") or _direct_signal_side(source_text)
             if pair and direct_side and not cooldown_ok(state, pair, direct_side, signal_context.source_name(source_text)):
                 log.info("SIGNAL_COOLDOWN_SKIP pair=%s side=%s", pair, direct_side)
+                try:
+                    decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                        bundle.get("allies") or [], bundle.get("ctx") or {}, "final_cooldown")
+                except Exception:
+                    log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                 continue
             if not _master_allows_delivery(pair, direct_side, master_results):
                 log.info("SIGNAL_MASTER_BLOCK pair=%s side=%s reason=no_master_confirmation", pair, direct_side)
+                try:
+                    decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                        bundle.get("allies") or [], bundle.get("ctx") or {}, "final_master_not_confirmed")
+                except Exception:
+                    log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                 continue
             if pair and direct_side and not signal_allowed_by_h4_zigzag(pair, market.get(pair) or {}, direct_side):
                 log.info("SIGNAL_H4_ZIGZAG_BLOCK pair=%s side=%s", pair, direct_side)
+                try:
+                    decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                        bundle.get("allies") or [], bundle.get("ctx") or {}, "final_h4_zigzag")
+                except Exception:
+                    log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                 continue
             # Passive funnel marker after all final delivery gates.
             try:
@@ -1638,6 +1663,8 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source_text, market, strength, "MASTER_CONFIRMED",
                     bundle.get("allies") or [], bundle.get("ctx") or {},
                     "final_delivery_gates_passed",
+                    master=next((item for item in master_results
+                                 if item.get("symbol") == pair and item.get("side") == direct_side), None),
                 )
             except Exception:
                 log.exception("Запись этапа MASTER_CONFIRMED пропущена")
@@ -1671,80 +1698,80 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 state.setdefault("last_setups", {})[f"{pair}:{direct_side}:{signal_context.source_name(source_text).strip().upper()}"] = time.time()
             save_state(state)
             delivered_sources = list(allied_texts)
-            for source_text in delivered_sources:
-                if "↕️ ZIGZAG —" in source_text:
+            for delivered_source_text in delivered_sources:
+                if "↕️ ZIGZAG —" in delivered_source_text:
                     try:
-                        zigzag_scanner.mark_delivered(source_text)
+                        zigzag_scanner.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного ZigZag")
-                if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in source_text:
+                if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in delivered_source_text:
                     try:
-                        disbalance.mark_delivered(source_text)
+                        disbalance.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Disbalance")
-                if "⚖️ BPR — BALANCED PRICE RANGE" in source_text:
+                if "⚖️ BPR — BALANCED PRICE RANGE" in delivered_source_text:
                     try:
-                        bpr.mark_delivered(source_text)
+                        bpr.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного BPR")
-                if "🔄 QUASIMODO — QM" in source_text:
+                if "🔄 QUASIMODO — QM" in delivered_source_text:
                     try:
-                        quasimodo_engine.mark_delivered(source_text)
+                        quasimodo_engine.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Quasimodo")
-                if "🏹🎯 KILLER" in source_text:
+                if "🏹🎯 KILLER" in delivered_source_text:
                     try:
-                        killer_engine.mark_delivered(source_text)
+                        killer_engine.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного KILLER")
-                if "IMBALANCE —" in source_text:
+                if "IMBALANCE —" in delivered_source_text:
                     try:
-                        imbalance.mark_delivered(source_text)
+                        imbalance.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Imbalance/FVG")
                 if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
                     try:
-                        amd_power_of_three.mark_delivered(source_text)
+                        amd_power_of_three.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного AMD")
-                if "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in source_text:
+                if "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in delivered_source_text:
                     try:
-                        weekly_rhythm_context.mark_delivered(source_text)
+                        weekly_rhythm_context.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Ритма недели")
-                if "🕯 CRT — CANDLE RANGE THEORY" in source_text:
+                if "🕯 CRT — CANDLE RANGE THEORY" in delivered_source_text:
                     try:
-                        crt_candle_range.mark_delivered(source_text)
+                        crt_candle_range.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного CRT")
-                if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in source_text:
+                if "📐 РЕАКЦИЯ ОТ СЕТКИ ФИБОНАЧЧИ" in delivered_source_text:
                     try:
-                        fibonacci_grid.mark_delivered(source_text)
+                        fibonacci_grid.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Fibonacci")
-                if "ICT SILVER BULLET" in source_text:
+                if "ICT SILVER BULLET" in delivered_source_text:
                     try:
-                        silver_bullet_ict.mark_delivered(source_text)
+                        silver_bullet_ict.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Silver Bullet")
-                if "🧬 FIB + SMC —" in source_text:
+                if "🧬 FIB + SMC —" in delivered_source_text:
                     try:
-                        fib_smc.mark_delivered(source_text)
+                        fib_smc.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Fib+SMC")
-                if "⛓️ CHAIN ENTRY" in source_text:
+                if "⛓️ CHAIN ENTRY" in delivered_source_text:
                     try:
-                        chain_entries.mark_delivered(source_text)
+                        chain_entries.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Chain Entry")
-                if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in source_text:
+                if "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ" in delivered_source_text:
                     try:
-                        consolidation_zone.mark_delivered(source_text)
+                        consolidation_zone.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленного Consolidation Zone")
-                if "🚀 ВЫХОД ИЗ ФАЗЫ" in source_text or "📦 ФАЗА " in source_text:
+                if "🚀 ВЫХОД ИЗ ФАЗЫ" in delivered_source_text or "📦 ФАЗА " in delivered_source_text:
                     try:
-                        accumulation_distribution.mark_delivered(source_text)
+                        accumulation_distribution.mark_delivered(delivered_source_text)
                     except Exception:
                         log.exception("Фиксация доставленной фазы накопления/распределения")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
@@ -1752,15 +1779,11 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     signal_journal.record_sent(text, market, closed_dt)
                 except Exception:
                     log.exception("Запись отправленного сигнала в журнал")
-            # Silent Decision Journal: delivery fact only, no Telegram output and no veto.
-            try:
-                decision_journal.record_sent(source_text, market, strength, bundle.get("allies") or [], bundle.get("ctx") or {})
-            except Exception:
-                log.exception("Запись Decision Journal пропущена")
+            # Preserve the primary delivered source: ACKs above visit its allies.
+            # Find the exact route Navigator will send; it may replace source
+            # targets with Pivot stages. Snapshot it BEFORE recording SENT.
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
-            # Карточка источника уже прошла Master. Navigator не заменяет её
-            # и не открывает встречную сделку: только маршрут TR1/TR2/TR3.
             key = (pair, direct_side)
             companion = next((
                 (card, navigator_sources[card]) for _p, card in confirmed_alerts
@@ -1772,6 +1795,25 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=source_companion pair=%s", pair)
                     companion = None
+            matching_master = next((item for item in master_results
+                                   if item.get("symbol") == pair and item.get("side") == direct_side), None)
+            # Telemetry must never prevent or veto a successfully delivered trade.
+            try:
+                journal_ctx = dict(bundle.get("ctx") or {})
+                if companion:
+                    route = decision_journal.navigator_route_snapshot(companion[0])
+                    if route:
+                        journal_ctx["route"] = route
+                        journal_ctx["route_authoritative"] = True
+                        if "tr1_progress" in route:
+                            journal_ctx["progress"] = route["tr1_progress"]
+                            journal_ctx["progress_observed"] = True
+                decision_journal.record_sent(
+                    source_text, market, strength, bundle.get("allies") or [],
+                    journal_ctx, master=matching_master,
+                )
+            except Exception:
+                log.exception("Запись Decision Journal пропущена")
             if companion:
                 nav_text, nav_sources = companion
                 # Регистрируем маршрут ДО Telegram: lifecycle не зависит от сетевой

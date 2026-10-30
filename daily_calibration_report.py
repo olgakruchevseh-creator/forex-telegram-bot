@@ -147,6 +147,7 @@ def _report(day):
     target_coverage=Counter(t for r in sent for t in (r.get('targets') or {}) if t in ('TR1','TR2','TR3'))
     residual=[float(r['residual_potential_pct']) for r in sent if r.get('residual_potential_pct') is not None]
     blocks=[r for r in decisions if r.get('status')=='BLOCKED']
+    final_block_count=sum(str(r.get('reason') or '').startswith('final_') for r in blocks)
     useful=wrong=ambiguous=block_pending=0; block_reasons=Counter(); wrong_reasons=Counter()
     for d in blocks:
         block_reasons[d.get('reason') or 'unknown']+=1
@@ -171,18 +172,23 @@ def _report(day):
     cal=defaultdict(lambda:[0,0.0]); qcal=defaultdict(lambda:[0,0.0])
     for d in sent:
         o=outcomes.get(d.get('event_id'))
-        if not o or d.get('probability') is None: continue
-        b=_bucket(d['probability']); cal[b][0]+=1; cal[b][1]+=float(o.get('efficiency_3h') or 0)
+        if not o: continue
+        if d.get('probability') is not None:
+            b=_bucket(d['probability']); cal[b][0]+=1; cal[b][1]+=float(o.get('efficiency_3h') or 0)
+        # Source quality and probability are independent: a module can report
+        # the first but not the second (especially ZigZag/structure sources).
         if d.get('quality') is not None:
             qb=_bucket(d['quality']); qcal[qb][0]+=1; qcal[qb][1]+=float(o.get('efficiency_3h') or 0)
     caltxt=', '.join(f'{k}: n={v[0]}, факт-eff {v[1]/v[0]*100:.0f}%' for k,v in sorted(cal.items())) or '—'
     qcaltxt=', '.join(f'{k}: n={v[0]}, факт-eff {v[1]/v[0]*100:.0f}%' for k,v in sorted(qcal.items())) or '—'
-    master_ranges=_metric_eff(sent,outcomes,lambda d:d.get('quality'),lambda v:_named_bucket(v,(0,78,81,85,101),('<78','78–80','81–84','85+','85+')))
+    master_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('master_snapshot') or {}).get('quality'),lambda v:_named_bucket(v,(0,78,81,85,101),('<78','78–80','81–84','85+','85+')))
     killer_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('killer_score'),lambda v:_named_bucket(v,(0,84,87,91,101),('<84','84–86','87–90','91+','91+')))
     progress_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('progress_pct'),lambda v:_named_bucket(v,(0,20,35,45,101),('0–19%','20–34%','35–44%','45%+','45%+')))
     strength_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('directed_strength_gap'),lambda v:_named_bucket(v,(-99,0,.03,.05,.12,99),('<0','0–0.02','0.03–0.04','0.05–0.11','≥0.12','≥0.12')))
     family_counts=[int(((r.get('confirmation_families') or {}).get('independent_family_count') or 0)) for r in sent]
     source_counts=[int(((r.get('confirmation_families') or {}).get('source_count') or 0)) for r in sent]
+    master_family_counts=[int((r['master_snapshot']).get('independent_family_count') or 0) for r in sent if (r.get('master_snapshot') or {}).get('independent_family_count') is not None]
+    missing_tf=sum(not r.get('timeframe') for r in sent)
     manip=_manipulation_summary(decisions,outcomes)
     manip_levels=manip.get('levels') or {}
     manip_zones=manip.get('zones') or {}
@@ -199,6 +205,7 @@ def _report(day):
       '━━━━━━━━━━━━━━━━━━','📊 DAILY CALIBRATION · OBSERVE_ONLY','━━━━━━━━━━━━━━━━━━',f'Дата: {day} · Europe/Amsterdam','',
       f"Воронка (уникальные решения): CONTEXT_ALLOWED {counts['ALLOWED']} · MASTER_ПОДТВЕРЖДЕНО {counts['MASTER_CONFIRMED']} · SENT {counts['SENT']}",
       f"ЗАБЛОКИРОВАНО: {counts['BLOCKED']} уникальных решений",
+      f'Блокировки по этапам: контекст {len(blocks)-final_block_count} · финальные фильтры {final_block_count}',
       (f"Технические повторные записи от повторных сканов: {len(raw_decisions)-len(decisions)}" if len(raw_decisions)>len(decisions) else "Технические повторные записи: 0"),
       f'Фактический replay SENT: {len(sent_out)} · ещё без полного окна: {pending}',
       f"TR1: {target['TR1']}/{target['TR1_known']} · TR2: {target['TR2']}/{target['TR2_known']} · TR3: {target['TR3']}/{target['TR3_known']}",
@@ -208,16 +215,18 @@ def _report(day):
       f"Наблюдение проекций: ≥1 закрытой H1 {manip.get('eligible',0)}/{manip.get('setups',0)} · ≥8 H1 {manip.get('matured',0)} · без последующей H1 {manip.get('unobserved',0)}",
       f"MFE (до 8 закрытых H1): {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
       f"MFE/MAE (первые 3 H1): {sum(mfe3)/len(mfe3):.2f} / {sum(mae3)/len(mae3):.2f} ATR · n={len(mfe3)}" if mfe3 else 'MFE/MAE (первые 3 H1): —',
-      f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']} · residual avg {sum(residual)/len(residual):.0f}%" if residual else f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']}",'',
+      f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']} · неизвестно {sent_timing['unknown']}" + (f" · residual avg {sum(residual)/len(residual):.0f}%" if residual else ''),'',
       group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Режим',by_reg),group_line('Сессии',by_session),'',
       f'Блокировки (уникальные, 3H excursion proxy): полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
       f'Ошибочные блокировки (3H proxy) по причинам: {_top(wrong_reasons)}',
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
       f'Master ranges: {master_ranges}',f'KILLER ranges: {killer_ranges}',
       f'Progress ranges: {progress_ranges}',f'Strength ranges: {strength_ranges}',
-      (f'Подтверждения: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f}' if source_counts else 'Подтверждения: —'),
+      (f'Подтверждения модулей: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f}' if source_counts else 'Подтверждения модулей: —'),
+      (f'Семейства Master: avg {sum(master_family_counts)/len(master_family_counts):.1f} · снимков {len(master_family_counts)}/{len(sent)}' if master_family_counts else f'Семейства Master: нет снимков · 0/{len(sent)}'),
+      f'Таймфрейм события неизвестен: {missing_tf}/{len(sent)}',
       f"Контроль: {'; '.join(problems)}",'',
-      'Коррелированные подтверждения учитываются по семействам; число источников не трактуется как число независимых голосов.',
+      'Подтверждения модулей и семейства Master — разные измерения; неизвестный TF не приравнивается к D1/H4.',
       'OBSERVE_ONLY: отчёт ничего автоматически не меняет в торговой логике, порогах, ЛОНГ/ШОРТ или Navigator.'
     ])
 

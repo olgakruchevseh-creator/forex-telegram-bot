@@ -55,10 +55,20 @@ def _records(limit=4000):
     return out
 
 def _entry(rec,bars):
+    # Old journals sometimes interpreted a date from 'Закрытие' as a price.
+    # Never let an implausible date/level distort replay MFE and MAE.
+    try:
+        reference=float(rec.get('h1_close_price') or 0)
+    except (TypeError,ValueError):
+        reference=0.0
+    if reference<=0 and bars:
+        reference=float(bars[0].open or 0)
     for key in ('confirmation_price','h1_close_price','trigger_price'):
         try:
             v=float(rec.get(key) or 0)
-            if v>0:return v
+            if not math.isfinite(v) or v<=0:continue
+            if reference>0 and abs(v-reference)/reference>0.05:continue
+            return v
         except (TypeError,ValueError):pass
     return bars[0].open if bars else None
 
