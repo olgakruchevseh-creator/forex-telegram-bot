@@ -1038,6 +1038,59 @@ def signal_allowed_by_h4_zigzag(symbol: str, by_tf: dict, side: str) -> bool:
     return not h4_side or h4_side == wanted
 
 
+def _prepare_context_fail_closed(alerts: list[str], market: dict, strength: dict):
+    """Keep the ordinary all-pairs path; isolate failures by PAIR only.
+
+    A broken context for EUR/USD must not suppress GBP/USD.  Both directions
+    for the same pair remain together so the opposite-side arbitration is not
+    bypassed.  A failed group is never returned as a deliverable trade.
+    """
+    try:
+        return signal_context.prepare(alerts, market, strength)
+    except Exception as error:
+        log.exception("SIGNAL_CONTEXT_FAILED stage=all_pairs retry=per_pair_fail_closed")
+        groups = {}
+        for card in alerts:
+            # Unidentified cards are kept in one fail-closed group; this is
+            # specifically not a way around context validation.
+            key = _alert_pair(card) or "__unidentified__"
+            groups.setdefault(key, []).append(card)
+        bundles, dropped = [], []
+        for pair, group in groups.items():
+            if pair == "__unidentified__":
+                failure = error
+            else:
+                try:
+                    accepted, rejected = signal_context.prepare(group, market, strength)
+                except Exception as pair_error:
+                    failure = pair_error
+                    log.exception("SIGNAL_CONTEXT_FAILED stage=pair pair=%s", pair)
+                else:
+                    bundles.extend(accepted)
+                    dropped.extend(rejected)
+                    continue
+            for card in group:
+                dropped.append(("context_error", card))
+                try:
+                    decision_journal.record_stage(
+                        card, market, strength, "BLOCKED", [],
+                        {"context_error_type": type(failure).__name__,
+                         "context_error_stage": "pair_isolation"},
+                        "context_error"
+                    )
+                except Exception:
+                    log.exception("SIGNAL_GATE_AUDIT_SKIPPED pair=%s", pair)
+        return bundles, dropped
+
+
+def _master_result_for(pair: str, side: str, master_results: list[dict]):
+    """Only a real, matching Master result counts as MASTER_CONFIRMED."""
+    if not pair or side not in ("LONG", "SHORT"):
+        return None
+    return next((r for r in master_results
+                 if r.get("symbol") == pair and r.get("side") == side), None)
+
+
 def _master_allows_delivery(pair: str, side: str, master_results: list[dict]) -> bool:
     """Служебные карточки без стороны проходят. Направленный вход — только через Master."""
     if not pair or not side:
@@ -1643,17 +1696,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                         significance.get("efficiency"),
                     )
             delivery_alerts = significant_alerts
-        try:
-            bundles, dropped_facts = signal_context.prepare(delivery_alerts, market, strength)
-        except Exception:
-            log.exception("SIGNAL_CONTEXT_FAILED: new entries are blocked, not bypassed")
-            for t in delivery_alerts:
-                try:
-                    decision_journal.record_stage(t, market, strength, "BLOCKED", [], {}, "context_error")
-                except Exception:
-                    log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
-            bundles = []  # Fail-closed for trade entries; keep rest of scan alive.
-            dropped_facts = []
+        bundles, dropped_facts = _prepare_context_fail_closed(delivery_alerts, market, strength)
         for reason, raw in dropped_facts:
             log.info(
                 "SIGNAL_CONTEXT_INTERNAL pair=%s side=%s reason=%s source=%s",
@@ -1685,6 +1728,17 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                 continue
+            matching_master = _master_result_for(pair, direct_side, master_results)
+            # A directional trade with an unparseable side must not silently
+            # become a "neutral" card exempt from Master and ZigZag.
+            if pair and not direct_side and re.search(r"(?im)^[^\w\n]*Направление(?:\s+\w+)?:", source_text):
+                log.error("SIGNAL_UNRECOGNIZED_SIDE pair=%s source=%s", pair, signal_context.source_name(source_text))
+                try:
+                    decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                        bundle.get("allies") or [], bundle.get("ctx") or {}, "final_unrecognized_direction")
+                except Exception:
+                    log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
+                continue
             if not _master_allows_delivery(pair, direct_side, master_results):
                 log.info("SIGNAL_MASTER_BLOCK pair=%s side=%s reason=no_master_confirmation", pair, direct_side)
                 try:
@@ -1701,14 +1755,15 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                 continue
-            # Passive funnel marker after all final delivery gates.
+            # Do not call this MASTER_CONFIRMED unless the Master actually
+            # produced a matching verdict (e.g. it may be disabled in config).
             try:
                 decision_journal.record_stage(
-                    source_text, market, strength, "MASTER_CONFIRMED",
+                    source_text, market, strength,
+                    "MASTER_CONFIRMED" if matching_master is not None else "DELIVERY_GATES_PASSED",
                     bundle.get("allies") or [], bundle.get("ctx") or {},
                     "final_delivery_gates_passed",
-                    master=next((item for item in master_results
-                                 if item.get("symbol") == pair and item.get("side") == direct_side), None),
+                    master=matching_master,
                 )
             except Exception:
                 log.exception("Запись этапа MASTER_CONFIRMED пропущена")
@@ -1839,8 +1894,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=source_companion pair=%s", pair)
                     companion = None
-            matching_master = next((item for item in master_results
-                                   if item.get("symbol") == pair and item.get("side") == direct_side), None)
+            matching_master = _master_result_for(pair, direct_side, master_results)
             # Telemetry must never prevent or veto a successfully delivered trade.
             try:
                 journal_ctx = dict(bundle.get("ctx") or {})

@@ -1,0 +1,6 @@
+bot.py
+decision_journal.py
+daily_calibration_report.py
+test_forex_20261031_context_and_replay.py
+FOREX_CONTEXT_REPLAY_AUDIT_FIX_2026-10-31_RU.md
+FOREX_CHANGED_FILES_2026-10-31.txt

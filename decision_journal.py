@@ -92,8 +92,8 @@ def navigator_route_snapshot(text):
 def _tf(text):
  # Prefer the instrument's *event* timeframe over incidental HTF context.
  for pattern in (
-  r'^\s*(?:[🕯📊]\s*)?Таймфрейм(?:\s+(?:паттерна|сигнала|события|подтверждения))?\s*:\s*(W1|D1|H4|H1|M15|M5)\b',
-  r'^\s*(?:[🕯📊]\s*)?(?:Рабочий TF|TF сигнала|TF паттерна|TF)\s*:\s*(W1|D1|H4|H1|M15|M5)\b',
+  r'^\s*[^\w\n]*Таймфрейм(?:\s+(?:паттерна|сигнала|события|подтверждения|импульса|формирования))?\s*:\s*(W1|D1|H4|H1|M15|M5)\b',
+  r'^\s*[^\w\n]*(?:Рабочий TF|TF сигнала|TF паттерна|TF)\s*:\s*(W1|D1|H4|H1|M15|M5)\b(?!\s*/)',
   r'^\s*(?:[🕯📊]\s*)?Подтверждение (?:пробоя|реакции)\s*:\s*закрытая\s+(W1|D1|H4|H1|M15|M5)\b',
   r'^\s*Структура (W1|D1|H4|H1|M15|M5)\s*:',
  ):
@@ -101,6 +101,12 @@ def _tf(text):
   if m:return m.group(1).upper()
  # If there is no declared TF, an incidental D1/H4 background is NOT an
  # observed event timeframe. Mark unknown instead of fabricating a category.
+ return ''
+
+def _confirmation_tf(text):
+ # Decision close is NOT necessarily the event TF (M15 pattern + H1 close).
+ if re.search(r'(?im)^\s*[^\w\n]*(?:Подтверждено|Подтверждение|На закрытии|Закрытие|Подтверждающее закрытие)[^\n]{0,55}\bH1\b', text or ''):
+  return 'H1'
  return ''
 
 def _session(local_dt):
@@ -133,6 +139,7 @@ def _families(source_cards):
    family=f'unclassified:{name}'  # unclassified cards are NOT independent proof
   fam.setdefault(family,[]).append(name)
  return {'by_family':fam,'independent_family_count':len([k for k in fam if not k.startswith('unclassified:')]),
+         'unclassified_source_count':sum(len(v) for k,v in fam.items() if k.startswith('unclassified:')),
          'source_count':len(source_cards),
          'correlated_source_count':sum(max(0,len(v)-1) for v in fam.values())}
 
@@ -248,8 +255,21 @@ def _observed_progress(ctx):
  ctx=ctx or {}
  if ctx.get('progress_observed',True) is False:return None
  v=ctx.get('progress')
- try:return float(v) if v is not None else None
- except (TypeError,ValueError):return None
+ try:
+  measured=float(v) if v is not None else None
+  return measured if measured is not None and math.isfinite(measured) and measured >= 0 else None
+ except (TypeError,ValueError,OverflowError):return None
+
+def _json_safe(value):
+ # OBSERVE_ONLY rows must be strict JSON. Never serialize NaN/Inf as phantom
+ # coordinates; leave the corresponding diagnostic unknown instead.
+ if isinstance(value,float):
+  return value if math.isfinite(value) else None
+ if isinstance(value,dict):
+  return {str(k):_json_safe(v) for k,v in value.items()}
+ if isinstance(value,(list,tuple)):
+  return [_json_safe(v) for v in value]
+ return value
 
 def _append(rec):
  try:
@@ -258,7 +278,7 @@ def _append(rec):
   eid=rec.get('event_id') if isinstance(rec,dict) else None
   if eid and eid in _SEEN_EVENT_IDS:
    return False
-  with p.open('a',encoding='utf-8') as f: f.write(json.dumps(rec,ensure_ascii=False,separators=(',',':'))+'\n')
+  with p.open('a',encoding='utf-8') as f: f.write(json.dumps(_json_safe(rec),ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n')
   if eid:_SEEN_EVENT_IDS.add(eid)
   return True
  except Exception:
@@ -334,11 +354,13 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(source_cards),
   'master_snapshot':_master_snapshot(master),
   'observed_h1_dt':obs.get('dt') or '','h1_close_price':obs.get('close'),
-  'quality':quality,'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'session':_session(local_now),
-  'entry_timing':('late' if 'late_' in str(reason) else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
+  'quality':quality,'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'confirmation_tf':_confirmation_tf(text),'session':_session(local_now),
+  'entry_timing':('late' if 'late_' in str(reason) or (progress is not None and progress > float(getattr(cfg,'SIGNAL_INITIAL_MAX_PROGRESS_PCT',35)) and (ctx or {}).get('mode') != 'PULLBACK') else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
   'residual_potential_pct':(round(max(0.0,100.0-progress),1) if progress is not None else None),
   'confirmation_price':_price(text,['Цена подтверждения','Цена закрытия','Вход']),
   'trigger_price':_price(text,['Ключевой уровень','neckline','Уровень']), 'targets':_targets(text,ctx),
+  'target_source':('navigator_snapshot' if (ctx or {}).get('route_authoritative') and _targets(text,ctx) else
+                   'source_or_context' if _targets(text,ctx) else 'not_published'),
   'tf_snapshot':_freshness(by_tf),'context_gate':ctx or {},'market_state':snap,
   'character_features':(_character_snapshot(pair,by_tf,strength,ctx) if status=='SENT' and direction else {}),
   'calibration':_calibration_metrics(text,by_tf,direction,ctx) if getattr(cfg,'NUMERICAL_CALIBRATION_ENABLED',True) else {},

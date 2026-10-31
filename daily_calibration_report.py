@@ -116,7 +116,47 @@ def _manipulation_summary(decisions, outcomes=None):
             levels[n]['reaction_ge_0_25_leg']+=int(bool(r.get('reaction_ge_0_25_leg')))
     return {'setups':len(latest),'levels':levels,'zones':dict(zones),'eligible':eligible,'unobserved':unobserved,'matured':matured}
 
+def _previous_cohorts(decisions, outcomes, day, lookback_days=10):
+    """Show mature outcomes by original signal day, not by replay-write day.
+
+    Especially Friday entries usually mature after the weekend.  They were
+    invisible forever in the one-shot, same-day report without this section.
+    """
+    from datetime import date
+    try:
+        today=date.fromisoformat(day)
+    except ValueError:
+        return 'Дозревшие SENT предыдущих дней: —'
+    grouped=defaultdict(list)
+    for rec in decisions:
+        if rec.get('status') != 'SENT':
+            continue
+        created=_local_date(rec.get('recorded_utc'))
+        if not created or created>=day:
+            continue
+        try:
+            age=(today-date.fromisoformat(created)).days
+        except ValueError:
+            continue
+        if 1<=age<=lookback_days:
+            grouped[created].append(rec)
+    if not grouped:
+        return 'Дозревшие SENT предыдущих дней: —'
+    lines=[]
+    for created, rows in sorted(grouped.items(), reverse=True):
+        mature=[outcomes[r.get('event_id')] for r in rows if r.get('event_id') in outcomes]
+        hits=Counter()
+        for o in mature:
+            for name, hit in (o.get('targets_hit_8h') or {}).items():
+                if name in ('TR1','TR2','TR3'):
+                    hits[name+'_known']+=1
+                    hits[name]+=int(bool(hit))
+        lines.append(f"{created}: replay {len(mature)}/{len(rows)} · " +
+            ' · '.join(f"{t} {hits[t]}/{hits[t+'_known']}" for t in ('TR1','TR2','TR3')))
+    return 'Дозревшие SENT предыдущих дней (окно 10 дней, дата исходного сигнала): ' + ' ; '.join(lines)
+
 def _report(day):
+    all_recent_decisions=_dedupe(_read_jsonl(_journal()))
     raw_decisions=[r for r in _read_jsonl(_journal()) if _local_date(r.get('recorded_utc'))==day]
     decisions=_dedupe(raw_decisions)
     outcomes_all=_read_jsonl(_replay())
@@ -187,6 +227,7 @@ def _report(day):
     strength_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('directed_strength_gap'),lambda v:_named_bucket(v,(-99,0,.03,.05,.12,99),('<0','0–0.02','0.03–0.04','0.05–0.11','≥0.12','≥0.12')))
     family_counts=[int(((r.get('confirmation_families') or {}).get('independent_family_count') or 0)) for r in sent]
     source_counts=[int(((r.get('confirmation_families') or {}).get('source_count') or 0)) for r in sent]
+    unclassified_counts=[int(((r.get('confirmation_families') or {}).get('unclassified_source_count') or 0)) for r in sent]
     master_family_counts=[int((r['master_snapshot']).get('independent_family_count') or 0) for r in sent if (r.get('master_snapshot') or {}).get('independent_family_count') is not None]
     missing_tf=sum(not r.get('timeframe') for r in sent)
     manip=_manipulation_summary(decisions,outcomes)
@@ -208,6 +249,7 @@ def _report(day):
       f'Блокировки по этапам: контекст {len(blocks)-final_block_count} · финальные фильтры {final_block_count}',
       (f"Технические повторные записи от повторных сканов: {len(raw_decisions)-len(decisions)}" if len(raw_decisions)>len(decisions) else "Технические повторные записи: 0"),
       f'Фактический replay SENT: {len(sent_out)} · ещё без полного окна: {pending}',
+      _previous_cohorts(all_recent_decisions, outcomes, day),
       f"TR1: {target['TR1']}/{target['TR1_known']} · TR2: {target['TR2']}/{target['TR2_known']} · TR3: {target['TR3']}/{target['TR3_known']}",
       f"Покрытие целей в журнале SENT: TR1 {target_coverage['TR1']}/{len(sent)} · TR2 {target_coverage['TR2']}/{len(sent)} · TR3 {target_coverage['TR3']}/{len(sent)} (0/0 выше = нет проверенных данных)",
       f"Манипуляционная проекция: {manip.get('setups',0)} сетапов · касания -1/-1.5/-2/-2.25/-2.5: {_mh('-1')}/{_mh('-1.5')}/{_mh('-2')}/{_mh('-2.25')}/{_mh('-2.5')}",
@@ -222,8 +264,9 @@ def _report(day):
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
       f'Master ranges: {master_ranges}',f'KILLER ranges: {killer_ranges}',
       f'Progress ranges: {progress_ranges}',f'Strength ranges: {strength_ranges}',
-      (f'Подтверждения модулей: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f}' if source_counts else 'Подтверждения модулей: —'),
+      (f'Подтверждения модулей: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f} · неклассифицированных {sum(unclassified_counts)}' if source_counts else 'Подтверждения модулей: —'),
       (f'Семейства Master: avg {sum(master_family_counts)/len(master_family_counts):.1f} · снимков {len(master_family_counts)}/{len(sent)}' if master_family_counts else f'Семейства Master: нет снимков · 0/{len(sent)}'),
+      f'Снимки целей: Navigator {sum(r.get("target_source")=="navigator_snapshot" for r in sent)}/{len(sent)} · источник/контекст {sum(r.get("target_source")=="source_or_context" for r in sent)}/{len(sent)} · неопубликованы/старый формат {sum(r.get("target_source") not in ("navigator_snapshot","source_or_context") for r in sent)}/{len(sent)}',
       f'Таймфрейм события неизвестен: {missing_tf}/{len(sent)}',
       f"Контроль: {'; '.join(problems)}",'',
       'Подтверждения модулей и семейства Master — разные измерения; неизвестный TF не приравнивается к D1/H4.',
