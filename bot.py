@@ -1157,6 +1157,14 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
     for part in briefing.split_telegram(localize_telegram(head)):
         await send(app, int(chat_id), part); sent += 1
     for symbol, pair_text in pair_sections:
+        # Read-only historical H1 column; included in briefing, not the trade gate.
+        try:
+            from livermore_observer import snapshot as livermore_snapshot, compact_ru as livermore_compact
+            livermore = livermore_snapshot(symbol, (market or {}).get(symbol) or {})
+            if livermore.get("available"):
+                pair_text += "\n" + livermore_compact(livermore) + " (OBSERVE_ONLY)"
+        except Exception:
+            log.exception("LIVERMORE_FOREX_BRIEFING_FAILED symbol=%s", symbol)
         pair_text = localize_telegram(pair_text)
         card = None
         if patterns is not None and getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
@@ -1267,6 +1275,12 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         market = fetch_market(env("TWELVE_DATA_API_KEY"))
+        # Closed-H1 Livermore Market Key: isolated OBSERVE_ONLY. Never veto signals.
+        try:
+            from livermore_observer import observe_market
+            observe_market(market)
+        except Exception:
+            log.exception("LIVERMORE_FOREX_OBSERVE_FAILED")
         # Passive replay/calibration observes matured journal decisions only.
         # It cannot veto, rerank or modify any live signal.
         try:
