@@ -281,6 +281,8 @@ BRIEFING_ENABLED = True
 # Часовой брифинг выключен: одна простыня на открытие Азии / Европы / Америки.
 BRIEFING_SESSION_ONLY = True
 BRIEFING_SESSION_CATCH_UP = True
+# Small pause only between briefing messages; does not slow market scanning.
+BRIEFING_SEND_PAUSE_SEC = 0.6
 NEWS_WARN_MINUTES = 60
 NEWS_CACHE_MAX_AGE_HOURS = 168
 # Forex Factory updates the weekly file about hourly and rate-limits

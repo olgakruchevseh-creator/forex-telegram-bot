@@ -33,6 +33,7 @@ from analysis import (
     rank_currencies,
 )
 import briefing
+import briefing_delivery
 import news as newsmod
 import levels
 import zigzag_scanner
@@ -102,6 +103,9 @@ TD_URL = "https://api.twelvedata.com/time_series"
 CACHE: dict[tuple[str, str], dict] = {}
 SENT_H1: set[str] = set()
 LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
+# Serialize complete session briefing deliveries within each chat.
+# Market scans and trade alerts do NOT acquire this lock.
+_BRIEFING_SEND_LOCKS: dict[int, asyncio.Lock] = {}
 
 
 def env(name: str) -> str:
@@ -567,7 +571,6 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _remember_effective_chat(update)
-    await update.message.reply_text("Собираю брифинг сессии…")
     try:
         api_key = env("TWELVE_DATA_API_KEY")
         market = fetch_market(api_key)
@@ -594,15 +597,19 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             upcoming_events = briefing.events_until_next_briefing(all_events)
         except Exception:
             log.exception("Новости для /briefing")
-        try:
-            text = briefing.build_briefing_text(market, strength, rank, dxy, events, upcoming_events)
-        except Exception:
-            log.exception("Сборка текста /briefing")
-            text = format_strength(rank, last_closed_h1_dt(h1_series(market)))
-            text += "\n\nПолная доска пар сейчас недоступна."
-        await _send_briefing_sequence(
-            context.application, int(update.effective_chat.id), market, strength, rank, dxy, events, upcoming_events
-        )
+        if (getattr(update.message, "text", "") or "").strip().startswith("/briefing_full"):
+            # Full-length text is calculated only on explicit request.
+            try:
+                text = briefing.build_briefing_text(market, strength, rank, dxy, events, upcoming_events)
+            except Exception:
+                log.exception("Сборка текста /briefing_full")
+                text = format_strength(rank, last_closed_h1_dt(h1_series(market)))
+                text += "\n\nПолная доска пар сейчас недоступна."
+            await _send_parts(context.application, int(update.effective_chat.id), text)
+        else:
+            await _send_briefing_sequence(
+                context.application, int(update.effective_chat.id), market, strength, rank, dxy, events, upcoming_events
+            )
     except Exception:
         log.exception("Ошибка /briefing")
         await update.message.reply_text(
@@ -1145,19 +1152,18 @@ def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pa
 
 
 async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, strength: dict, rank: list, dxy, events: list, upcoming_events: list) -> int:
-    """Брифинг: общий контекст → картинка пары → описание пары → ... → итог.
+    """Build the whole briefing first; deliver one overview and one card per pair.
 
-    Если HTF-фигуры для пары нет, описание всё равно отправляется на своём месте.
-    Обычный lifecycle pattern alerts не затрагивается.
+    All cards are prepared from a single data snapshot before any Telegram send.
+    Send pacing affects briefing *delivery only*, never quote polling or H1 gates.
     """
     head, pair_sections, tail = briefing.build_briefing_sections(
         market, strength, rank, dxy, events, upcoming_events
     )
-    sent = 0
-    for part in briefing.split_telegram(localize_telegram(head)):
-        await send(app, int(chat_id), part); sent += 1
+    overview = briefing_delivery.overview_leader_first(head, tail)
+    outgoing = [("text", part) for part in briefing.split_telegram(localize_telegram(overview))]
+
     for symbol, pair_text in pair_sections:
-        # Read-only historical H1 column; included in briefing, not the trade gate.
         try:
             from livermore_observer import snapshot as livermore_snapshot, compact_ru as livermore_compact
             livermore = livermore_snapshot(symbol, (market or {}).get(symbol) or {})
@@ -1172,28 +1178,42 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
                 card = patterns.briefing_htf_card(symbol, (market or {}).get(symbol) or {})
             except Exception:
                 log.exception("PATTERN_BRIEFING_IMAGE_FAILED pair=%s", symbol)
-        if card:
+        if card and card.get("image") is not None:
             try:
                 card["image"].seek(0)
-                # Если аналитика пары помещается в caption, она идёт прямо под картинкой
-                # в одном Telegram-сообщении. Иначе фото остаётся визуальным разделителем,
-                # а полный блок отправляется непосредственно следующим сообщением.
-                visual = localize_telegram(card["caption"])
-                combined = f"{visual}\n\n{pair_text}"
-                if len(combined) <= 1024:
-                    await app.bot.send_photo(chat_id=int(chat_id), photo=card["image"], caption=combined)
-                    sent += 1
-                    pair_text = ""
-                else:
-                    await app.bot.send_photo(chat_id=int(chat_id), photo=card["image"], caption=visual)
-                    sent += 1
+                caption = briefing_delivery.compact_pair_caption(
+                    pair_text, localize_telegram(card.get("caption") or "")
+                )
+                outgoing.append(("photo", card["image"], caption, symbol))
+                continue
             except Exception:
-                log.exception("PATTERN_BRIEFING_IMAGE_SEND_FAILED pair=%s", symbol)
-        if pair_text:
-            for part in briefing.split_telegram(pair_text):
-                await send(app, int(chat_id), part); sent += 1
-    for part in briefing.split_telegram(localize_telegram(tail)):
-        await send(app, int(chat_id), part); sent += 1
+                log.exception("PATTERN_BRIEFING_CAPTION_FAILED pair=%s", symbol)
+        # No image: one compact text card, not a disconnected photo + long essay.
+        outgoing.append(("text", briefing_delivery.compact_pair_caption(pair_text)))
+
+    try:
+        pause = max(0.0, min(2.0, float(getattr(cfg, "BRIEFING_SEND_PAUSE_SEC", 0.6))))
+    except (TypeError, ValueError):
+        pause = 0.6
+    sent = 0
+    # Overlapping /briefing and session jobs must not interleave their cards.
+    lock = _BRIEFING_SEND_LOCKS.setdefault(int(chat_id), asyncio.Lock())
+    async with lock:
+        for item in outgoing:
+            if sent and pause:
+                await asyncio.sleep(pause)
+            if item[0] == "photo":
+                _, photo, caption, symbol = item
+                try:
+                    await app.bot.send_photo(chat_id=int(chat_id), photo=photo, caption=caption)
+                    sent += 1
+                except Exception:
+                    log.exception("PATTERN_BRIEFING_IMAGE_SEND_FAILED pair=%s; fallback to text", symbol)
+                    await send(app, int(chat_id), caption)
+                    sent += 1
+            else:
+                await send(app, int(chat_id), item[1]); sent += 1
+    log.info("BRIEFING_DELIVERY_PACKAGED messages=%s pairs=%s pause=%.2f", sent, len(pair_sections), pause)
     return sent
 
 
@@ -2122,6 +2142,7 @@ def main() -> None:
     app.add_handler(CommandHandler("now", cmd_now))
     app.add_handler(CommandHandler("pair", cmd_pair))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
+    app.add_handler(CommandHandler("briefing_full", cmd_briefing))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)
     log.info("Бот запущен.")

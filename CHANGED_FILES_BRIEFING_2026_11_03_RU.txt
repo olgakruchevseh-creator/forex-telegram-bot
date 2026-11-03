@@ -1,0 +1,6 @@
+bot.py
+config.py
+briefing_delivery.py
+test_briefing_delivery_v2.py
+FOREX_BRIEFING_PATCH_FOR_LATEST_ZIP_RU.md
+CHANGED_FILES_BRIEFING_2026_11_03_RU.txt
