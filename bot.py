@@ -70,6 +70,8 @@ import replay_calibration
 import robustness_audit
 import daily_calibration_report
 import signal_context
+import signal_contract
+import signal_release_guard
 import session_projection_reports
 from telegram_locale import localize_telegram
 from telegram_presentation import format_trade_card
@@ -849,7 +851,7 @@ def _source_image_for(text: str, source_text: str):
             return order_block.image_for_alert(source_text)
         if "🔄 BREAKER BLOCK ПОДТВЕРЖДЁН" in text:
             return breaker_block.image_for_alert(source_text)
-        if "🥈 ICT SILVER BULLET —" in text:
+        if "ICT SILVER BULLET" in text:
             return silver_bullet_ict.image_for_alert(source_text)
         if "🏦 SMART MONEY 62-26" in text:
             return smart_money_62_26.image_for_alert(source_text)
@@ -936,13 +938,13 @@ def _mark_event_delivered(state: dict, event_id: str) -> None:
         state["delivered_event_ids"] = dict(keep)
 
 
-def _enqueue_source(state: dict, text: str) -> None:
+def _enqueue_source(state: dict, text: str, source: str = "") -> None:
     """Durable source-card outbox: persist before Telegram I/O, remove only after success."""
     if not text:
         return
     outbox = state.setdefault("source_outbox", [])
     if not any(item.get("text") == text for item in outbox if isinstance(item, dict)):
-        outbox.append({"text": text, "saved_at": time.time()})
+        outbox.append({"text": text, "source": source, "saved_at": time.time()})
     state["source_outbox"] = outbox[-60:]
 
 
@@ -952,20 +954,12 @@ def _ack_source(state: dict, text: str) -> None:
 
 
 async def _flush_source_outbox(app: Application, chat_id: int, state: dict) -> None:
-    """Retry source cards lost to a transient Telegram/Railway send failure."""
-    outbox = state.setdefault("source_outbox", [])
-    while outbox:
-        item = outbox[0]
-        text = item.get("text", "") if isinstance(item, dict) else ""
-        if not text:
-            outbox.pop(0); continue
-        try:
-            image = _source_image_for(text, text)
-            await _deliver_trade_card(app, chat_id, text, image)
-            outbox.pop(0); save_state(state)
-        except Exception:
-            log.exception("Повторная доставка исходной торговой карточки")
-            save_state(state); break
+    """Legacy API: intentionally never sends a trade without fresh re-arbitration.
+
+    Live retries are merged into the next market scan BEFORE Master, H1 and
+    trap gates. Calling this old helper directly is always fail-closed.
+    """
+    log.warning("UNIFIED_OUTBOX_DIRECT_FLUSH_BLOCKED")
 
 
 def _enqueue_navigator(state: dict, text: str, event_id: str = "") -> None:
@@ -982,8 +976,8 @@ def _enqueue_navigator(state: dict, text: str, event_id: str = "") -> None:
     state["navigator_outbox"] = outbox[-30:]
 
 
-async def _flush_navigator_outbox(app: Application, chat_id: int, state: dict) -> None:
-    """Доставляет Навигатор и оставляет неотправленное для следующего скана."""
+async def _flush_navigator_outbox(app: Application, chat_id: int, state: dict, market: dict | None = None) -> None:
+    """Deliver only fresh Navigator companions; never revive stale entries."""
     outbox = state.setdefault("navigator_outbox", [])
     while outbox:
         item = outbox[0]
@@ -991,6 +985,18 @@ async def _flush_navigator_outbox(app: Application, chat_id: int, state: dict) -
         if not text:
             outbox.pop(0)
             continue
+        if market is not None:
+            try:
+                age = time.time() - float(item.get("saved_at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                age = float("inf")
+            # A Navigator card is a companion to a verified, newly delivered
+            # trade, not an independently tradable delayed alert.
+            if age < 0 or age > max(60, int(getattr(cfg, "UNIFIED_OUTBOX_TTL_SECONDS", 900))):
+                log.warning("NAVIGATOR_COMPANION_DISCARDED reason=stale")
+                outbox.pop(0)
+                save_state(state)
+                continue
         try:
             await _send_parts(app, chat_id, text)
             signal_navigator.mark_delivered(text)
@@ -1009,26 +1015,11 @@ async def _flush_navigator_outbox(app: Application, chat_id: int, state: dict) -
 
 
 def _alert_pair(text: str) -> str:
-    match = re.search(r"(?:Пара:\s*|💱 Пара:\s*)([A-Z]{3}/[A-Z]{3})", text or "")
-    if not match:
-        match = re.search(r"(?:LONG|SHORT)\s+([A-Z]{3}/[A-Z]{3})", text or "")
-    return match.group(1) if match else ""
+    return signal_contract.pair_of(text)
 
 
 def _direct_signal_side(text: str) -> str:
-    """Extract direction from every trading-module card format.
-
-    Levels use "Направление реакции/пробоя", ATS uses "Направление разворота",
-    while most modules use plain "Направление". Navigator routing must treat
-    all of them identically.
-    """
-    match = re.search(r"(?:^|\n)[🟢🔴]?\s*(LONG|SHORT)\s+[A-Z]{3}/[A-Z]{3}", text or "", re.I)
-    if not match:
-        match = re.search(
-            r"(?:🧭\s*)?Направление(?:\s+(?:реакции|пробоя|разворота))?:\s*(LONG|SHORT)\b",
-            text or "", re.I,
-        )
-    return match.group(1).upper() if match else ""
+    return signal_contract.side_of(text)
 
 
 def signal_allowed_by_h4_zigzag(symbol: str, by_tf: dict, side: str) -> bool:
@@ -1099,13 +1090,9 @@ def _master_result_for(pair: str, side: str, master_results: list[dict]):
 
 
 def _master_allows_delivery(pair: str, side: str, master_results: list[dict]) -> bool:
-    """Служебные карточки без стороны проходят. Направленный вход — только через Master."""
-    if not pair or not side:
-        return True
-    if not getattr(cfg, "MASTER_DIRECTION_ENABLED", True):
-        return True
-    if not getattr(cfg, "MASTER_REQUIRE_FOR_DELIVERY", True):
-        return True
+    """Направленный вход обязан иметь реальное подтверждение Master."""
+    if not pair or side not in ("LONG", "SHORT"):
+        return False
     return any(item.get("symbol") == pair and item.get("side") == side for item in master_results)
 
 
@@ -1337,6 +1324,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         await _maybe_send_session_briefing(context, state, market, strength, rank)
 
         module_alerts: list[tuple[int, str]] = []
+        source_ids: dict[str, str] = {}
         mandatory_pdh_pdl: list[str] = []
         scan_stats = ScanStats()
         enabled_flags = (
@@ -1359,6 +1347,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "DISBALANCE_ENABLED", True):
             try:
                 for text in disbalance.process_market(market, strength):
+                    source_ids[text] = "disbalance"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("disbalance"); log.exception("Ошибка модуля дисбаланса")
@@ -1366,6 +1355,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "IMBALANCE_ENABLED", True):
             try:
                 for text in imbalance.process_market(market, strength):
+                    source_ids[text] = "imbalance"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("imbalance"); log.exception("Ошибка модуля Imbalance/FVG")
@@ -1373,6 +1363,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "BPR_ENABLED", True):
             try:
                 for text in bpr.process_market(market, strength):
+                    source_ids[text] = "bpr"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("bpr"); log.exception("Ошибка модуля BPR")
@@ -1380,6 +1371,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "QUASIMODO_ENABLED", True):
             try:
                 for text in quasimodo_engine.process_market(market, strength):
+                    source_ids[text] = "quasimodo_engine"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("quasimodo"); log.exception("Ошибка модуля Quasimodo")
@@ -1387,6 +1379,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "CONSOLIDATION_ZONE_ENABLED", True):
             try:
                 for text in consolidation_zone.process_market(market, strength):
+                    source_ids[text] = "consolidation_zone"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("consolidation_zone"); log.exception("Ошибка модуля Consolidation Zone")
@@ -1394,6 +1387,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "ACCUMULATION_DISTRIBUTION_ENABLED", True):
             try:
                 for text in accumulation_distribution.process_market(market, strength):
+                    source_ids[text] = "accumulation_distribution"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("accumulation_distribution"); log.exception("Ошибка модуля накопления/распределения")
@@ -1401,6 +1395,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
             try:
                 for text in amd_power_of_three.process_market(market, strength):
+                    source_ids[text] = "amd_power_of_three"
                     mandatory_amd_alerts.append(text)
             except Exception:
                 scan_stats.note_fail("amd"); log.exception("Ошибка модуля AMD / Power of Three")
@@ -1408,6 +1403,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "WEEKLY_RHYTHM_ENABLED", True):
             try:
                 for text in weekly_rhythm_context.process_market(market, strength):
+                    source_ids[text] = "weekly_rhythm_context"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("weekly_rhythm"); log.exception("Ошибка модуля Ритм недели")
@@ -1415,6 +1411,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "CRT_CANDLE_RANGE_ENABLED", True):
             try:
                 for text in crt_candle_range.process_market(market, strength):
+                    source_ids[text] = "crt_candle_range"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("crt"); log.exception("Ошибка модуля CRT / Candle Range Theory")
@@ -1422,6 +1419,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "LIQUIDITY_SWEEP_ENABLED", True):
             try:
                 for text in liquidity_sweep.process_market(market, strength):
+                    source_ids[text] = "liquidity_sweep"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("liquidity_sweep"); log.exception("Ошибка модуля снятия ликвидности")
@@ -1429,6 +1427,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "POC_ENABLED", True):
             try:
                 for text in poc_profile.process_market(market, strength):
+                    source_ids[text] = "poc_profile"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("poc"); log.exception("Ошибка модуля POC")
@@ -1437,6 +1436,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "ORDER_BLOCK_ENABLED", True):
             try:
                 for text in order_block.process_market(market, strength):
+                    source_ids[text] = "order_block"
                     module_alerts.append((1, text))
                 invalidated_order_blocks = order_block.pop_invalidated_blocks()
             except Exception:
@@ -1445,6 +1445,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "BREAKER_BLOCK_ENABLED", True):
             try:
                 for text in breaker_block.process_market(market, strength, invalidated_order_blocks):
+                    source_ids[text] = "breaker_block"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("breaker_block"); log.exception("Ошибка модуля Breaker Block")
@@ -1452,6 +1453,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "SMART_MONEY_62_26_ENABLED", True):
             try:
                 for text in smart_money_62_26.process_market(market, strength):
+                    source_ids[text] = "smart_money_62_26"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("smart_money"); log.exception("Ошибка модуля Smart Money 62-26")
@@ -1464,8 +1466,9 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("Новости для ICT Silver Bullet")
                     silver_events = []
                 for text in silver_bullet_ict.process_market(
-                    market, strength, silver_events, closed_bar_utc(closed_dt)
+                    market, strength, silver_events, datetime.now(timezone.utc)
                 ):
+                    source_ids[text] = "silver_bullet_ict"
                     module_alerts.append((0, text))
             except Exception:
                 scan_stats.note_fail("silver_bullet"); log.exception("Ошибка модуля ICT Silver Bullet")
@@ -1477,8 +1480,10 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     # user explicitly wants to see. It bypasses the hourly ranking
                     # cap, but still passes the global entry/significance safety gate.
                     if "📅 ПРОБОЙ PDH" in text or "📅 ПРОБОЙ PDL" in text or "📅 СНЯТИЕ PDH" in text or "📅 СНЯТИЕ PDL" in text:
+                        source_ids[text] = "daily_high_low"
                         mandatory_pdh_pdl.append(text)
                     else:
+                        source_ids[text] = "daily_high_low"
                         module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("daily_high_low"); log.exception("Ошибка модуля дневного максимума/минимума")
@@ -1486,6 +1491,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "CHAIN_ENTRIES_ENABLED", True):
             try:
                 for text in chain_entries.process_market(market, strength):
+                    source_ids[text] = "chain_entries"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("chain_entries"); log.exception("Ошибка модуля Chain Entries")
@@ -1493,6 +1499,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "RETEST_CONFIRMATION_ENABLED", True):
             try:
                 for text in retest_confirmation.process_market(market, strength):
+                    source_ids[text] = "retest_confirmation"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("retest"); log.exception("Ошибка модуля структурного ретеста")
@@ -1500,6 +1507,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "FIBONACCI_ENABLED", True):
             try:
                 for text in fibonacci_grid.process_market(market, strength):
+                    source_ids[text] = "fibonacci_grid"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("fibonacci"); log.exception("Ошибка модуля сетки Фибоначчи")
@@ -1507,6 +1515,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "ATS_REVERSAL_ENABLED", True):
             try:
                 for text in ats_reversal_point.process_market(market, strength):
+                    source_ids[text] = "ats_reversal_point"
                     module_alerts.append((0, text))
             except Exception:
                 scan_stats.note_fail("ats"); log.exception("Ошибка модуля ATS Reversal Point")
@@ -1521,6 +1530,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 for text in fib_smc.process_market(
                     market, strength, fib_smc_events, closed_bar_utc(closed_dt)
                 ):
+                    source_ids[text] = "fib_smc"
                     module_alerts.append((0, text))
             except Exception:
                 scan_stats.note_fail("fib_smc"); log.exception("Ошибка модуля Fib+SMC")
@@ -1536,8 +1546,10 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 for text in levels.process_market(market, strength, level_events):
                     if (getattr(cfg, "LEVEL_BREAKOUT_MANDATORY_DELIVERY", True)
                             and "⚡ ПРОБОЙ УРОВНЯ" in text):
+                        source_ids[text] = "levels"
                         mandatory_level_breakouts.append(text)
                     else:
+                        source_ids[text] = "levels"
                         module_alerts.append((0, text))
             except Exception:
                 scan_stats.note_fail("levels"); log.exception("Ошибка модуля уровней")
@@ -1545,6 +1557,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "ZIGZAG_SCANNER_ENABLED", True):
             try:
                 for text in zigzag_scanner.process_market(market, strength):
+                    source_ids[text] = "zigzag_scanner"
                     module_alerts.append((2, text))
             except Exception:
                 scan_stats.note_fail("zigzag"); log.exception("Ошибка отдельного ZigZag-сканера")
@@ -1552,6 +1565,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if getattr(cfg, "EDGE_ESTIMATOR_ENABLED", True):
             try:
                 for text in edge_estimator.process_market(market, strength):
+                    source_ids[text] = "edge_estimator"
                     module_alerts.append((1, text))
             except Exception:
                 scan_stats.note_fail("edge"); log.exception("Ошибка модуля короткого преимущества")
@@ -1563,27 +1577,125 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                         "BOS", "Двойная", "голова и плечи", "AB=CD", "Паттерн 1-2-3",
                         "треугольник", "клин", "флаг", "вымпел", "прямоугольник",
                     ))
+                    source_ids[text] = "patterns"
                     module_alerts.append((1 if structural else 3, text))
             except Exception:
                 scan_stats.note_fail("patterns"); log.exception("Ошибка сканера паттернов")
 
-        # Все торговые события сначала становятся внутренними кандидатами.
-        # В чат уходит карточка источника только после Master Direction
-        # по той же паре и стороне. Navigator идёт отдельным сопровождением TR.
+        # One admission route for ALL 26 detector sources, including mandatory
+        # AMD / Levels / PDH and older retry cards. Unconfirmed M5/M15 cards
+        # survive until the next CLOSED H1; stale cards never get a free retry.
         source_alerts = list(module_alerts) + [(0, text) for text in mandatory_amd_alerts + mandatory_level_breakouts + mandatory_pdh_pdl]
+        now_epoch = time.time()
+        retry_ttl = max(60, int(getattr(cfg, "UNIFIED_OUTBOX_TTL_SECONDS", 900)))
+        # Corrupt/migrated state must not crash the whole one-minute scan.
+        def _fresh_queue_item(item, ttl):
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"]:
+                return False
+            try:
+                age = now_epoch - float(item.get("saved_at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            return 0 <= age <= ttl
+
+        restored_outbox = []
+        for item in list(state.get("source_outbox") or []):
+            if not _fresh_queue_item(item, retry_ttl):
+                log.warning("UNIFIED_OUTBOX_DISCARDED reason=stale_or_corrupt")
+                continue
+            text = item["text"]
+            source_ids[text] = item.get("source") or signal_release_guard.infer_source(text)
+            restored_outbox.append((0, text))
+        state["source_outbox"] = [item for item in (state.get("source_outbox") or [])
+                                  if _fresh_queue_item(item, retry_ttl)]
+        pending_h1 = state.setdefault("unified_h1_pending", {})
+        for key, item in list(pending_h1.items()):
+            if not _fresh_queue_item(item, 7200):
+                pending_h1.pop(key, None)
+                continue
+            text = item["text"]
+            source_ids[text] = item.get("source") or signal_release_guard.infer_source(text)
+            restored_outbox.append((0, text))
+        source_alerts += restored_outbox
+        seen_raw = set()
+        source_alerts = [(priority, text) for priority, text in source_alerts
+                         if not (text in seen_raw or seen_raw.add(text))]
+        trap_cache = {}
+        # Stage one is an independent eligibility decision. A blocked, expired
+        # or still-forming detector MUST NOT vote for another module.
+        baseline = {raw: signal_release_guard.review(raw, market, (), source_ids, cache=trap_cache)
+                    for _priority, raw in source_alerts}
+        peers = [raw for raw, verdict in baseline.items() if verdict.status == "ALLOW"]
+        admitted = []
+        allowed_texts = set()
+        for priority, raw in source_alerts:
+            ruling = (signal_release_guard.review(raw, market, peers, source_ids, cache=trap_cache)
+                      if baseline[raw].allowed else baseline[raw])
+            event_id = _source_event_id(raw)
+            signal_release_guard.journal(ruling, event_id)
+            if ruling.status == "PENDING_H1":
+                pending_h1[event_id] = {"text": raw, "source": ruling.source, "saved_at": now_epoch}
+                log.info("UNIFIED_H1_PENDING source=%s pair=%s", ruling.source, ruling.pair)
+                continue
+            pending_h1.pop(event_id, None)
+            if ruling.status == "INFO":
+                # EDGE/weekly context is never a trade. Keep it in its own
+                # visibly labelled information stream, once per actual H1.
+                if h1_just_closed(closed_dt, int(getattr(cfg, "UNIFIED_H1_RELEASE_WINDOW_MINUTES", 16))):
+                    info_id = "INFO:" + event_id
+                    if not _event_already_delivered(state, info_id):
+                        try:
+                            await _send_parts(context.application, int(chat_id),
+                                              "📖 АНАЛИТИКА · НЕ ТОРГОВЫЙ СИГНАЛ\n" + raw)
+                        except Exception:
+                            log.exception("UNIFIED_INFO_SEND_FAILED source=%s", ruling.source)
+                        else:
+                            _mark_event_delivered(state, info_id)
+                continue
+            if ruling.status != "ALLOW":
+                log.info("UNIFIED_SIGNAL_BLOCK source=%s pair=%s side=%s reason=%s",
+                         ruling.source, ruling.pair, ruling.side, ruling.reason)
+                try:
+                    decision_journal.record_stage(raw, market, strength, "BLOCKED",
+                                                  reason="unified_" + ruling.reason)
+                except Exception:
+                    log.exception("UNIFIED_SIGNAL_DECISION_JOURNAL_FAILED")
+                continue
+            admitted.append((priority, raw))
+            allowed_texts.add(raw)
+        save_state(state)
+        source_alerts = admitted
+        module_alerts = [(priority, text) for priority, text in module_alerts if text in allowed_texts]
+        # A retry not re-emitted by its detector still needs to reach the same
+        # ordinary ranking and final gates; it must NEVER bypass them.
+        already_queued = {text for _, text in module_alerts}
+        for priority, text in restored_outbox:
+            if text in allowed_texts and text not in already_queued:
+                module_alerts.append((priority, text))
+                already_queued.add(text)
+        mandatory_amd_alerts = [text for text in mandatory_amd_alerts if text in allowed_texts]
+        mandatory_level_breakouts = [text for text in mandatory_level_breakouts if text in allowed_texts]
+        mandatory_pdh_pdl = [text for text in mandatory_pdh_pdl if text in allowed_texts]
         raw_alerts = [text for _priority, text in source_alerts]
-        # KILLER is a meta-selector over confirmed module facts; it never invents a setup.
-        if getattr(cfg, "KILLER_ENABLED", True):
+        # Killer consumes only facts that already passed the shared H1/trap gate.
+        if getattr(cfg, "KILLER_ENABLED", True) and raw_alerts:
             try:
                 for text in killer_engine.process_candidates(raw_alerts, market, strength):
+                    source_ids[text] = "killer_engine"
+                    ruling = signal_release_guard.review(text, market, raw_alerts + [text], source_ids, cache=trap_cache)
+                    signal_release_guard.journal(ruling, _source_event_id(text))
+                    if ruling.status != "ALLOW":
+                        log.info("UNIFIED_KILLER_BLOCK reason=%s", ruling.reason)
+                        continue
                     module_alerts.append((-2, text))
                     source_alerts.append((-2, text))
                     raw_alerts.append(text)
             except Exception:
                 scan_stats.note_fail("killer"); log.exception("Ошибка KILLER meta-engine")
-        # События, не подтверждённые в эту H1, не теряются: они остаются
-        # внутренними кандидатами ограниченное число часов.
-        candidate_alerts = signal_navigator.remember_candidates(raw_alerts, closed_dt)
+        # Historical remembered candidates remain research-only; they must NOT
+        # revive yesterday's setup or bypass today's H1/trap validation.
+        signal_navigator.remember_candidates(raw_alerts, closed_dt)
+        candidate_alerts = list(raw_alerts)
         navigator_sources: dict[str, list[str]] = {}
         confirmed_alerts: list[tuple[int, str]] = []
         master_results: list[dict] = []
@@ -1598,9 +1710,11 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 master_dxy_bias = 0
             try:
                 master_events = newsmod.load_events()
+                calendar_ready = True
             except Exception:
-                log.exception("Новости для Master Direction")
+                log.exception("NEWS_UNAVAILABLE: calendar is not an empty event list")
                 master_events = []
+                calendar_ready = False
             try:
                 mandatory_keys = {
                     (pair, side)
@@ -1608,18 +1722,17 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     for pair, side in ((_alert_pair(text), _direct_signal_side(text)),)
                     if pair and side
                 }
-                master_results = master_direction.analyze_market(
-                    market,
-                    strength,
-                    candidate_alerts,
-                    dxy_bias=master_dxy_bias,
-                    events=master_events,
-                    # News/Lifecycle must use the real wall clock. The closed H1
-                    # timestamp belongs to market data only; using it here can keep
-                    # Master inside a stale pre-news window for most of the hour.
-                    now_utc=datetime.now(timezone.utc),
-                    priority_keys=mandatory_keys,
-                )
+                # Fail closed on a broken calendar. A successfully loaded empty
+                # event list is distinct from an unavailable source.
+                if calendar_ready:
+                    master_results = master_direction.analyze_market(
+                        market, strength, candidate_alerts,
+                        dxy_bias=master_dxy_bias, events=master_events,
+                        now_utc=datetime.now(timezone.utc), priority_keys=mandatory_keys,
+                    )
+                else:
+                    master_results = []
+                    log.error("MASTER_TRADE_BLOCK reason=news_calendar_unavailable")
             except Exception:
                 log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=master_direction")
                 master_results = []
@@ -1667,8 +1780,9 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.error("SCAN_TRADE_CARDS_SUPPRESSED reason=too_many_scanner_failures")
         # Повторяем карточки, чья предыдущая отправка временно не удалась.
         # Они не расходуют лимит новых исходных сигналов.
-        await _flush_source_outbox(context.application, int(chat_id), state)
-        await _flush_navigator_outbox(context.application, int(chat_id), state)
+        # Source retries have been re-run through Unified Guard + Master above;
+        # never deliver the old raw outbox independently of the current market.
+        await _flush_navigator_outbox(context.application, int(chat_id), state, market)
         # ZIP 31: направленный факт модуля остаётся внутренним, пока его
         # не подтвердит Master. Navigator снова только сопровождает вход.
         proposed_delivery = mandatory_amd_alerts + mandatory_level_breakouts + mandatory_pdh_pdl + [
@@ -1789,6 +1903,21 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     log.exception("SIGNAL_GATE_AUDIT_SKIPPED")
                 continue
+            # Final source-specific revalidation: even the highest-ranked
+            # primary and every attached allied source must still be eligible.
+            final_reviews = [signal_release_guard.review(item, market, candidate_alerts, source_ids, cache=trap_cache)
+                             for item in allied_texts]
+            if any(not verdict.allowed for verdict in final_reviews):
+                for verdict in final_reviews:
+                    signal_release_guard.journal(verdict, _source_event_id(source_text))
+                log.warning("UNIFIED_FINAL_BLOCK pair=%s reasons=%s", pair,
+                            ",".join(x.reason for x in final_reviews if not x.allowed))
+                try:
+                    decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                                                  reason="final_unified_recheck")
+                except Exception:
+                    log.exception("UNIFIED_FINAL_JOURNAL_FAILED")
+                continue
             # Do not call this MASTER_CONFIRMED unless the Master actually
             # produced a matching verdict (e.g. it may be disabled in config).
             try:
@@ -1802,7 +1931,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("Запись этапа MASTER_CONFIRMED пропущена")
             source_event_id = _source_event_id(source_text)
-            _enqueue_source(state, source_text)
+            _enqueue_source(state, source_text, source_ids.get(source_text) or signal_release_guard.infer_source(source_text))
             save_state(state)
             text = bundle.get("primary") or source_text
             pair_for_cpi = pair or _alert_pair(text)
@@ -1953,7 +2082,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 signal_navigator.register_card(nav_text, nav_sources, closed_dt)
                 _enqueue_navigator(state, nav_text, source_event_id)
                 save_state(state)
-                await _flush_navigator_outbox(context.application, int(chat_id), state)
+                await _flush_navigator_outbox(context.application, int(chat_id), state, market)
                 if pair and direct_side:
                     state.setdefault("last_signals", {})[f"{pair}:{direct_side}"] = time.time()
                 state.setdefault("last_setups", {})[f"{pair}:{direct_side}:{signal_context.source_name(source_text).strip().upper()}"] = time.time()

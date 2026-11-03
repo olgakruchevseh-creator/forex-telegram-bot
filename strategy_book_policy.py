@@ -11,6 +11,7 @@ signal, change targets, or hard-block an existing module lifecycle.
 from __future__ import annotations
 
 import re
+import signal_contract
 from typing import Mapping
 
 FAMILY_LABELS_RU = {
@@ -197,11 +198,11 @@ def assess_candidate(symbol: str, candidate_direction: str, alerts: list[str],
                      turtle_context=None, pattern_failure=None) -> dict:
     matching = []
     for text in alerts or []:
-        if symbol not in (text or ""):
+        # Only an explicit source-header direction can contribute; an H4
+        # conflict written in the commentary is NOT an independent LONG vote.
+        if signal_contract.pair_of(text) != symbol:
             continue
-        u = (text or "").upper()
-        markers = ("LONG", "ЛОНГ") if candidate_direction == "LONG" else (("SHORT", "ШОРТ") if candidate_direction == "SHORT" else ())
-        if markers and not any(marker in u for marker in markers):
+        if signal_contract.side_of(text) != candidate_direction:
             continue
         matching.append(text)
     families = []

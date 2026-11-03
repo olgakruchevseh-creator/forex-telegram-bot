@@ -15,6 +15,7 @@ import logging
 import re
 
 import config as cfg
+import signal_contract
 import movement_progress
 import ohlc_movement
 import market_regime
@@ -100,21 +101,11 @@ _SOURCE_MARKERS = (
 
 
 def pair_of(text: str) -> str:
-    match = re.search(r"(?:Пара:\s*|💱 Пара:\s*)([A-Z]{3}/[A-Z]{3})", text or "")
-    if not match:
-        match = re.search(r"(?:LONG|SHORT)\s+([A-Z]{3}/[A-Z]{3})", text or "")
-    return match.group(1) if match else ""
+    return signal_contract.pair_of(text)
 
 
 def side_of(text: str) -> str:
-    match = re.search(r"(?:^|\n)[🟢🔴]?\s*(LONG|SHORT)\s+[A-Z]{3}/[A-Z]{3}", text or "", re.I)
-    if not match:
-        match = re.search(
-            r"(?:🧭\s*)?Направление(?:\s+(?:реакции|пробоя|разворота))?:\s*(LONG|SHORT)\b",
-            text or "",
-            re.I,
-        )
-    return match.group(1).upper() if match else ""
+    return signal_contract.side_of(text)
 
 
 def source_name(text: str) -> str:

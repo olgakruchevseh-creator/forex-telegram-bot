@@ -44,6 +44,12 @@ PAIR_STRENGTH_MIN = 0.20
 BRIEFING_LEADER_MIN_STRENGTH_GAP = 0.05
 
 SCAN_EVERY_MINUTES = 1
+# One source-level gate before Master and before any Telegram trade.
+# A fresh CLOSED H1 is required for every new entry; LTF events are queued
+# until the next H1 (not sent on their M5/M15 candle).
+UNIFIED_H1_RELEASE_WINDOW_MINUTES = 16
+UNIFIED_OUTBOX_TTL_SECONDS = 900
+UNIFIED_SIGNAL_JOURNAL_ENABLED = True
 # Latency policy: scan every minute so a freshly CLOSED M5/M15 candle is processed
 # promptly; this is still well below the configured paid-plan request budget.
 # Полный скан торгует только при синхронной корзине 7 мажоров на рабочих ТФ.

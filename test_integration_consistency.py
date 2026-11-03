@@ -43,7 +43,8 @@ class IntegrationConsistencyTests(unittest.TestCase):
         self.assertTrue(bot._master_allows_delivery("EUR/USD", "LONG", allowed))
         self.assertFalse(bot._master_allows_delivery("EUR/USD", "SHORT", allowed))
         self.assertFalse(bot._master_allows_delivery("GBP/USD", "LONG", allowed))
-        self.assertTrue(bot._master_allows_delivery("", "", allowed))
+        # Unidentified cards must not escape the mandatory Master gate.
+        self.assertFalse(bot._master_allows_delivery("", "", allowed))
 
     def test_h4_zigzag_guard_blocks_opposite_delivery(self):
         snap = {"zigzag_directions": {"H4": -1}}

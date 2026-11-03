@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import config as cfg
+import signal_contract
 import ohlc_movement
 import movement_progress
 import market_state
@@ -76,16 +77,11 @@ def _save(value: dict) -> None:
 
 
 def _pair(text: str) -> str:
-    match = re.search(r"(?:💱\s*)?Пара:\s*([A-Z]{3}/[A-Z]{3})", text or "")
-    return match.group(1) if match else ""
+    return signal_contract.pair_of(text)
 
 
 def _side(text: str) -> str:
-    match = re.search(
-        r"(?:Основное\s+)?направление(?:\s+(?:реакции|пробоя|разворота))?:\s*(LONG|SHORT)\b",
-        text or "", re.I,
-    )
-    return match.group(1) if match else ""
+    return signal_contract.side_of(text)
 
 
 def _source_name(text: str) -> str:

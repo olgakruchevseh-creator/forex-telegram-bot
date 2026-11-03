@@ -6,7 +6,8 @@ high-impact-news protection, event anti-spam and an immutable chart snapshot.
 """
 from __future__ import annotations
 from chart_snapshot import freeze_by_tf
-import io, json, os
+import io, json, os, time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -185,10 +186,14 @@ def detect(symbol,by_tf,strength,events=None,now_utc=None):
 def _p(symbol,x): return f"{x:.3f}" if "JPY" in symbol else f"{x:.5f}"
 def format_message(e):
     direction="🟢 ЛОНГ" if e["side"]=="LONG" else "🔴 ШОРТ"
-    return "\n".join(["━━━━━━━━━━━━━━━━━━",f"⚡ РЕШЕНИЕ: {direction} · {e['symbol']}","Основание: 🥈 ICT SILVER BULLET",f"качество {e['quality']}/100 · M5 execution · {e['window']}","━━━━━━━━━━━━━━━━━━","","ДЕТАЛИ","━━━━━━━━━━━━━━━━━━",f"Снятая ликвидность: {_p(e['symbol'],e['liquidity'])} · {e.get('liquidity_source','—')}",f"Sweep-экстремум: {_p(e['symbol'],e['sweep'])}",f"MSS: закрытие через {_p(e['symbol'],e['mss_level'])}",f"FVG: {_p(e['symbol'],e['fvg_low'])}–{_p(e['symbol'],e['fvg_high'])}",f"Вход CE 50%: {_p(e['symbol'],e['entry'])} · возврат подтверждён закрытой M5",f"Отмена / SL: {_p(e['symbol'],e['stop'])} · за sweep-экстремумом",f"TR1: {_p(e['symbol'],e['tr1'])} · {e.get('tr1_source','')}",f"TR2: {_p(e['symbol'],e['tr2'])} · {e.get('tr2_source','')}",f"TR3: {_p(e['symbol'],e['tr3'])} · {e.get('tr3_source','')}",f"RR до TR1: {e.get('rr1',0):.2f}R",f"Разница силы валют: {e['gap']:+.2f}",f"Вероятность: {e['confidence']}%","","✅ Факт: ликвидность снята внутри активного окна, закрытая M5 дала MSS + displacement + FVG, затем цена вернулась в CE. Формирующийся FVG без возврата наружу не отправляется."])
+    return "\n".join(["━━━━━━━━━━━━━━━━━━",f"⚡ РЕШЕНИЕ: {direction} · {e['symbol']}","Основание: 🥈 ICT SILVER BULLET",f"Пара: {e['symbol']}",f"Направление: {e['side']}",f"M5 событие (открытие UTC): {e['fill_dt']}",f"качество {e['quality']}/100 · M5 execution · {e['window']}","━━━━━━━━━━━━━━━━━━","","ДЕТАЛИ","━━━━━━━━━━━━━━━━━━",f"Снятая ликвидность: {_p(e['symbol'],e['liquidity'])} · {e.get('liquidity_source','—')}",f"Sweep-экстремум: {_p(e['symbol'],e['sweep'])}",f"MSS: закрытие через {_p(e['symbol'],e['mss_level'])}",f"FVG: {_p(e['symbol'],e['fvg_low'])}–{_p(e['symbol'],e['fvg_high'])}",f"Вход CE 50%: {_p(e['symbol'],e['entry'])} · возврат подтверждён закрытой M5",f"Отмена / SL: {_p(e['symbol'],e['stop'])} · за sweep-экстремумом",f"TR1: {_p(e['symbol'],e['tr1'])} · {e.get('tr1_source','')}",f"TR2: {_p(e['symbol'],e['tr2'])} · {e.get('tr2_source','')}",f"TR3: {_p(e['symbol'],e['tr3'])} · {e.get('tr3_source','')}",f"RR до TR1: {e.get('rr1',0):.2f}R",f"Разница силы валют: {e['gap']:+.2f}",f"Вероятность: {e['confidence']}%","","✅ Факт: ликвидность снята внутри активного окна, закрытая M5 дала MSS + displacement + FVG, затем цена вернулась в CE. Формирующийся FVG без возврата наружу не отправляется."])
 
 def process_market(market,strength,events=None,now_utc=None):
     st=_load(); sent=st.setdefault('sent',{}); out=[]
+    pending=st.setdefault('pending',{})
+    for k,v in list(pending.items()):
+        if isinstance(v,dict) and time.time()-float(v.get('saved_at') or 0)>7200:
+            pending.pop(k,None)
     for symbol in cfg.PAIRS:
         e=detect(symbol,market.get(symbol) or {},strength,events,now_utc)
         if not e: continue
@@ -199,8 +204,10 @@ def process_market(market,strength,events=None,now_utc=None):
         pending=st.setdefault('pending',{})
         if key in sent or key in pending: continue
         text=format_message(e); out.append(text)
-        pending[key]=True
-        _PENDING_CARDS[text]=(dict(e),freeze_by_tf(market.get(symbol) or {}),key)
+        snapshot=freeze_by_tf(market.get(symbol) or {})
+        pending[key]={"text":text,"event":dict(e),"saved_at":time.time(),
+                      "m5_bars":[asdict(c) for c in (snapshot.get("M5") or [])[-96:]]}
+        _PENDING_CARDS[text]=(dict(e),snapshot,key)
     if len(sent)>500: st['sent']=dict(list(sent.items())[-350:])
     _save(st); return out
 
@@ -208,9 +215,11 @@ def process_market(market,strength,events=None,now_utc=None):
 def mark_delivered(text: str) -> bool:
     card=_PENDING_CARDS.get(text or "")
     key=card[2] if card and len(card) > 2 else None
+    st=_load(); pending=st.setdefault('pending',{}); sent=st.setdefault('sent',{})
+    if not key:
+        key=next((k for k,v in pending.items() if isinstance(v,dict) and v.get("text")==text), None)
     if not key:
         return False
-    st=_load(); pending=st.setdefault('pending',{}); sent=st.setdefault('sent',{})
     pending.pop(key, None)
     sent[key]=datetime.now(timezone.utc).isoformat()
     if len(sent)>500: st['sent']=dict(list(sent.items())[-350:])
@@ -234,4 +243,17 @@ def render_chart(e,by_tf):
 
 def image_for_alert(text):
     if not getattr(cfg,'SILVER_BULLET_CHART_IMAGES_ENABLED',True): return None
-    card=_PENDING_CARDS.pop(text,None); return render_chart(*card) if card else None
+    card=_PENDING_CARDS.get(text)
+    if card:
+        return render_chart(card[0],card[1])
+    # M5 setups legitimately wait for the next CLOSED H1. Their event-time
+    # chart snapshot must survive the next scan and a Railway restart.
+    st=_load()
+    for saved in (st.get('pending') or {}).values():
+        if isinstance(saved,dict) and saved.get('text')==text:
+            try:
+                bars=[Candle(**row) for row in (saved.get('m5_bars') or [])]
+                return render_chart(saved['event'],{'M5':bars}) if bars else None
+            except (ValueError,TypeError,KeyError):
+                return None
+    return None

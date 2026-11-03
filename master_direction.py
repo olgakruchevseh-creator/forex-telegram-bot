@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import config as cfg
+import signal_contract
 import news as newsmod
 import zigzag_scanner
 import htf_irl
@@ -60,17 +61,16 @@ def _consensus(stack: PairStack, keys: tuple[str, ...], minimum: int) -> int:
 
 
 def _pair(text: str) -> str:
-    match = re.search(r"(?:💱\s*)?Пара:\s*([A-Z]{3}/[A-Z]{3})", text or "")
-    return match.group(1) if match else ""
+    return signal_contract.pair_of(text)
 
 
 def _side(text: str) -> int:
-    match = re.search(r"(?:Основное\s+)?направление(?: реакции)?:\s*(LONG|SHORT)", text or "", re.I)
-    if not match:
-        match = re.search(r"(?:^|\n)[🟢🔴]?\s*(?:MASTER DIRECTION\s*[—-]\s*)?(LONG|SHORT)\b", text or "")
-    if not match:
-        return 0
-    return 1 if match.group(1) == "LONG" else -1
+    direct = signal_contract.side_of(text)
+    if direct:
+        return 1 if direct == "LONG" else -1
+    # Master can also read its own non-source banner.
+    match = re.search(r"(?:^|\n)[🟢🔴]?\s*MASTER DIRECTION\s*[—-]\s*(LONG|SHORT)\b", text or "", re.I)
+    return (1 if match.group(1).upper() == "LONG" else -1) if match else 0
 
 
 def _evidence_name(text: str) -> str:

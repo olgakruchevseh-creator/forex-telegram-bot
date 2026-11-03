@@ -11,6 +11,7 @@ from pathlib import Path
 from collections import defaultdict
 
 import config as cfg
+import signal_contract
 import market_regime
 import ohlc_movement
 import candle_context
@@ -160,11 +161,11 @@ _LABELS=dict(evidence_families.LABELS)
 _WEIGHTS={"structure":13,"liquidity":12,"imbalance":10,"po3_fvg_scenario":10,"blocks":9,"levels":9,"smc_fib":8,"session_setup":8,"reversal":7,"entry_location_execution":7,"demand_supply_pd_array":9}
 
 def _pair(t):
- m=re.search(r"(?:Пара:\s*|💱 Пара:\s*)([A-Z]{3}/[A-Z]{3})",t or "") or re.search(r"(?:LONG|SHORT)\s+([A-Z]{3}/[A-Z]{3})",t or "",re.I)
- return m.group(1) if m else ""
+ return signal_contract.pair_of(t)
+
 def _side(t):
- m=re.search(r"(?:^|\n)[🟢🔴]?\s*(LONG|SHORT)\s+[A-Z]{3}/[A-Z]{3}",t or "",re.I) or re.search(r"Направление(?:\s+(?:реакции|пробоя|разворота))?:\s*(LONG|SHORT)\b",t or "",re.I)
- return m.group(1).upper() if m else ""
+ return signal_contract.side_of(t)
+
 def _quality(t):
  vals=[int(x) for x in re.findall(r"(?:Качество|Уверенность модели|Вероятность):\s*(\d{1,3})",t or "",re.I)]
  return max(vals) if vals else 70
@@ -267,11 +268,14 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
   "pattern_failure":pattern_failure_ctx,"multi_tf_narrative":narrative_ctx,
   "setup_memory":setup_ctx,
  }.items()}
+ # Compute the market-maker scenario BEFORE the trap matrix; otherwise its
+ # risk row was always UNKNOWN (and passing mmm_ctx caused UnboundLocalError).
+ mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
  # Trap lifecycle reuses CLOSED-H1 and existing Nison/SMC/MMM contexts. Every
  # potential signal must pass this stage before the convergence threshold.
  try:
   trap_review=killer_trap_guard.inspect(pair,side,by_tf,candle=candle_ctx,
-      liquidity=liquidity_ctx,market_maker=None,structure=structure_ctx,
+      liquidity=liquidity_ctx,market_maker=mmm_ctx,structure=structure_ctx,
       pattern_failure=pattern_failure_ctx,continuation_liquidity=continuation_liq_ctx,
       turtle=turtle_ctx,opposite_turtle=opposite_turtle_ctx)
  except Exception:
@@ -304,7 +308,6 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
   return {"eligible":False,"reason":"ohlc_contradiction","families":families,"trap_review":trap_review,"module_trace":module_trace}
  regime=market_regime.analyze_symbol(pair,by_tf); rname=regime.name if regime else "UNKNOWN"
  price_action_ctx=inside_bar_context.analyze_symbol(pair,by_tf,direction)
- mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
  # A KILLER entry cannot be exceptional if its external liquidity target is already consumed.
  if liquidity_ctx and liquidity_ctx.residual_state=="EXHAUSTED":
   return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"trap_review":trap_review,"module_trace":module_trace,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"pattern_failure_context":pattern_failure_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
