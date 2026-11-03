@@ -1,0 +1,7 @@
+briefing_strength_verified.py
+briefing.py
+bot.py
+config.py
+test_briefing_strength_verified_20261103.py
+AUDIT_STRENGTH_2026_11_03_RU.md
+CHANGED_FILES_STRENGTH_2026_11_03_RU.txt

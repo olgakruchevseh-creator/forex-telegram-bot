@@ -1488,3 +1488,10 @@ EDGE_CALIBRATION_RECENT = 100
 MARKET_DIRECTION_REGIME_ENABLED = True
 WEEKLY_BIAS_CONTEXT_ENABLED = True
 STRATEGY_BOOK_POLICY_ENABLED = True
+
+# Forex briefing strength quality (display only; trading 4H strength unchanged).
+# At session opening, refuse to present stale or cross-pair-misaligned H1 values.
+BRIEFING_STRENGTH_MAX_CLOSED_H1_AGE_MINUTES = 45
+# Fixed anchor in percentage points of raw basket strength for the DISPLAY INDEX.
+# This is a presentation heuristic, not a probability or calibrated indicator.
+BRIEFING_STRENGTH_INDEX_SCALE_PCT = 0.50

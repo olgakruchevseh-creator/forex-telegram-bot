@@ -730,6 +730,12 @@ async def _maybe_send_session_briefing(
         iid, briefing.instance_id(), closed_dt, session_only, session_due, empty,
     )
     briefing_ok = bool(iid and not empty and rank)
+    # A full set of H1 arrays is not sufficient: all seven FX pairs must
+    # refer to the SAME closed H1 bar before publishing a strength table.
+    strength_check = briefing.briefing_strength_verified.calculate(market)
+    if not strength_check.ok:
+        log.warning("BRIEFING_STRENGTH_REJECT reason=%s", strength_check.reason)
+        return False
     if session_only:
         briefing_ok = briefing_ok and session_due
     else:

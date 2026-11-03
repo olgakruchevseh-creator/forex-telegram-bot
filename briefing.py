@@ -34,6 +34,7 @@ import divergence_context
 import market_regime
 import pullback_regime
 import market_direction_regime
+import briefing_strength_verified
 import weekly_bias_context
 import weekly_rhythm_context
 
@@ -1192,8 +1193,10 @@ def build_briefing_text(
     now = now_local()
     now_utc = datetime.now(timezone.utc)
     sess = current_session(now)
-    usd = strength.get("USD", 0.0)
-    briefs = build_pair_briefs(market, strength, events, now_utc)
+    verified_strength = briefing_strength_verified.calculate(market)
+    briefing_scores = verified_strength.scores if verified_strength.ok else {}
+    usd = briefing_scores.get("USD", 0.0)
+    briefs = build_pair_briefs(market, briefing_scores, events, now_utc)
     leaders = pick_leaders(briefs)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
@@ -1204,19 +1207,17 @@ def build_briefing_text(
         "",
     ]
     try:
-        briefing_strength, strength_dynamics = briefing_strength_profile(market, strength)
-        briefing_rank = rank_currencies(briefing_strength)
-        lines.extend(format_strength_block(briefing_rank, strength_dynamics))
+        lines.extend(briefing_strength_verified.format_block(verified_strength))
     except Exception:
-        log.exception("блок силы")
-        lines.extend(format_strength_block(rank))
+        log.exception("проверенный блок силы")
+        lines.extend(["💱 СИЛА ВАЛЮТ", "НЕТ ДОСТОВЕРНЫХ ДАННЫХ — ошибка проверки"])
     try:
         lines.extend(format_dxy_block(dxy, usd))
     except Exception:
         log.exception("блок DXY")
         lines.extend(["", "🇺🇸 DXY", "", "нет данных"])
     try:
-        lines.extend(format_news_block(events or [], strength, now_utc))
+        lines.extend(format_news_block(events or [], briefing_scores, now_utc))
     except Exception:
         log.exception("блок новостей")
         lines.extend(["", "📰 НОВОСТИ ЭТОЙ СЕССИИ", "", "Календарь сейчас недоступен"])
@@ -1262,19 +1263,24 @@ def build_briefing_sections(
     now = now_local()
     now_utc = datetime.now(timezone.utc)
     sess = current_session(now)
-    usd = strength.get("USD", 0.0)
-    briefs = build_pair_briefs(market, strength, events, now_utc)
+    verified_strength = briefing_strength_verified.calculate(market)
+    briefing_scores = verified_strength.scores if verified_strength.ok else {}
+    usd = briefing_scores.get("USD", 0.0)
+    briefs = build_pair_briefs(market, briefing_scores, events, now_utc)
     leaders = pick_leaders(briefs)
     head = [
         "━━━━━━━━━━━━━━━━━━", f"🌍 БРИФИНГ — {sess['name']}", "━━━━━━━━━━━━━━━━━━", "",
         f"🕐 Время: {now.strftime('%H:%M')} · Europe/Amsterdam", "",
     ]
-    try: head.extend(format_strength_block(rank))
-    except Exception: log.exception("блок силы")
+    try:
+        head.extend(briefing_strength_verified.format_block(verified_strength))
+    except Exception:
+        log.exception("проверенный блок силы")
+        head.extend(["💱 СИЛА ВАЛЮТ", "НЕТ ДОСТОВЕРНЫХ ДАННЫХ — ошибка проверки"])
     try: head.extend(format_dxy_block(dxy, usd))
     except Exception:
         log.exception("блок DXY"); head.extend(["", "🇺🇸 DXY", "", "нет данных"])
-    try: head.extend(format_news_block(events or [], strength, now_utc))
+    try: head.extend(format_news_block(events or [], briefing_scores, now_utc))
     except Exception:
         log.exception("блок новостей"); head.extend(["", "📰 НОВОСТИ ЭТОЙ СЕССИИ", "", "Календарь сейчас недоступен"])
     try: head.extend(format_until_next_briefing(upcoming_events or [], now_utc))
