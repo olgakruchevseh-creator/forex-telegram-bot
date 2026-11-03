@@ -5,7 +5,7 @@ selects only exceptional same-side convergence. Correlated modules are grouped
 into families so FVG/BPR/Imbalance or ZigZag/MSS/BOS cannot inflate the score.
 """
 from __future__ import annotations
-import hashlib, io, json, logging, os, re, time
+import hashlib, io, json, logging, math, os, re, time
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
@@ -35,6 +35,8 @@ import auction_context
 import multi_tf_narrative
 import setup_memory
 import evidence_families
+import killer_audit
+import killer_trap_guard
 import news as newsmod
 from analysis import analyze_tf, atr, closed_candles
 
@@ -45,6 +47,7 @@ _PENDING: dict[str, dict] = {}
 # sequence (sweep -> structure -> zone reaction) instead of requiring same-tick alerts.
 _FACT_MEMORY: dict[tuple[str,str,str], dict] = {}
 _MEMORY_LOADED = False
+_LAST_REVIEW_H1 = None
 _TF_MIN={"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
 
 _TF_FRESH_SECONDS={"D1":36*3600,"H4":12*3600,"H1":4*3600,"M15":90*60,"M5":30*60}
@@ -201,7 +204,13 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  direction=1 if side=="LONG" else -1; by_tf=market.get(pair) or {}
  news_guard=_news_guard(pair,events,now_utc)
  if news_guard.get("blocked"):
-  return {"eligible":False,"reason":"high_impact_news_veto","families":set(),"news_guard":news_guard}
+  # A news veto ends the *trade* decision, not its forensic trap observation.
+  try: trap_news=killer_trap_guard.inspect(pair,side,by_tf)
+  except Exception:
+   log.exception("KILLER_TRAP_AUDIT_NEWS_FAILED pair=%s",pair)
+   trap_news={"blocked":True,"reason":"trap_inspection_error","risk":"UNKNOWN","checks":[]}
+  return {"eligible":False,"reason":"high_impact_news_veto","families":set(),"news_guard":news_guard,
+          "trap_review":trap_news,"module_trace":{"full_analysis":"SKIPPED_NEWS_VETO"}}
  families=set(); fam_best={}
  for t in texts:
   for f in _families(t):
@@ -240,9 +249,37 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  path_ctx=path_quality_context.analyze_symbol(pair,by_tf,direction,texts)
  decision_quality_ctx=decision_quality_context.analyze_symbol(pair,by_tf,direction)
  turtle_ctx=turtle_breakout_context.analyze_symbol(pair,by_tf,direction)
+ opposite_turtle_ctx=turtle_breakout_context.analyze_symbol(pair,by_tf,-direction)
  pattern_failure_ctx=pattern_failure_context.analyze_symbol(pair,by_tf,direction)
  narrative_ctx=multi_tf_narrative.analyze_symbol(pair,by_tf,direction)
  setup_ctx=setup_memory.analyze(pair,direction)
+ # Trace actual execution of the existing analytic contexts, not merely a list
+ # of installed files. Missing data are explicitly NOT treated as confirmation.
+ module_trace={name:("EVALUATED" if obj is not None else "NO_RESULT") for name,obj in {
+  "po3_fvg":po3_ctx,"structure":structure_ctx,"liquidity":liquidity_ctx,
+  "continuation_liquidity":continuation_liq_ctx,"precision_entry":precision_ctx,
+  "demand_supply":demand_supply_ctx,"pump_dump":pump_dump_ctx,
+  "divergence":divergence_ctx,"baskerville":baskerville_ctx,
+  "auction":auction_ctx,"candle":candle_ctx,
+  "trading_intelligence":trading_ctx,"path_quality":path_ctx,
+  "decision_quality":decision_quality_ctx,"turtle_breakout":turtle_ctx,
+  "opposite_turtle_breakout":opposite_turtle_ctx,
+  "pattern_failure":pattern_failure_ctx,"multi_tf_narrative":narrative_ctx,
+  "setup_memory":setup_ctx,
+ }.items()}
+ # Trap lifecycle reuses CLOSED-H1 and existing Nison/SMC/MMM contexts. Every
+ # potential signal must pass this stage before the convergence threshold.
+ try:
+  trap_review=killer_trap_guard.inspect(pair,side,by_tf,candle=candle_ctx,
+      liquidity=liquidity_ctx,market_maker=None,structure=structure_ctx,
+      pattern_failure=pattern_failure_ctx,continuation_liquidity=continuation_liq_ctx,
+      turtle=turtle_ctx,opposite_turtle=opposite_turtle_ctx)
+ except Exception:
+  log.exception("KILLER_TRAP_GUARD_FAILED pair=%s side=%s",pair,side)
+  return {"eligible":False,"reason":"trap_inspection_error","families":families,
+          "module_trace":module_trace,"trap_review":{"blocked":True,"risk":"UNKNOWN","checks":[]}}
+ if trap_review["blocked"]:
+  return {"eligible":False,"reason":"trap_"+trap_review["reason"],"families":families,"trap_review":trap_review,"module_trace":module_trace}
  # Demand/Supply and overlapping OB/MB/FVG are one correlated PD-array fact.
  # Collapse BEFORE the independent-family floor so a merged PD-array cannot
  # both inflate the count and later drop below the threshold silently.
@@ -252,27 +289,27 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
   # FVG/imbalance stays — it is a separate inefficiency confirmation.
   families.discard("blocks")
  if len(families)<int(getattr(cfg,"KILLER_MIN_FAMILIES",5)):
-  return {"eligible":False,"reason":"not_enough_independent_families","families":families,"po3_fvg_context":po3_ctx,"precision_entry":precision_ctx,"demand_supply_context":demand_supply_ctx}
+  return {"eligible":False,"reason":"not_enough_independent_families","families":families,"module_trace":module_trace,"po3_fvg_context":po3_ctx,"precision_entry":precision_ctx,"demand_supply_context":demand_supply_ctx,"trap_review":trap_review}
  h1=closed_candles(by_tf.get("H1") or [],60)
- if len(h1)<25:return {"eligible":False,"reason":"insufficient_h1","families":families}
+ if len(h1)<25:return {"eligible":False,"reason":"insufficient_h1","families":families,"trap_review":trap_review,"module_trace":module_trace}
  views=_views(by_tf,direction); senior=sum(views[x]==direction for x in ("D1","H4","H1")); junior=sum(views[x]==direction for x in ("H1","M15","M5"))
  try:
   base,quote=pair.split("/"); gap=(float(strength.get(base,0))-float(strength.get(quote,0)))*direction
  except Exception: gap=0.0
  guard=ohlc_movement.guard_event(by_tf,direction,82)
  early=ohlc_movement.early_entry_check(by_tf,direction)
- if not early.get("allow",True):return {"eligible":False,"reason":early.get("reason","late_entry"),"families":families}
+ if not early.get("allow",True):return {"eligible":False,"reason":early.get("reason","late_entry"),"families":families,"trap_review":trap_review,"module_trace":module_trace}
  structural_opposite = bool(structure_ctx and structure_context.alignment(structure_ctx,direction)<0 and structure_ctx.state in ("CONFIRMED","SHIFT_CONFIRMED"))
  if (not guard.get("allow",True)) or (guard.get("weak_reversal") and structural_opposite):
-  return {"eligible":False,"reason":"ohlc_contradiction","families":families}
+  return {"eligible":False,"reason":"ohlc_contradiction","families":families,"trap_review":trap_review,"module_trace":module_trace}
  regime=market_regime.analyze_symbol(pair,by_tf); rname=regime.name if regime else "UNKNOWN"
  price_action_ctx=inside_bar_context.analyze_symbol(pair,by_tf,direction)
  mmm_ctx=market_maker_model.analyze(pair,side,by_tf,texts,liquidity_ctx,precision_ctx)
  # A KILLER entry cannot be exceptional if its external liquidity target is already consumed.
  if liquidity_ctx and liquidity_ctx.residual_state=="EXHAUSTED":
-  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"pattern_failure_context":pattern_failure_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
+  return {"eligible":False,"reason":"erl_residual_exhausted","families":families,"trap_review":trap_review,"module_trace":module_trace,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"pattern_failure_context":pattern_failure_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx}
  # Hard contradiction only for genuinely poor context; soft disagreements reduce score.
- if senior==0 or junior==0:return {"eligible":False,"reason":"critical_tf_contradiction","families":families}
+ if senior==0 or junior==0:return {"eligible":False,"reason":"critical_tf_contradiction","families":families,"trap_review":trap_review,"module_trace":module_trace}
  family_score=sum(_WEIGHTS[f] for f in families)
  quality=sum(fam_best.values())/max(1,len(fam_best))
  ohlc_score=float(guard.get("score",50) or 50)
@@ -280,7 +317,7 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
   ohlc_score=max(0.0,ohlc_score-8.0)
  # Mature/noisy movement is context, but KILLER also requires useful remaining path.
  if decision_quality_ctx and decision_quality_ctx.trend_age_atr >= float(getattr(cfg,"SIGNAL_MAX_TREND_MATURITY_ATR",3.2)) and path_ctx and path_ctx.score < 70:
-  return {"eligible":False,"reason":"late_mature_trend","families":families,"decision_quality_context":decision_quality_ctx,"path_quality_context":path_ctx}
+  return {"eligible":False,"reason":"late_mature_trend","families":families,"trap_review":trap_review,"module_trace":module_trace,"decision_quality_context":decision_quality_ctx,"path_quality_context":path_ctx}
  score=family_score + min(14,senior*3+junior*1.5) + max(-4,min(6,(quality-70)*.18)) + max(-4,min(5,(ohlc_score-55)*.16)) + max(-3,min(4,gap*18))
  if rname in ("TREND","EXPANSION"):score+=3
  elif rname == "RANGE":score-=3
@@ -311,10 +348,13 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  score += setup_memory.score_delta(setup_ctx)
  score=max(0,min(100,int(round(score))))
  threshold=int(getattr(cfg,"KILLER_SCORE_THRESHOLD",88))
- if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families}
+ if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families,"trap_review":trap_review,"module_trace":module_trace}
  av=atr(h1,14); entry=float(h1[-1].close); mult=(1 if direction>0 else -1)
+ if not all(map(lambda x: isinstance(x,(int,float)) and math.isfinite(x), (av,entry))) or av<=0 or entry<=0:
+  return {"eligible":False,"reason":"invalid_price_or_atr","families":families,"trap_review":trap_review,"module_trace":module_trace}
  targets=[entry+mult*av*x for x in (1.0,1.75,2.5)]
- return {"eligible":True,"score":score,"families":families,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"early":early,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"pattern_failure_context":pattern_failure_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx,"correlated_price_action_score":correlated_pa_meta}
+ invalidation=entry-mult*1.2*av
+ return {"eligible":True,"score":score,"families":families,"module_trace":module_trace,"quality":round(quality),"ohlc":round(ohlc_score),"senior":senior,"junior":junior,"gap":gap,"regime":rname,"entry":entry,"atr":av,"targets":targets,"invalidation":invalidation,"early":early,"trap_review":trap_review,"liquidity_context":liquidity_ctx,"po3_fvg_context":po3_ctx,"structure_context":structure_ctx,"precision_entry":precision_ctx,"market_maker_model":mmm_ctx,"inside_bar_context":price_action_ctx,"demand_supply_context":demand_supply_ctx,"pump_dump_context":pump_dump_ctx,"divergence_context":divergence_ctx,"baskerville_context":baskerville_ctx,"continuation_liquidity_context":continuation_liq_ctx,"auction_context":auction_ctx,"candle_context":candle_ctx,"trading_intelligence_context":trading_ctx,"path_quality_context":path_ctx,"decision_quality_context":decision_quality_ctx,"turtle_breakout_context":turtle_ctx,"pattern_failure_context":pattern_failure_ctx,"multi_tf_narrative":narrative_ctx,"setup_memory":setup_ctx,"correlated_price_action_score":correlated_pa_meta}
 
 def process_candidates(alerts, market, strength):
  """Active Hunter + strict Execution gate.
@@ -347,6 +387,10 @@ def process_candidates(alerts, market, strength):
   texts=_memory_texts(pair,side)
   meta=evaluate(pair,side,texts,market,strength,events=events,now_utc=now_utc)
   _diag(pair,side,meta)
+  try:
+   killer_audit.record_attempt(pair,side,meta,(market or {}).get(pair) or {},strength,texts,events,now_utc)
+  except Exception:
+   log.exception("KILLER_AUDIT_RECORD_FAILED pair=%s side=%s",pair,side)
   fams=sorted(meta.get("families") or [])
   if not meta.get("eligible"):
    log.info(
@@ -362,8 +406,25 @@ def process_candidates(alerts, market, strength):
   labels=" · ".join(_LABELS.get(f, f) for f in fams)
   def px(v):return f"{v:.3f}" if "JPY" in pair else f"{v:.5f}"
   tr=meta["targets"]
-  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Качество: {meta['score']}",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"{path_quality_context.describe(meta.get('path_quality_context'))}",f"{decision_quality_context.describe(meta.get('decision_quality_context'))}",f"{turtle_breakout_context.describe(meta.get('turtle_breakout_context'))}",f"{pattern_failure_context.describe(meta.get('pattern_failure_context'))}",f"{continuation_liquidity_context.describe(meta.get('continuation_liquidity_context'))}",f"{structure_context.describe(meta.get('structure_context'))}",f"{po3_fvg_context.describe(meta.get('po3_fvg_context'))}",f"{precision_entry.describe(meta.get('precision_entry'))}",f"{market_maker_model.describe(meta.get('market_maker_model'))}",f"{inside_bar_context.describe(meta.get('inside_bar_context'))}",f"{demand_supply_context.describe(meta.get('demand_supply_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
+  text="\n".join(["━━━━━━━━━━━━━━━━━━","🏹🎯 KILLER — ВЫСОКАЯ КОНВЕРГЕНЦИЯ","━━━━━━━━━━━━━━━━━━","",f"💱 Пара: {pair}",f"Направление: {side}",f"Killer Score: {meta['score']}/100",f"Качество: {meta['score']}",f"Независимые семейства: {len(fams)} · {labels}",f"TF: D1/H4/H1 {meta['senior']}/3 · H1/M15/M5 {meta['junior']}/3",f"OHLC Movement: {meta['ohlc']}/100 · Regime: {meta['regime']}",f"Liquidity Context: {liquidity_context.describe(meta.get('liquidity_context'))}",f"{path_quality_context.describe(meta.get('path_quality_context'))}",f"{decision_quality_context.describe(meta.get('decision_quality_context'))}",f"{turtle_breakout_context.describe(meta.get('turtle_breakout_context'))}",f"{pattern_failure_context.describe(meta.get('pattern_failure_context'))}",f"{continuation_liquidity_context.describe(meta.get('continuation_liquidity_context'))}",f"{structure_context.describe(meta.get('structure_context'))}",f"{po3_fvg_context.describe(meta.get('po3_fvg_context'))}",f"{precision_entry.describe(meta.get('precision_entry'))}",f"{market_maker_model.describe(meta.get('market_maker_model'))}",f"{inside_bar_context.describe(meta.get('inside_bar_context'))}",f"{demand_supply_context.describe(meta.get('demand_supply_context'))}",f"Currency Strength по направлению: {meta['gap']:+.2f}",f"Цена подтверждения: {px(meta['entry'])}",f"TR1: {px(tr[0])}",f"TR2: {px(tr[1])}",f"TR3: {px(tr[2])}",f"Отмена: {px(meta['invalidation'])}",f"Контроль ловушек: {meta.get('trap_review',{}).get('risk','UNKNOWN')} (проверка закрытой H1)","","Факт: KILLER учитывает коррелированные подтверждения как одно семейство; одиночные совпадения score не раздувают.","Late-entry / OHLC / критическое TF-противоречие проверены до выпуска события."])
   out.append(text);_PENDING[text]={"pair":pair,"side":side,"meta":meta,"event_id":event_id,"by_tf":by_tf if (by_tf:=market.get(pair)) else {}}
+ # Audit replays are strictly informational: NEVER feed old candidates into
+ # the live signal pipeline. Limit work to one bounded batch per new closed H1.
+ global _LAST_REVIEW_H1
+ def _recheck_anchor(pair_tf):
+  try:
+   b=closed_candles(pair_tf.get("H1") or [],60)
+   return str(getattr(b[-1],"dt","")) if b else ""
+  except (TypeError,ValueError,AttributeError):return ""
+ anchors=tuple(sorted((p,_recheck_anchor(x)) for p,x in (market or {}).items()
+                     if isinstance(x,dict) and _recheck_anchor(x)))
+ if anchors and anchors != _LAST_REVIEW_H1:
+  _LAST_REVIEW_H1=anchors
+  try:
+   killer_audit.review_rejections(market,evaluate,limit=int(getattr(cfg,"KILLER_REPLAY_BATCH_PER_H1",16)))
+   killer_audit.review_outcomes(market,limit=20)
+  except Exception:
+   log.exception("KILLER_RECHECK_FAILED")
  return out
 
 def event_id_for_alert(text):
@@ -382,7 +443,7 @@ def image_for_alert(text):
  X=lambda i:L+i/max(1,len(bars)-1)*(R-L);Y=lambda p:B-(p-lo)/max(1e-12,hi-lo)*(B-T);cw=max(4,int((R-L)/len(bars)*.55))
  for i,b in enumerate(bars):
   x=X(i);col='#37d67a' if b.close>=b.open else '#ff5c6c';d.line((x,Y(b.high),x,Y(b.low)),fill=col,width=2);d.rectangle((x-cw/2,min(Y(b.open),Y(b.close)),x+cw/2,max(Y(b.open),Y(b.close))+1),fill=col)
- for label,p in [("ENTRY",meta["entry"]),("TR1",meta["targets"][0]),("TR2",meta["targets"][1]),("TR3",meta["targets"][2])]:d.line((L,Y(p),R,Y(p)),fill='#d8dde8',width=2);d.text((R+8,Y(p)-10),label,fill='#f1f5fb',font=small)
+ for label,p in [("ENTRY",meta["entry"]),("TR1",meta["targets"][0]),("TR2",meta["targets"][1]),("TR3",meta["targets"][2]),("CANCEL",meta["invalidation"])]:d.line((L,Y(p),R,Y(p)),fill='#d8dde8',width=2);d.text((R+8,Y(p)-10),label,fill='#f1f5fb',font=small)
  d.text((L,22),f"{pair} · H1 · KILLER {c['side']} · {meta['score']}/100",fill='#f1f5fb',font=font)
  out=io.BytesIO();out.name=f"killer_{pair.replace('/','')}.png";im.save(out,format='PNG',optimize=True);out.seek(0);return out
 
@@ -395,11 +456,12 @@ def _diag(pair, side, meta):
    "not_enough_independent_families":"families", "insufficient_h1":"ohlc",
    "late_entry":"late_entry", "late_impulse":"late_entry", "ohlc_contradiction":"ohlc",
    "erl_residual_exhausted":"residual", "critical_tf_contradiction":"htf_ltf",
-   "score_below_threshold":"score", "high_impact_news_veto":"news_guard",
+   "score_below_threshold":"score", "high_impact_news_veto":"news_guard","invalid_price_or_atr":"mathematics",
   }.get(reason,"telegram_ready" if meta.get("eligible") else reason)
+  if reason.startswith("trap_"):stage="trap_guard"
   rec={"utc":datetime.now(timezone.utc).isoformat(timespec="seconds"),"pair":pair,"side":side,
        "stage":stage,"reason":reason,"eligible":bool(meta.get("eligible")),"score":meta.get("score"),
-       "families":sorted(meta.get("families") or []),"family_count":len(meta.get("families") or [])}
+       "families":sorted(meta.get("families") or []),"family_count":len(meta.get("families") or []),"trap_review":meta.get("trap_review") or {}}
   path.parent.mkdir(parents=True,exist_ok=True)
   with path.open("a",encoding="utf-8") as f:f.write(json.dumps(rec,ensure_ascii=False,separators=(",",":"))+"\n")
  except Exception: log.exception("KILLER_DIAGNOSTIC_WRITE_FAILED")

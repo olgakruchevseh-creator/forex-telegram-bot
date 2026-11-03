@@ -4,12 +4,13 @@ OBSERVE_ONLY: reads journal/replay files and reports statistics. It never change
 scanner thresholds, LONG/SHORT decisions, routing, or Navigator state.
 """
 from __future__ import annotations
-import json, os
+import json, os, logging
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import config as cfg
+log = logging.getLogger("fxbot.daily_calibration")
 
 
 def _root():
@@ -242,7 +243,7 @@ def _report(day):
     if late: problems.append(f'поздних входов {late}')
     if pending: problems.append(f'ещё не созрели для replay {pending}')
     if not problems: problems=['явных систематических проблем по доступной выборке не выявлено']
-    return '\n'.join([
+    report = '\n'.join([
       '━━━━━━━━━━━━━━━━━━','📊 DAILY CALIBRATION · OBSERVE_ONLY','━━━━━━━━━━━━━━━━━━',f'Дата: {day} · Europe/Amsterdam','',
       f"Воронка (уникальные решения): CONTEXT_ALLOWED {counts['ALLOWED']} · MASTER_ПОДТВЕРЖДЕНО {counts['MASTER_CONFIRMED']} · SENT {counts['SENT']}",
       f"ЗАБЛОКИРОВАНО: {counts['BLOCKED']} уникальных решений",
@@ -272,6 +273,17 @@ def _report(day):
       'Подтверждения модулей и семейства Master — разные измерения; неизвестный TF не приравнивается к D1/H4.',
       'OBSERVE_ONLY: отчёт ничего автоматически не меняет в торговой логике, порогах, ЛОНГ/ШОРТ или Navigator.'
     ])
+    try:
+        import killer_audit
+        killer_section = killer_audit.daily_digest(day)
+        if killer_section:
+            # Preserve Telegram's 4096 character message limit; don't sacrifice
+            # the main report just to append the optional KILLER section.
+            if len(report) + len(killer_section) + 2 <= 3950:
+                report += '\n\n' + killer_section
+    except Exception:
+        log.exception('KILLER_DAILY_REPORT_SKIPPED')
+    return report
 
 def pending_reports(now_utc=None):
     if not getattr(cfg,'DAILY_CALIBRATION_REPORT_ENABLED',True): return []

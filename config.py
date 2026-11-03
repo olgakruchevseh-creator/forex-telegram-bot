@@ -964,6 +964,9 @@ KILLER_CHART_IMAGES_ENABLED = True
 KILLER_PERSIST_MEMORY = True
 # Meta-card is not competing with its own source modules for the H1 budget.
 KILLER_BYPASS_HOURLY_CAP = True
+# Separate, passive candidate/replay/forward-outcome audit (never auto-resurrects trades).
+KILLER_AUDIT_ENABLED = True
+KILLER_REPLAY_BATCH_PER_H1 = 16
 
 # PO3 x FVG shared scenario context. Internal only; never a Telegram source.
 PO3_FVG_CONTEXT_ENABLED = True

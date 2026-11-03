@@ -369,13 +369,25 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
 def record_decision(text,market,strength,status,reason='',allies=None,ctx=None):
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
  _append(_base(text,market,strength,status,reason,allies,ctx))
+def _killer_gate_observation(text, reason, market):
+ # Audit-only: delivery verdicts from Master / ZigZag / significance / Telegram.
+ # A failed journal append must not change the original decision.
+ if '🏹🎯 KILLER' not in (text or ''): return
+ try:
+  import killer_audit
+  killer_audit.record_delivery_gate(text,reason,market)
+ except Exception:
+  log.exception('KILLER_FINAL_GATE_DIAGNOSTIC_FAILED')
+
 def record_sent(text,market,strength=None,allies=None,ctx=None,master=None):
  """Record delivery while preserving the Signal Context bundle."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
  rec=_base(text,market,strength or {},'SENT','telegram_delivered',allies,ctx,master)
  rec['delivery']=True; _append(rec)
+ _killer_gate_observation(text,'telegram_delivered',market)
 
 def record_stage(text,market,strength,status,allies=None,ctx=None,reason='',master=None):
  """Passive funnel marker; never participates in a trading verdict."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
  _append(_base(text,market,strength or {},status,reason,allies,ctx,master))
+ _killer_gate_observation(text,f"{status}:{reason}",market)
