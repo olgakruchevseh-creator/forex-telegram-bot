@@ -1,0 +1,6 @@
+Историческая калибровка · 05.11.2026 · наблюдение, без изменения торговых порогов
+
+historical_direction_calibration.py
+test_historical_direction_calibration_20261105.py
+HISTORICAL_DIRECTION_CALIBRATION_AUDIT_2026_11_05_RU.md
+CHANGED_FILES_HISTORICAL_DIRECTION_20261105_RU.txt
