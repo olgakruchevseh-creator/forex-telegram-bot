@@ -201,7 +201,7 @@ def confirm_entry(setup: Setup, bars: list[Candle], by_tf: dict, strength: dict[
     if -wanted in senior:
         return None
     confirmations = sum(1 for tf in ("H4", "H1", "M15") if biases.get(tf) == wanted)
-    if confirmations < int(getattr(cfg, "CHAIN_MIN_CONFIRMATIONS", 2)) or not _strength_ok(setup, strength):
+    if confirmations < int(getattr(cfg, "CHAIN_MIN_CONFIRMATIONS", 2)) or (not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) and not _strength_ok(setup, strength)):
         return None
 
     chain_number = 1

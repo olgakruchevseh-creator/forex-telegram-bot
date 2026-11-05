@@ -22,6 +22,7 @@ import market_regime
 import pullback_regime
 import zigzag_scanner
 import decision_journal
+import multi_tf_currency_strength
 import evidence_uncertainty_context
 import information_flow_context
 import evidence_reliability_context
@@ -144,6 +145,25 @@ def _quality(text: str) -> int:
     return int(match.group(1)) if match else 70
 
 
+def _opposite_priority(ctx: dict, text: str):
+    """Tie-break opposite candidates by structure, never by strength alone.
+
+    The legacy score is selectable for historical A/B replay. With observation
+    mode enabled, the currency gap does NOT choose which side may be published.
+    """
+    if not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
+        return (float(ctx.get("directed_gap") or 0.0) * 10.0
+                + int(ctx.get("junior_n") or 0))
+    # H4 ZigZag agreement, senior closed-candle bias, junior confirmation,
+    # then originating module quality. None of these keys is currency strength.
+    return (
+        0 if ctx.get("against_h4") else 1,
+        int(ctx.get("senior_n") or 0),
+        int(ctx.get("junior_n") or 0),
+        _quality(text),
+    )
+
+
 def _tf_biases(by_tf: dict) -> dict[str, int]:
     views = {}
     for tf, minutes in (("D1", 1440), ("H4", 240), ("H1", 60), ("M15", 15), ("M5", 5)):
@@ -250,8 +270,11 @@ def verdict(ctx: dict) -> tuple[bool, str]:
             return False, "pullback_blocked"
         if ctx["progress"] > pullback_max:
             return False, "late_pullback"
+        # Opposing currency strength is an audit warning, never a sole veto.
         if ctx["directed_gap"] < -float(getattr(cfg, "CONTEXT_PULLBACK_MAX_OPPOSITE_GAP", 0.12)):
-            return False, "pullback_strength_crush"
+            if not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
+                return False, "pullback_strength_crush"
+            return True, "pullback_strength_conflict_soft"
         return True, "pullback"
     if ctx["junior_n"] < min_junior:
         return True, "junior_conflict_soft"
@@ -339,6 +362,14 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
             texts = [killer] + [item for item in texts if item != killer]
         primary, allies = texts[0], texts[1:]
         ctx = inspect(pair, side, market.get(pair) or {}, strength)
+        # Same independent, closed-candle snapshot for every module/ally bundle.
+        # Failures are telemetry-only; never cause a new entry or an entry veto.
+        try:
+            anchor = multi_tf_currency_strength.signal_h1_close(market, pair)
+            ctx["currency_strength_mtf"] = multi_tf_currency_strength.inspect(market, pair, side, as_of=anchor)
+        except Exception:
+            log.exception("MULTI_TF_STRENGTH_CONTEXT_FAILED pair=%s", pair)
+            ctx["currency_strength_mtf"] = {"status": "НЕТ ДАННЫХ", "decision_authority": False}
         if pair in pair_uncertainty:
             ctx["evidence_uncertainty"] = pair_uncertainty[pair]
         # Layer 9: lagged information-flow telemetry. Observe-only; computed before
@@ -668,8 +699,8 @@ def prepare(alerts: list[str], market: dict, strength: dict) -> tuple[list[dict]
         prev = winners.get(pair)
         if prev:
             # Одна пара — одна сторона. Противника выкидываем, если он слабее контекста.
-            prev_score = prev["ctx"]["directed_gap"] * 10 + prev["ctx"]["junior_n"]
-            new_score = ctx["directed_gap"] * 10 + ctx["junior_n"]
+            prev_score = _opposite_priority(prev["ctx"], prev["source_text"])
+            new_score = _opposite_priority(ctx, primary)
             if new_score <= prev_score:
                 try:
                     for candidate in texts:

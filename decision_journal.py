@@ -15,6 +15,7 @@ import market_state
 import evidence_families
 import numerical_parameter_registry
 import pair_character_matrix
+import multi_tf_currency_strength
 from analysis import closed_candles, atr
 
 log=logging.getLogger('fxbot.decision_journal')
@@ -335,6 +336,15 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
  source_cards=list(dict.fromkeys([text]+list(allies or [])))
  sources=list(dict.fromkeys(signal_context.source_name(x) for x in source_cards)); by_tf=(market or {}).get(pair) or {}; direction=1 if side=='LONG' else -1 if side=='SHORT' else 0
  now=_now(); local_now=now.astimezone(ZoneInfo(getattr(cfg,'LOCAL_TZ_NAME','Europe/Amsterdam'))); snap={}
+ ctx=dict(ctx or {})
+ if pair and side in ('LONG','SHORT') and 'currency_strength_mtf' not in ctx:
+  try:
+   anchor=multi_tf_currency_strength.signal_h1_close(market,pair)
+   ctx['currency_strength_mtf']=multi_tf_currency_strength.inspect(market,pair,side,as_of=anchor)
+  except Exception:
+   log.exception('MULTI_TF_STRENGTH_JOURNAL_FAILED pair=%s',pair)
+   ctx['currency_strength_mtf']={'status':'НЕТ ДАННЫХ','decision_authority':False}
+
  quality,quality_label=_score(text,['Качество','Качество реакции','Качество пробоя','Сходство фигуры'])
  probability,probability_label=_score(text,['Вероятность','Уверенность модели','Уверенность чертежа'])
  progress=_observed_progress(ctx)

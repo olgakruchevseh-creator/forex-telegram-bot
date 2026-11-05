@@ -144,7 +144,7 @@ def detect_amd(
         if _bias("M15", m15) != wanted or _bias("H4", h4) == -wanted:
             continue
         strength_ok, gap = _strength(symbol, side, strength)
-        if not strength_ok:
+        if not strength_ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
             continue
 
         # Последние PO3-правила: sweep и возврат внутрь диапазона — это ещё
@@ -172,7 +172,7 @@ def detect_amd(
         quality = 74
         quality += min(8, touches_low + touches_high)
         quality += min(6, int(abs(exit_bar.close-exit_bar.open) / av * 3))
-        quality += min(5, int(abs(gap) * 30))
+        quality += min(5, int(max(0.0, gap * wanted) * 30))
         if _bias("H4", h4) == wanted:
             quality += 4
         quality = min(95, quality)

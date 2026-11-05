@@ -626,7 +626,7 @@ def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[st
     M15/M5 могут использоваться внутренними контекстными фильтрами, но не
     заменяют закрытие H1 и не выпускают часовую торговую карточку раньше времени.
     """
-    if not _strength_confirms(symbol, side, strength):
+    if not _strength_confirms(symbol, side, strength) and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return False
     h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
     return _directional_break(h1, side)

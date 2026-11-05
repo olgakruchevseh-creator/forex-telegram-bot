@@ -152,7 +152,7 @@ def detect_exit(phase: Phase, bars: list[Candle], by_tf: dict, strength: dict[st
     base, quote = split_pair(phase.symbol)
     gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
     need = float(getattr(cfg, "PHASE_EXIT_STRENGTH_GAP", 0.05))
-    if (wanted > 0 and gap < need) or (wanted < 0 and gap > -need):
+    if not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) and ((wanted > 0 and gap < need) or (wanted < 0 and gap > -need)):
         return False
     og = ohlc_movement.guard_event(by_tf, phase.side, phase.quality)
     if not og.get("allow", True): return False

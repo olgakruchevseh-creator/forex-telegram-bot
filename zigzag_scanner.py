@@ -232,7 +232,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         except (TypeError, ValueError):
             gap = 0.0
         min_gap = float(getattr(cfg, "ZIGZAG_EARLY_MIN_STRENGTH_GAP", .05))
-        strength_ok = bool(early_side and gap * early_side >= min_gap)
+        strength_ok = bool(early_side and (gap * early_side >= min_gap or getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True)))
         # Текст карточки использует направления analyze_tf, поэтому ранний
         # сигнал разрешён лишь когда эти же отображаемые M15/M5 не спорят с
         # сериями свечей. Это исключает формулировку «M15 подтвердил» при RANGE.

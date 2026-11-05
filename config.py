@@ -26,6 +26,10 @@ TIMEFRAMES = [
     {"key": "M5", "api": "5min", "label": "5 минут", "candles": 250, "ttl_min": 1},
 ]
 
+# Currency strength is independent context, not a standalone entry veto.
+# Restore the original legacy strength gates with False for controlled A/B replay.
+# This does NOT relax structural/H1-close/anti-late/news safety checks.
+CURRENCY_STRENGTH_ADVISORY_ONLY = True
 STRENGTH_TF = "H1"
 # Сила = движение за последнюю ЗАКРЫТУЮ часовую свечу.
 # Сила по нескольким закрытым H1, а не по одному шумному бару.

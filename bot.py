@@ -34,6 +34,7 @@ from analysis import (
 )
 import briefing
 import briefing_delivery
+import multi_tf_currency_strength
 import news as newsmod
 import levels
 import zigzag_scanner
@@ -1944,6 +1945,14 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             cpi_note = newsmod.cpi_pair_guard(pair_for_cpi, cpi_events) if pair_for_cpi else ""
             if cpi_note and cpi_note not in text:
                 text = text.rstrip() + "\n\n" + cpi_note
+            try:
+                mtf = ((bundle.get("ctx") or {}).get("currency_strength_mtf")
+                       or multi_tf_currency_strength.inspect(
+                           market, pair, direct_side,
+                           as_of=multi_tf_currency_strength.signal_h1_close(market, pair)))
+                text = text.rstrip() + "\n" + multi_tf_currency_strength.short_note(mtf)
+            except Exception:
+                log.exception("MULTI_TF_STRENGTH_CARD_FAILED pair=%s", pair)
             source_image = _source_image_for(text, source_text)
             await _deliver_trade_card(context.application, int(chat_id), text, source_image)
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in source_text:

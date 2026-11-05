@@ -34,14 +34,14 @@ class SignalContextParseTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "pullback")
 
-    def test_verdict_blocks_crushed_pullback(self):
+    def test_verdict_keeps_pullback_with_opposing_strength_as_soft_warning(self):
         ctx = {
             "mode": "PULLBACK", "against_h4": True, "junior_n": 2,
             "directed_gap": -0.4, "progress": 10, "weak_reversal": False,
         }
         ok, reason = sc.verdict(ctx)
-        self.assertFalse(ok)
-        self.assertEqual(reason, "pullback_strength_crush")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "pullback_strength_conflict_soft")
 
     def test_verdict_weak_reversal_alone_is_not_hard_veto(self):
         ctx = {
@@ -59,6 +59,17 @@ class SignalContextParseTest(unittest.TestCase):
         ok, reason = sc.verdict(ctx)
         self.assertFalse(ok)
         self.assertEqual(reason, "weak_reversal")
+
+    def test_opposite_strength_cannot_win_direction_in_advisory_mode(self):
+        from unittest.mock import patch
+        strong_usd = {"directed_gap": 1.5, "against_h4": True, "senior_n": 1, "junior_n": 1}
+        weak_usd = {"directed_gap": -1.5, "against_h4": False, "senior_n": 2, "junior_n": 3}
+        with patch.object(sc.cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
+            self.assertLess(sc._opposite_priority(strong_usd, "Качество: 90"),
+                            sc._opposite_priority(weak_usd, "Качество: 80"))
+        with patch.object(sc.cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", False):
+            self.assertGreater(sc._opposite_priority(strong_usd, "Качество: 90"),
+                               sc._opposite_priority(weak_usd, "Качество: 80"))
 
     def test_prepare_merges_same_idea(self):
         a = "💱 Пара: EUR/USD\nНаправление: LONG\nКачество: 80\n⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН"

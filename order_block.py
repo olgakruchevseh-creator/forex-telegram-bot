@@ -244,12 +244,12 @@ def confirm_retest(block: OrderBlock, h1: list[Candle], h4: list[Candle], m15: l
     if getattr(cfg, "ORDER_BLOCK_REQUIRE_LTF_STRUCTURE", True) and not structural:
         return None
     strength_ok, gap = _strength(block, strength)
-    if not strength_ok:
+    if not strength_ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
     # Delivery is committed only after Telegram acknowledgement (mark_delivered).
     # Repeated mitigation weakens freshness; do not count it as extra evidence.
     freshness_penalty = max(0, block.touch_count - 1) * int(getattr(cfg, "ORDER_BLOCK_REPEAT_TOUCH_PENALTY", 3))
-    quality = min(95, max(0, block.quality + 6 + min(5, int(body/av*3)) + min(4, int(abs(gap)*25)) - freshness_penalty))
+    quality = min(95, max(0, block.quality + 6 + min(5, int(body/av*3)) + min(4, int(max(0.0, gap * wanted)*25)) - freshness_penalty))
     if block.side == "LONG":
         penetration = max(0.0, min(1.0, (block.high-current.low) / max(block.high-block.low, 1e-12)))
     else:

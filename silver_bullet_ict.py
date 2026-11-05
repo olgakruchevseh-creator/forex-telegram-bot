@@ -148,7 +148,7 @@ def detect(symbol,by_tf,strength,events=None,now_utc=None):
     hit=_find_sweep(m5,idx,_candidate_liquidity(symbol,by_tf,m5,idx,av))
     if not hit:return None
     sweep,side,level,sweep_extreme,liquidity_source,_=hit; wanted=1 if side=="LONG" else -1; gap=_gap(symbol,strength)
-    if wanted*gap<float(getattr(cfg,"SILVER_BULLET_MIN_STRENGTH_GAP",.05)):return None
+    if wanted*gap<float(getattr(cfg,"SILVER_BULLET_MIN_STRENGTH_GAP",.05)) and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):return None
     if _bias("H4",h4)==-wanted or _bias("H1",h1)==-wanted:return None
     mss_level=_mss_level(m5,sweep,side)
     if mss_level is None:return None
@@ -178,7 +178,7 @@ def detect(symbol,by_tf,strength,events=None,now_utc=None):
     except Exception:pass
     targets=_targets(symbol,by_tf,side,entry,av); risk=abs(entry-stop); rr1=abs(targets[0][0]-entry)/risk if risk else 0
     if rr1<float(getattr(cfg,"SILVER_BULLET_MIN_TR1_RR",1.0)):return None
-    quality=78+(5 if _bias("H1",h1)==wanted else 0)+(4 if _bias("H4",h4)==wanted else 0)+min(5,int(abs(gap)*25))+min(5,2*len(support))-min(6,3*len(conflict))
+    quality=78+(5 if _bias("H1",h1)==wanted else 0)+(4 if _bias("H4",h4)==wanted else 0)+min(5,int(max(0.0, gap * wanted)*25))+min(5,2*len(support))-min(6,3*len(conflict))
     if liquidity_source not in ("локальный максимум до окна","локальный минимум до окна"):quality+=3
     quality=max(72,min(95,quality))
     return {"symbol":symbol,"side":side,"window":window,"liquidity":level,"liquidity_source":liquidity_source,"sweep":sweep_extreme,"mss_level":mss_level,"fvg_low":min(fvg),"fvg_high":max(fvg),"entry":entry,"fill":current,"stop":stop,"tr1":targets[0][0],"tr2":targets[1][0],"tr3":targets[2][0],"tr1_source":targets[0][1],"tr2_source":targets[1][1],"tr3_source":targets[2][1],"rr1":rr1,"close":current,"quality":quality,"confidence":max(70,quality-5),"gap":gap,"trigger_dt":trigger.dt,"fill_dt":m5[fill_i].dt,"atr":av,"context_support":support,"context_conflict":conflict,"liquidity_pool":(liquidity_pool.side if liquidity_pool else None)}

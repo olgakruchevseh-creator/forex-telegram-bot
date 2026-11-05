@@ -74,9 +74,15 @@ class MasterDirectionTests(unittest.TestCase):
         )
         self.assertIsNone(self.analyze(events=[event]))
 
-    def test_almost_equal_strength_blocks(self):
+    def test_almost_equal_strength_is_advisory_and_legacy_penalty_is_reversible(self):
         weak = stack(gap=.03)
-        self.assertIsNone(self.analyze(st=weak))
+        neutral = self.analyze(st=weak)
+        self.assertIsNotNone(neutral)
+        self.assertTrue(neutral["strength_conflict"])
+        with patch.object(master.cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", False):
+            legacy = self.analyze(st=weak)
+        self.assertIsNotNone(legacy)
+        self.assertLess(legacy["quality"], neutral["quality"])
 
     def test_opposite_module_is_one_penalty_group_without_echo(self):
         result = self.analyze(alerts=[trigger("LONG"), trigger("SHORT")])

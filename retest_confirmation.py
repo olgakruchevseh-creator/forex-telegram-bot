@@ -202,7 +202,7 @@ def confirm_retest(setup: RetestSetup, h1: list[Candle], by_tf: dict,
 
     gap = _strength_gap(setup, strength)
     minimum_gap = float(getattr(cfg, "RETEST_MIN_STRENGTH_GAP", 0.05))
-    if (gap * wanted) < minimum_gap:
+    if (gap * wanted) < minimum_gap and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
 
     early = ohlc_movement.early_entry_check(by_tf, wanted)

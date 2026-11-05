@@ -193,7 +193,9 @@ def _update_record(record: dict, bars: list[Candle]) -> None:
         record["mfe_atr"] = round(max(0.0, favorable / av), 3)
         record["mae_atr"] = round(max(0.0, adverse / av), 3)
         record["mfe_bar"] = mfe_i; record["mae_bar"] = mae_i
-        record["mfe_before_mae"] = bool(mfe_i <= mae_i)
+        # H1 OHLC gives no intrabar order. Max favorable and max adverse
+        # may occur in the same candle: the sequence is then unknowable.
+        record["mfe_before_mae"] = (mfe_i < mae_i if mfe_i != mae_i else None)
         denom = max(float(record["mfe_atr"]) + float(record["mae_atr"]), 1e-9)
         record["excursion_efficiency"] = round(float(record["mfe_atr"]) / denom, 3)
 
@@ -235,6 +237,7 @@ def _summary(records: list[dict], title: str) -> str:
     avg_eff = sum(float(r.get("excursion_efficiency") or 0) for r in mature_exc) / len(mature_exc) if mature_exc else 0
     favorable_first = sum(r.get("mfe_before_mae") is True for r in mature_exc)
     timed_exc = sum(r.get("mfe_before_mae") is not None for r in mature_exc)
+    order_unknown = sum(r.get("mfe_before_mae") is None for r in mature_exc)
     target_atr=float(getattr(cfg,"JOURNAL_TARGET_ATR",1.0)); invalid_atr=float(getattr(cfg,"JOURNAL_INVALIDATION_ATR",.75))
     sources: dict[str, list[int]] = {}
     pairs: dict[str, list[int]] = {}
@@ -243,8 +246,17 @@ def _summary(records: list[dict], title: str) -> str:
         if score:
             sources.setdefault(r.get("source", "Другой модуль"), []).append(score)
             pairs.setdefault(r.get("symbol", "—"), []).append(score)
-    best_source = max(sources, key=lambda key: (sum(sources[key]), len(sources[key]))) if sources else "—"
-    best_pair = max(pairs, key=lambda key: (sum(pairs[key]), len(pairs[key]))) if pairs else "—"
+    # This is the leader by NET number of standardized outcomes, NOT the
+    # highest statistical win rate: disclose its sample size and components.
+    def _leader(groups):
+        if not groups:
+            return "нет завершённых результатов"
+        name = max(groups, key=lambda key: (sum(groups[key]), len(groups[key])))
+        values = groups[name]
+        return (f"{name} · n={len(values)} · целей={values.count(1)} · "
+                f"отмен={values.count(-1)} · баланс={sum(values):+d}")
+    best_source = _leader(sources)
+    best_pair = _leader(pairs)
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "",
         f"Записано сигналов: {len(records)}", f"Стандартная цель журнала (+{target_atr:.2f} ATR) достигнута: {targets}",
@@ -254,11 +266,12 @@ def _summary(records: list[dict], title: str) -> str:
         (f"Среднее движение в плюс по зрелым сценариям: {avg_mfe:.2f} ATR" if mature_exc else "Среднее движение в плюс: пока нет зрелых данных"),
         (f"Среднее движение против по зрелым сценариям: {avg_mae:.2f} ATR" if mature_exc else "Среднее движение против: пока нет зрелых данных"),
         (f"Эффективность экскурсии MFE/(MFE+MAE), зрелые: {avg_eff*100:.0f}%" if mature_exc else "Эффективность экскурсии: пока нет зрелых данных"),
-        (f"Сначала движение в пользу сигнала: {round(favorable_first/timed_exc*100)}%"
-         if timed_exc else "Сначала движение в пользу сигнала: пока нет данных"),
-        f"Лучшая пара по завершённым: {best_pair}",
-        f"Лучший модуль по завершённым: {best_source}", "",
-        "Примечание: TARGET/INVALIDATED — стандартизированный журнальный тест, а не frozen TR1/invalidation торговой карточки. CLOSED_8H не входит в win-rate, но входит в зрелую MFE/MAE-статистику; открытые и неоднозначные исключены.",
+        (f"Пик MFE раньше пика MAE (разные H1): {round(favorable_first/timed_exc*100)}% · сравнимых {timed_exc}"
+         if timed_exc else "Порядок пиков MFE/MAE по H1: нет однозначных случаев"),
+        f"Порядок пиков внутри одной H1 не определён: {order_unknown}",
+        f"Лидер пар по балансу целей и отмен: {best_pair}",
+        f"Лидер модулей по балансу целей и отмен: {best_source}", "",
+        "Примечание: TARGET/INVALIDATED — стандартизированный журнальный тест, а не frozen TR1/invalidation торговой карточки. CLOSED_8H не входит в win-rate, но входит в зрелую MFE/MAE-статистику; открытые и неоднозначные исключены. Порядок максимумов по H1 НЕ является первым движением цены после входа.",
     ])
 
 

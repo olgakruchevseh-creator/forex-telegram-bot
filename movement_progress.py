@@ -96,7 +96,7 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
     else:
         # Откат часто идёт против старшей силы, но сильный встречный разрыв блокируем.
         min_gap = -float(getattr(cfg, "MOVEMENT_PULLBACK_MAX_OPPOSITE_STRENGTH", .03))
-    if directed_gap < min_gap:
+    if directed_gap < min_gap and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
 
     h1_swings = _swings("H1", h1)
@@ -167,7 +167,7 @@ def analyze_for_side(symbol: str, by_tf: dict, strength: dict[str, float], side:
         return None
     ok, gap = _strength_ok(symbol, side, strength)
     minimum_gap = float(getattr(cfg, "LOCAL_AMD_MIN_STRENGTH_GAP", 0.08))
-    if not ok or gap * direction < minimum_gap:
+    if (not ok or gap * direction < minimum_gap) and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
     h1_swings = _swings("H1", h1)
     anchor_kind = "low" if direction > 0 else "high"

@@ -754,7 +754,7 @@ def _time_horizon(symbol: str, side: str, by_tf: dict, route: dict, master: dict
     senior = int(master.get("senior_n") or 0)
     junior = int(master.get("junior_n") or 0)
     # Сильное согласие допускает верхнюю часть окна; конфликт сжимает горизонт.
-    if directed_gap < 0 or senior <= 1 or junior <= 1:
+    if (directed_gap < 0 and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True)) or senior <= 1 or junior <= 1:
         high = max(low, min(high, 2))
     h1 = movement_progress.closed_candles(by_tf.get("H1") or [], 60)
     end_low = end_high = ""
@@ -935,7 +935,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     mx = character.get('interaction_matrix') or {}
     if mx.get('ready'):
         character_line += f" · матрица {mx.get('score', 50):.0f}/100"
-    adjustment = int(strength_dynamic.get("adjustment") or 0)
+    adjustment = (0 if getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) else int(strength_dynamic.get("adjustment") or 0))
     if adjustment:
         master = dict(master)
         master["quality"] = max(0, min(100, int(master.get("quality") or 0) + adjustment))
@@ -967,10 +967,10 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         htf_opposite = (h4_bias == -direction or d1_bias == -direction)
         no_tf_confirmation = (int(master.get("senior_n") or 0) == 0
                               and int(master.get("junior_n") or 0) == 0)
-        conflicts = htf_opposite or h1_bias == -direction or directed_gap <= -.03 or zz_opposite
+        conflicts = htf_opposite or h1_bias == -direction or (directed_gap <= -.03 and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True)) or zz_opposite
         fully_confirmed = (not htf_opposite and int(master.get("senior_n") or 0) == 3
                            and int(master.get("junior_n") or 0) == 3
-                           and h1_bias == direction and directed_gap >= .03
+                           and h1_bias == direction and (directed_gap >= .03 or getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True))
                            and not zz_opposite)
         if fully_confirmed:
             navigator_status = "✅ ПОЛНОСТЬЮ ПОДТВЕРЖДЁН"
@@ -1489,7 +1489,7 @@ def _continuation_check(item: dict, by_tf: dict, strength: dict[str, float]) -> 
     except (TypeError, ValueError):
         gap = 0.0
     minimum = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .03))
-    if gap * wanted < minimum:
+    if gap * wanted < minimum and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         problems.append("сила валют не поддерживает продолжение")
     try:
         zz = zigzag_scanner.analyze_symbol(item["symbol"], by_tf)

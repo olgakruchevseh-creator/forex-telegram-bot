@@ -44,8 +44,12 @@ class AmdPowerOfThreeTests(unittest.TestCase):
     def test_amd_is_blocked_by_weak_strength(self):
         h1 = bullish_model()
         other = [range_bar(i) for i in range(25)]
-        with patch.object(amd, "atr", return_value=.25), patch.object(amd, "_bias", return_value=1):
+        with patch.object(amd, "atr", return_value=.25), patch.object(amd, "_bias", return_value=1), \
+             patch.object(amd.cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", False):
             self.assertIsNone(amd.detect_amd("EUR/USD", h1, other, other, {"EUR": .02, "USD": 0}))
+        # Current policy: this is only a soft observation. Structure still decides.
+        with patch.object(amd, "atr", return_value=.25), patch.object(amd, "_bias", return_value=1):
+            self.assertIsNotNone(amd.detect_amd("EUR/USD", h1, other, other, {"EUR": .02, "USD": 0}))
 
     def test_event_is_marked_sent_only_after_delivery(self):
         text = "🎯 AMD / POWER OF THREE — LONG\n💱 Пара: EUR/USD"

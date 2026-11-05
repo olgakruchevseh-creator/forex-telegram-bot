@@ -523,9 +523,9 @@ def decide_signal(stack: PairStack) -> Optional[str]:
         structural = structure_bias(h4.structure) if h4 else 0
         if structural and structural != stack.htf_bias:
             return None
-    if stack.htf_bias > 0 and strong:
+    if stack.htf_bias > 0 and (strong or getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True)):
         return "LONG"
-    if stack.htf_bias < 0 and weak:
+    if stack.htf_bias < 0 and (weak or getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True)):
         return "SHORT"
     return None
 

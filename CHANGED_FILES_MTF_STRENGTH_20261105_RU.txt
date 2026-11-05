@@ -1,0 +1,46 @@
+FOREX MTF STRENGTH — ПАТЧ · 05.11.2026
+Это НЕ полный репозиторий: только изменённые и новые файлы.
+Папка в архиве forex-telegram-bot-main/ — корень вашего Forex-репозитория.
+Скопировать содержимое папки поверх соответствующих путей вашего репозитория.
+Обязательно сначала прочесть FOREX_MTF_STRENGTH_MICRO_AUDIT_2026-11-05_RU.md.
+В config.py: CURRENCY_STRENGTH_ADVISORY_ONLY = True (наблюдение, без старых самостоятельных strength-only блокировок).
+Интеграция с живым Telegram/Railway не проверена; нужен тест на резервном деплое.
+
+Изменённых / новых файлов кода и отчёта: 35 (Python: 34), плюс этот манифест.
+
+Файлы:
+FOREX_MTF_STRENGTH_MICRO_AUDIT_2026-11-05_RU.md
+accumulation_distribution.py
+amd_power_of_three.py
+analysis.py
+bot.py
+breaker_block.py
+chain_entries.py
+config.py
+consolidation_zone.py
+crt_candle_range.py
+decision_journal.py
+disbalance.py
+fib_smc.py
+fibonacci_grid.py
+imbalance.py
+levels.py
+liquidity_sweep.py
+master_direction.py
+movement_progress.py
+multi_tf_currency_strength.py
+order_block.py
+patterns.py
+poc_profile.py
+retest_confirmation.py
+signal_context.py
+signal_journal.py
+signal_navigator.py
+silver_bullet_ict.py
+smart_money_62_26.py
+test_amd_power_of_three.py
+test_master_direction.py
+test_multi_tf_currency_strength_20261105.py
+test_signal_context.py
+test_signal_journal.py
+zigzag_scanner.py

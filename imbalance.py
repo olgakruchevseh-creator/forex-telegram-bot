@@ -188,11 +188,11 @@ def validate_zone(zone: FvgZone, closed_map: dict, strength: dict[str, float]) -
     base, quote = split_pair(zone.symbol)
     gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
     need = float(getattr(cfg, "IMBALANCE_MIN_STRENGTH_GAP", 0.05))
-    if (wanted > 0 and gap < need) or (wanted < 0 and gap > -need):
+    if not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) and ((wanted > 0 and gap < need) or (wanted < 0 and gap > -need)):
         return False
     zone.aligned = aligned_main + confirms
     zone.strength_gap = gap
-    zone.quality = min(96, zone.quality + min(16, len(zone.aligned) * 3) + min(8, int(abs(gap) * 30)))
+    zone.quality = min(96, zone.quality + min(16, len(zone.aligned) * 3) + min(8, int(max(0.0, gap * wanted) * 30)))
     og = ohlc_movement.combine([(tf, closed_map.get(tf) or []) for tf in ("D1","H4","H1","M15","M5")], wanted)
     if og.get("weak_reversal"): return False
     if og.get("available"):

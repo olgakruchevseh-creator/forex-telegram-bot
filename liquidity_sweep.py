@@ -230,7 +230,7 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
     if _bias("M15", m15) != wanted or _bias("H4", h4) == -wanted:
         return None
     strength_ok, gap = _strength(setup.symbol, setup.side, strength)
-    if not strength_ok:
+    if not strength_ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
     # delivery commit is deferred until Telegram acknowledgement
     source_points = 8 if "дня" in setup.source else 5
@@ -238,7 +238,7 @@ def confirm_sweep(setup: SweepSetup, h1: list[Candle], h4: list[Candle], m15: li
     # Small bounded bonuses: geometry can strengthen a valid setup but cannot create one.
     geometry_bonus=min(6, int(setup.sweep_depth_atr*3 + setup.reclaim_depth_atr*3 + setup.rejection_wick_pct*6))
     hierarchy_bonus=2 if setup.pool_hierarchy=="HTF" else 1 if setup.pool_hierarchy=="STRUCTURAL" else 0
-    quality = min(94, 72 + source_points + min(7, int(abs(current.close-current.open)/av*4)) + min(5, int(abs(gap)*30)) + pd_bonus + geometry_bonus + hierarchy_bonus)
+    quality = min(94, 72 + source_points + min(7, int(abs(current.close-current.open)/av*4)) + min(5, int(max(0.0, gap * wanted)*30)) + pd_bonus + geometry_bonus + hierarchy_bonus)
     lifecycle = "ПУЛ ЛИКВИДНОСТИ → SWEEP → ВОЗВРАТ → CHOCH/BOS → " + ("FVG/OB КОНФЛЮЭНС" if pd_bonus else "СТРУКТУРА ПОДТВЕРЖДЕНА")
     return {
         "symbol": setup.symbol, "side": setup.side, "source": setup.source,

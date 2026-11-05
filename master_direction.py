@@ -393,7 +393,7 @@ def analyze_symbol(
     # не скрывала одиночное противоречие за значением 94/100.
     if opposite:
         quality -= 5
-    if strength_conflict:
+    if strength_conflict and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         quality -= min(8, 3 + int(max(0.0, minimum_gap-directed_gap) * 30))
     if ltf and ltf != side:
         quality -= 6
@@ -571,7 +571,7 @@ def analyze_local_amd_symbol(
         return None
     gap = stack.strength_gap
     minimum_gap = float(getattr(cfg, "LOCAL_AMD_MIN_STRENGTH_GAP", 0.08))
-    if gap * side < minimum_gap:
+    if gap * side < minimum_gap and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
     # Старые кандидаты других модулей могут описывать предыдущий откат.
     # Для ранней ветки источником является только завершённая AMD-модель.
@@ -581,7 +581,7 @@ def analyze_local_amd_symbol(
         return None
     senior_n = sum(stack.views[k].bias == side for k in ("D1", "H4", "H1") if k in stack.views)
     junior_n = sum(stack.views[k].bias == side for k in ("H1", "M15", "M5") if k in stack.views)
-    quality = min(86, 72 + (6 if junior_n == 3 else 3) + min(6, int(abs(gap) * 30)) + 5)
+    quality = min(86, 72 + (6 if junior_n == 3 else 3) + min(6, int(max(0.0, gap * side) * 30)) + 5)
     return {
         "symbol": symbol,
         "side": "LONG" if side > 0 else "SHORT",

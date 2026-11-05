@@ -245,7 +245,7 @@ def _confirm(s: Setup, by_tf: dict, d1: list[Candle], h4: list[Candle], h1: list
     if m15b == -wanted and m5b == -wanted:
         return None
     ok,gap = _strength_ok(s.symbol,s.side,strength)
-    if not ok:
+    if not ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
 
     early = ohlc_movement.early_entry_check(by_tf, wanted)
@@ -259,7 +259,7 @@ def _confirm(s: Setup, by_tf: dict, d1: list[Candle], h4: list[Candle], h1: list
     time_cluster = tg["cluster"]
     time_bonus = 5 if time_cluster == "62→26" else (2 if time_cluster == "RATIO" else 0)
     ltf_bonus = 3 if (m15b == wanted or m5b == wanted) else 0
-    quality=min(97,s.quality+6+ltf_bonus+time_bonus+min(5,int(abs(gap)*30))+int(og.get("quality_delta",0)))
+    quality=min(97,s.quality+6+ltf_bonus+time_bonus+min(5,int(max(0.0, gap * wanted)*30))+int(og.get("quality_delta",0)))
     return {**asdict(s),"close":c.close,"gap":gap,"quality":quality,"confidence":min(93,quality-3),
             "confirm_dt":c.dt,"pullback_mode":pb.mode,"pullback_bars":pb.bars,
             "pullback_move_atr":pb.move_atr,"pullback_efficiency":pb.efficiency,

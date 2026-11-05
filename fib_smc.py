@@ -208,7 +208,7 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
     if m15_bias == -wanted and m5_bias == -wanted:
         return None
     strength_ok, gap = _strength(symbol, side, strength)
-    if not strength_ok:
+    if not strength_ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
     blocked, news_name = _news_blocked(symbol, events, now_utc)
     if blocked:
@@ -218,7 +218,7 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
         return None
 
     confirmations = 3 + int(ob_ok) + int(sweep_ok) + int(h4_bias == wanted) + int(d1_bias == wanted)
-    quality = min(97, 70 + confirmations*3 + min(7, int(move/av)) + min(6, int(abs(gap)*35)) + int(og.get('quality_delta',0)))
+    quality = min(97, 70 + confirmations*3 + min(7, int(move/av)) + min(6, int(max(0.0, gap * wanted)*35)) + int(og.get('quality_delta',0)))
     return {
         "key": f"{symbol}|{side}|{h1[end.index].dt}|{end.price:.6f}|{m15[-1].dt}",
         "symbol": symbol, "side": side, "zone_low": zone_low, "zone_high": zone_high,

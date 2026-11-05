@@ -1421,11 +1421,11 @@ def process_market(market: dict, strength: dict[str, float] | None = None, news_
                             continue
                         if semantic_recent(store, z, ev, side, cdt):
                             continue
-                        if ev in ("bounce_res", "bounce_sup") and not _strength_confirms(
+                        if ev in ("bounce_res", "bounce_sup") and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) and not _strength_confirms(
                             z.symbol, side, strength or {}
                         ):
                             continue
-                        if ev in ("fail_res", "fail_sup") and not _strength_confirms(
+                        if ev in ("fail_res", "fail_sup") and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) and not _strength_confirms(
                             z.symbol,
                             side,
                             strength or {},

@@ -189,7 +189,7 @@ def confirm_breaker(c: BreakerCandidate, d1: list[Candle], h1: list[Candle], h4:
         return None
 
     strength_ok, gap = _strength(c, strength)
-    if not strength_ok:
+    if not strength_ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
 
     width=max(c.high-c.low, 1e-12)
@@ -199,7 +199,7 @@ def confirm_breaker(c: BreakerCandidate, d1: list[Candle], h1: list[Candle], h4:
     ce_respected = current.close >= equilibrium if wanted > 0 else current.close <= equilibrium
     freshness_penalty=max(0,c.touch_count-1)*int(getattr(cfg,"BREAKER_BLOCK_REPEAT_TOUCH_PENALTY",3))
     break_bonus=min(4, int(max(0.0,c.break_displacement_atr-min_break_disp)*3)) if c.break_displacement_atr else 0
-    quality = min(96, max(0, c.source_quality + 6 + min(5, int(body/av*3)) + min(4, int(abs(gap)*25))
+    quality = min(96, max(0, c.source_quality + 6 + min(5, int(body/av*3)) + min(4, int(max(0.0, gap * wanted)*25))
                               + break_bonus + (2 if ce_respected else 0) - freshness_penalty))
     return {
         "symbol": c.symbol, "side": c.side, "source_side": c.source_side,

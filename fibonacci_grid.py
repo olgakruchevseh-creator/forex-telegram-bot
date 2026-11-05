@@ -120,7 +120,7 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
     if h4_bias == -wanted or _bias("M15", m15) != wanted:
         return None
     strength_ok, gap = _strength_ok(symbol, side, strength)
-    if not strength_ok:
+    if not strength_ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
 
     # Three-point A-B-C projection starts from the confirmed pullback extreme.
@@ -133,7 +133,7 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         fib_projection = {r: projection_anchor - move * r for r in extension_ratios}
 
     geometry_bonus = min(4, max(0, pb.bars - 2)) + min(3, int(pb.efficiency * 4))
-    quality = min(94, 72 + min(8, int(move / av)) + min(8, int(abs(gap) * 40))
+    quality = min(94, 72 + min(8, int(move / av)) + min(8, int(max(0.0, gap * wanted) * 40))
                   + (4 if h4_bias == wanted else 0) + geometry_bonus)
     og = ohlc_movement.guard_event(by_tf, side, quality)
     if not og.get("allow", True): return None

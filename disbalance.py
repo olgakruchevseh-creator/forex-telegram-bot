@@ -156,7 +156,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float]) -> Sign
                 confirms.append(tf)
         if not confirms:
             continue
-        if (wanted > 0 and gap < min_gap) or (wanted < 0 and gap > -min_gap):
+        if not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) and ((wanted > 0 and gap < min_gap) or (wanted < 0 and gap > -min_gap)):
             continue
         # A Disbalance is useful only while it is still a NEW executable move.
         # Keep the global Telegram late-entry gate as a second safety net, but do
@@ -174,7 +174,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float]) -> Sign
         impulse_pts = min(22, int(max(0, sig.impulse_atr - 1.0) * 15))
         body_pts = min(12, int(max(0, sig.body_ratio - 0.5) * 30))
         align_pts = min(18, len(sig.aligned) * 4)
-        strength_pts = min(12, int(abs(gap) * 40))
+        strength_pts = min(12, int(max(0.0, gap * wanted) * 40))
         sig.quality = min(96, 52 + impulse_pts + body_pts + align_pts + strength_pts)
         sig.confidence = min(92, max(70, sig.quality - 4))
         og=ohlc_movement.guard_event(by_tf,sig.side,sig.quality)

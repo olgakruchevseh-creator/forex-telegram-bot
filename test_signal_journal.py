@@ -34,3 +34,31 @@ def test_weekly_summary_excludes_open_from_mature_excursion_average():
     assert 'Среднее движение в плюс по зрелым сценариям: 1.20 ATR' in text
     assert 'Стандартная цель журнала' in text
     assert 'frozen TR1/invalidation' in text
+    assert 'Лидер модулей по балансу целей и отмен: ZigZag · n=1 · целей=1' in text
+
+
+def test_extrema_in_same_h1_never_claim_intrabar_order():
+    record = {"side": "LONG", "entry_dt": "2026-10-23 10:00:00", "entry": 100.0,
+              "atr": 1.0, "target": 102.0, "invalidation": 98.0,
+              "status": "OPEN", "resolved_dt": "", "horizons": {}}
+    bars = [_bar(10,100,100.1,99.9,100),
+            _bar(11,100,101.2,99.1,100.2),
+            _bar(12,100.2,100.5,99.5,100.3)]
+    sj._update_record(record, bars)
+    assert record["mfe_bar"] == record["mae_bar"] == 1
+    assert record["mfe_before_mae"] is None
+    report = sj._summary([record | {"status": "CLOSED_8H"}], "ТЕСТ")
+    assert "нет однозначных случаев" in report
+    assert "Порядок пиков внутри одной H1 не определён: 1" in report
+
+
+def test_distinct_h1_extrema_have_observable_order_not_first_price_move():
+    record = {"side": "LONG", "entry_dt": "2026-10-23 10:00:00", "entry": 100.0,
+              "atr": 1.0, "target": 103.0, "invalidation": 97.0,
+              "status": "OPEN", "resolved_dt": "", "horizons": {}}
+    bars = [_bar(10,100,100.1,99.9,100),
+            _bar(11,100,101.2,99.8,101.1),
+            _bar(12,101.1,101.15,99.1,99.5)]
+    sj._update_record(record, bars)
+    assert record["mfe_before_mae"] is True
+    assert record["mfe_bar"] == 1 and record["mae_bar"] == 2

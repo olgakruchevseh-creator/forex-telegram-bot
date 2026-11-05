@@ -312,7 +312,7 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     if _bias("M15", m15) == -wanted:
         return None
     ok, gap = _strength_ok(symbol, side, strength)
-    if not ok:
+    if not ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
         return None
     distance = abs(cur.close-ref)/av
     if distance > float(getattr(cfg, "POC_MAX_ENTRY_DISTANCE_ATR", .65)):
@@ -321,7 +321,7 @@ def detect(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict | None:
     value_confluence = False
     if prof.vwap is not None:
         value_confluence = abs(prof.vwap-prof.poc)/av <= float(getattr(cfg, "VALUE_POC_VWAP_CONFLUENCE_ATR", .20))
-    quality = 72 + min(8, int(body/av*5)) + min(6, int(abs(gap)*25)) + (3 if value_confluence else 0)
+    quality = 72 + min(8, int(body/av*5)) + min(6, int(max(0.0, gap * wanted)*25)) + (3 if value_confluence else 0)
     if _bias("H1", h1) == wanted:
         quality += 5
     # Geometry/context extensions: bounded evidence, never independent direction votes.

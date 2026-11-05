@@ -85,7 +85,7 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
             if age > int(getattr(cfg, "CRT_MAX_CONFIRM_AGE_H1", 1)): continue
             if _bias("H4", h4) == -wanted or _bias("M15", m15) == -wanted: continue
             ok, gap = _strength(symbol, side, strength)
-            if not ok: continue
+            if not ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True): continue
             amd = amd_power_of_three.detect_amd(symbol, h1, h4, m15, strength)
             amd_match = bool(amd and amd.get("side") == side and not amd.get("late"))
             sweep_raw = ref.low-sweep.low if side == "LONG" else sweep.high-ref.high
@@ -105,7 +105,7 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
             quality += min(4, int(wick_ratio*8))
             quality += 4 if _bias("M15", m15) == wanted else 0
             quality += 3 if _bias("H4", h4) == wanted else 0
-            quality += min(4, int(abs(gap)*25))
+            quality += min(4, int(max(0.0, gap * wanted)*25))
             quality += 6 if amd_match else 0
             quality = min(96, quality)
             candidates.append({
