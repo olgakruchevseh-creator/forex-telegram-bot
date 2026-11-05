@@ -700,8 +700,14 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
     draw.text((left,665),"Единый вероятностный сценарий · закрытые H1 · не торговая гарантия",fill="#9aa4b5",font=small)
     out=io.BytesIO(); out.name=f"echo_pivot_zigzag_{symbol.replace('/','')}.png"; image.save(out,format="PNG",optimize=True); out.seek(0); return out
 
-def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state: dict) -> list[dict]:
-    """Seven pair albums instead of fourteen unrelated notifications."""
+def pending_report_bundles(
+    market: dict, events: list[newsmod.NewsEvent], state: dict,
+    *, force_symbols: set[str] | None = None, revision_id: str = "",
+) -> list[dict]:
+    """Seven session cards, or newly timestamped revision cards for changed pairs.
+
+    Revisions use unique H1 keys and never erase the original session delivery.
+    """
     session_id = briefing.briefing_id()
     delivered = state.setdefault("session_projection_delivered", {})
     current_name, next_name, hours = _session_context()
@@ -730,10 +736,13 @@ def pending_report_bundles(market: dict, events: list[newsmod.NewsEvent], state:
 
     bundles = []
     for symbol in cfg.PAIRS:
-        key = f"{session_id}|echo_pivot|{symbol}"
+        if force_symbols is not None and symbol not in force_symbols:
+            continue
+        key = (f"{session_id}|revision:{revision_id}|echo_pivot|{symbol}"
+               if revision_id else f"{session_id}|echo_pivot|{symbol}")
         legacy_echo = f"{session_id}|echo|{symbol}"
         legacy_pivot = f"{session_id}|pivot|{symbol}"
-        if delivered.get(key) or (delivered.get(legacy_echo) and delivered.get(legacy_pivot)):
+        if delivered.get(key) or (not revision_id and delivered.get(legacy_echo) and delivered.get(legacy_pivot)):
             continue
         by_tf = market.get(symbol) or {}
         thesis = session_sides.get(symbol)

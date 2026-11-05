@@ -34,6 +34,7 @@ from analysis import (
 )
 import briefing
 import briefing_delivery
+import live_briefing
 import multi_tf_currency_strength
 import news as newsmod
 import levels
@@ -769,8 +770,11 @@ async def _maybe_send_session_briefing(
             log.exception("новости сессионного брифинга")
             events = []
             upcoming_events = []
+        # A delayed session delivery must still refer to ONE closed-H1 moment;
+        # later M15/M5 candle closes cannot retroactively confirm that H1.
+        delivery_market = live_briefing.anchored_market(market, strength_check.last_closed_at)
         delivered = await _send_briefing_sequence(
-            context.application, int(chat_id), market, strength, rank, dxy, events, upcoming_events
+            context.application, int(chat_id), delivery_market, strength, rank, dxy, events, upcoming_events
         )
         briefing.mark_issue_sent(state, iid, delivered)
         state["last_rank"] = [c for c, _ in rank]
@@ -778,6 +782,20 @@ async def _maybe_send_session_briefing(
         state["last_strength_ts"] = time.time()
         state["last_briefing_id"] = briefing.briefing_id()
         state["last_briefing_sent_ts"] = time.time()
+        # Record the *published* baseline only after a complete delivery.
+        # A missing verified snapshot must never be replaced by invented zeros.
+        try:
+            baseline = live_briefing.snapshot(delivery_market, all_events)
+            if baseline and baseline.get("session") == briefing.briefing_id():
+                state["live_briefing"] = {
+                    "session": baseline["session"], "baseline": baseline,
+                    "reference": baseline, "last_checked_h1": baseline["h1_close"],
+                    "last_sent_h1": "", "last_report_ts": 0,
+                }
+            else:
+                log.warning("LIVE_BRIEFING_BASELINE_UNAVAILABLE")
+        except Exception:
+            log.exception("LIVE_BRIEFING_BASELINE_FAILED")
         if closed_dt:
             SENT_H1.add(closed_dt)
         sent_ok = True
@@ -789,6 +807,127 @@ async def _maybe_send_session_briefing(
         briefing.release_issue(state, iid)
     save_state(state)
     return sent_ok
+
+
+async def _maybe_send_live_briefing(
+    context: ContextTypes.DEFAULT_TYPE, state: dict, market: dict,
+) -> bool:
+    """Per closed-H1 recheck; side flips require the existing briefing consensus.
+
+    Never changes trade decisions, even when an old priority is cancelled.
+    """
+    if not getattr(cfg, "LIVE_BRIEFING_ENABLED", True):
+        return False
+    chat_id = state.get("chat_id")
+    if not chat_id or not market_coverage(market)["complete"]:
+        return False
+    session_id = briefing.briefing_id()
+    box = state.get("live_briefing") or {}
+    if box.get("session") != session_id:
+        # Session must have a published baseline before we claim a change.
+        return False
+    previous = box.get("reference")
+    if not previous:
+        return False
+    # Cheap first-stage check: do not run the heavy briefing modules every minute.
+    check = briefing.briefing_strength_verified.calculate(market)
+    if not check.ok or not check.last_closed_at:
+        log.info("LIVE_BRIEFING_H1_REJECT reason=%s", check.reason)
+        return False
+    closed_iso = check.last_closed_at.isoformat()
+    if closed_iso <= str(box.get("last_checked_h1") or ""):
+        return False
+    try:
+        all_events = newsmod.load_events()
+    except Exception:
+        log.exception("LIVE_BRIEFING_CALENDAR_UNAVAILABLE")
+        all_events = []
+    current = live_briefing.snapshot(market, all_events)
+    if not current or current.get("session") != session_id:
+        return False
+    change = live_briefing.changes(previous, current)
+    box["last_checked_h1"] = closed_iso
+    if change is None:
+        state["live_briefing"] = box
+        save_state(state)
+        return False
+    # Strict once per new H1, plus rate limiting for non-critical revisions.
+    if box.get("last_sent_h1") == closed_iso:
+        return False
+    interval = max(0, int(getattr(cfg, "LIVE_BRIEFING_MIN_REPORT_INTERVAL_MINUTES", 60))) * 60
+    now_ts = time.time()
+    if (change["severity"] != "REVERSAL"
+            and now_ts - float(box.get("last_report_ts") or 0) < interval):
+        state["live_briefing"] = box
+        save_state(state)
+        return False
+    # Use the same as-of-H1 basket for the summary, all renewed pair cards,
+    # and revised Echo/Pivot/ZigZag images, even if fetch occurred 30m later.
+    delivery_market = live_briefing.anchored_market(market, check.last_closed_at)
+    text_report = live_briefing.report(previous, current, change, all_events)
+    await _send_parts(context.application, int(chat_id), text_report)
+    # A successful Telegram report advances the durable comparison point.
+    box.update({"reference": current, "last_sent_h1": closed_iso, "last_report_ts": time.time()})
+    history = list(box.get("history") or [])
+    history.append({"h1_close": closed_iso, "severity": change["severity"],
+                    "pairs": change["pairs"], "previous_h1": previous["h1_close"]})
+    box["history"] = history[-24:]
+    state["live_briefing"] = box
+    save_state(state)
+    if getattr(cfg, "LIVE_BRIEFING_SEND_FULL", True):
+        try:
+            api_key = env("TWELVE_DATA_API_KEY")
+            dxy = briefing.collect_extras(api_key, h1_dt=last_closed_h1_dt(h1_series(delivery_market)), market=delivery_market)
+            strength = currency_strength(h1_series(delivery_market), cfg.STRENGTH_LOOKBACK)
+            rank = rank_currencies(strength)
+            upcoming = briefing.events_until_next_briefing(all_events)
+            await _send_briefing_sequence(context.application, int(chat_id), delivery_market, strength, rank,
+                                          dxy, briefing.session_events(all_events), upcoming)
+        except Exception:
+            log.exception("LIVE_BRIEFING_FULL_SEND_FAILED")
+            try:
+                await _send_parts(context.application, int(chat_id),
+                                  "⚠️ Краткий пересмотр доставлен, но полный обновлённый брифинг не отправлен. "
+                                  "Для проверки текущей картины: /briefing_full")
+            except Exception:
+                log.exception("LIVE_BRIEFING_FULL_FALLBACK_FAILED")
+    if (getattr(cfg, "LIVE_BRIEFING_SEND_PROJECTIONS", True)
+            and getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True)):
+        try:
+            for bundle in session_projection_reports.pending_report_bundles(
+                    delivery_market, all_events, state,
+                    force_symbols=set(change["pairs"]), revision_id=closed_iso):
+                try:
+                    img = bundle.get("image")
+                    if img is None:
+                        raise ValueError("нет объединённой картинки")
+                    img.seek(0)
+                    caption = ("🔄 H1 · ПЕРЕСМОТР\n"
+                               + localize_telegram(bundle["caption"]))
+                    if briefing_delivery._telegram_len(caption) > 1024:
+                        kept = []
+                        for line in caption.splitlines():
+                            if briefing_delivery._telegram_len("\n".join(kept + [line])) > 1000:
+                                break
+                            kept.append(line)
+                        caption = "\n".join(kept)
+                    await context.application.bot.send_photo(
+                        chat_id=int(chat_id), photo=img, caption=caption)
+                    session_projection_reports.mark_delivered(state, bundle["key"])
+                    save_state(state)
+                except Exception:
+                    log.exception("LIVE_BRIEFING_REVISED_PROJECTION_FAILED pair=%s", bundle.get("symbol"))
+                    try:
+                        await _send_parts(context.application, int(chat_id),
+                                          "⚠️ Обновлённая картинка " + str(bundle.get("symbol"))
+                                          + " не доставлена. Базовый отчёт выше остаётся актуальным.")
+                    except Exception:
+                        log.exception("LIVE_BRIEFING_REVISED_PROJECTION_FALLBACK_FAILED")
+        except Exception:
+            log.exception("LIVE_BRIEFING_PROJECTIONS_FAILED")
+    log.info("LIVE_BRIEFING_SENT session=%s h1=%s pairs=%s severity=%s",
+             session_id, closed_iso, change["pairs"], change["severity"])
+    return True
 
 
 class ScanStats:
@@ -1235,6 +1374,10 @@ async def _briefing_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         # scanner, the session briefing still has its own chance to publish.
         if coverage["complete"]:
             await _maybe_send_session_briefing(context, state, market, strength, rank)
+            try:
+                await _maybe_send_live_briefing(context, state, market)
+            except Exception:
+                log.exception("LIVE_BRIEFING_MONITOR_FAILED")
         dxy = briefing.collect_extras(api_key, market=market)
         all_events = newsmod.load_events()
         now_utc = datetime.now(timezone.utc)
@@ -1329,6 +1472,10 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         h1 = h1_series(market)
         closed_dt = last_closed_h1_dt(h1)
         await _maybe_send_session_briefing(context, state, market, strength, rank)
+        try:
+            await _maybe_send_live_briefing(context, state, market)
+        except Exception:
+            log.exception("LIVE_BRIEFING_MONITOR_FAILED")
 
         module_alerts: list[tuple[int, str]] = []
         source_ids: dict[str, str] = {}

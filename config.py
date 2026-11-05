@@ -288,6 +288,15 @@ DXY_SEK_MAX_LAG_HOURS = int(os.getenv("DXY_SEK_MAX_LAG_HOURS") or "2")
 DXY_MIN_PRICE = 50.0
 DXY_MAX_PRICE = 200.0
 BRIEFING_ENABLED = True
+# Живой брифинг: только подтверждённые изменения на новой закрытой H1.
+# Не создаёт входы, не сокращает новостной защитный интервал.
+LIVE_BRIEFING_ENABLED = True
+# При значимом пересмотре вслед за компактным отчётом идут семь свежих карточек.
+LIVE_BRIEFING_SEND_FULL = True
+# Обновлять объединённую картинку Echo + Next Pivot + ZigZag для изменённых пар.
+LIVE_BRIEFING_SEND_PROJECTIONS = True
+# Дедупликация H1 + ограничение частоты некритических пересмотров.
+LIVE_BRIEFING_MIN_REPORT_INTERVAL_MINUTES = 60
 # Часовой брифинг выключен: одна простыня на открытие Азии / Европы / Америки.
 BRIEFING_SESSION_ONLY = True
 BRIEFING_SESSION_CATCH_UP = True

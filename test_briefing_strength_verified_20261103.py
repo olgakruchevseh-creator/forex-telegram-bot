@@ -27,9 +27,15 @@ def _market(now=None, n=40, steps=None):
     return market
 
 
+def _fixed_fresh_as_of(market):
+    """The fixture H1 always closed 10 min ago, independent of test run minute."""
+    opened = datetime.strptime(market['EUR/USD']['H1'][-1].dt, '%Y-%m-%d %H:%M:%S')
+    return opened.replace(tzinfo=timezone.utc) + timedelta(minutes=70)
+
+
 def test_verified_7_pairs_and_exact_weighted_formula():
     m = _market()
-    report = verified.calculate(m)
+    report = verified.calculate(m, as_of=_fixed_fresh_as_of(m))
     assert report.ok, report.reason
     assert set(report.scores) == set(cfg.CURRENCIES)
     # Independently reproduce the zero-mean star-graph solution.
@@ -92,7 +98,7 @@ def test_display_index_is_consistent_across_different_basket_spreads():
 
 def test_up_arrow_is_hour_on_hour_change_not_short_vs_long_levels():
     m = _market()
-    report = verified.calculate(m)
+    report = verified.calculate(m, as_of=_fixed_fresh_as_of(m))
     assert report.ok
     # Constant hourly growth must not be described as rapidly WEAKENING simply
     # because a one-hour return is lower than a twelve- or twenty-four-hour return.
@@ -102,10 +108,15 @@ def test_up_arrow_is_hour_on_hour_change_not_short_vs_long_levels():
 
 def test_telegram_sections_use_verified_strength_not_the_4h_fallback():
     m = _market()
-    report = verified.calculate(m)
+    report = verified.calculate(m, as_of=_fixed_fresh_as_of(m))
     assert report.ok
     raw_4h = currency_strength({p: tf['H1'] for p, tf in m.items()}, 4)
-    with patch.object(briefing, 'build_pair_briefs', return_value=[]), \
+    original_calculate = verified.calculate
+    # Presentation builds its own snapshot; freeze only its verification clock.
+    def fresh_report(market):
+        return original_calculate(market, as_of=_fixed_fresh_as_of(market))
+    with patch.object(verified, 'calculate', side_effect=fresh_report), \
+         patch.object(briefing, 'build_pair_briefs', return_value=[]), \
          patch.object(briefing, 'format_session_cycle_block', return_value=[]), \
          patch.object(briefing, 'format_next_session_bias', return_value=[]), \
          patch.object(briefing, 'format_news_block', return_value=[]), \

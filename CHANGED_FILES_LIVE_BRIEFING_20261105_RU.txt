@@ -1,0 +1,8 @@
+bot.py
+config.py
+live_briefing.py
+session_projection_reports.py
+test_live_briefing_20261105.py
+test_briefing_strength_verified_20261103.py
+FOREX_LIVE_BRIEFING_AUDIT_2026-11-05_RU.md
+CHANGED_FILES_LIVE_BRIEFING_20261105_RU.txt
