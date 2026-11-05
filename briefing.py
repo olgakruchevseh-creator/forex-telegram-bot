@@ -35,6 +35,7 @@ import market_regime
 import pullback_regime
 import market_direction_regime
 import briefing_strength_verified
+import direction_consistency
 import weekly_bias_context
 import weekly_rhythm_context
 
@@ -1208,6 +1209,9 @@ def build_briefing_text(
     ]
     try:
         lines.extend(briefing_strength_verified.format_block(verified_strength))
+        consistency_note = direction_consistency.note(direction_consistency.inspect(market, verified_strength))
+        if consistency_note:
+            lines.extend(["", consistency_note])
     except Exception:
         log.exception("проверенный блок силы")
         lines.extend(["💱 СИЛА ВАЛЮТ", "НЕТ ДОСТОВЕРНЫХ ДАННЫХ — ошибка проверки"])
@@ -1274,6 +1278,9 @@ def build_briefing_sections(
     ]
     try:
         head.extend(briefing_strength_verified.format_block(verified_strength))
+        consistency_note = direction_consistency.note(direction_consistency.inspect(market, verified_strength))
+        if consistency_note:
+            head.extend(["", consistency_note])
     except Exception:
         log.exception("проверенный блок силы")
         head.extend(["💱 СИЛА ВАЛЮТ", "НЕТ ДОСТОВЕРНЫХ ДАННЫХ — ошибка проверки"])
@@ -1311,7 +1318,8 @@ def format_news_warning(
     rank: list[tuple[str, float]],
     dxy: Optional[IndexView],
 ) -> str:
-    score = strength.get(event.currency, 0.0)
+    verified = bool(rank) and all(c in strength for c in cfg.CURRENCIES)
+    score = strength[event.currency] if verified and event.currency in strength else None
     place = next((i for i, (c, _) in enumerate(rank, 1) if c == event.currency), "—")
     left = max(1, newsmod.minutes_left(event))
     lines = [
@@ -1330,8 +1338,9 @@ def format_news_warning(
         f"Факт: {event.actual}",
         "",
         "💱 ТЕКУЩАЯ СИЛА",
-        f"{event.currency}: {dict(strength_pct(rank)).get(event.currency, 0):.0f}%",
-        f"Место в рейтинге: {place}/{len(rank) or 8}",
+        (f"{event.currency}: {briefing_strength_verified.display_index(score):.0f}/100 · условный индекс"
+         if score is not None else "НЕТ ДОСТОВЕРНЫХ ДАННЫХ — оценка силы скрыта"),
+        f"Место в рейтинге: {place}/{len(rank)}" if verified else "Рейтинг не публикуется",
         "",
     ]
     if dxy and dxy.available and event.currency == "USD":
@@ -1341,7 +1350,7 @@ def format_news_warning(
                 f"Цена: {dxy.price:.2f}",
                 f"Направление: {_ru_display(_dir_word(dxy.bias))}",
                 f"ADX: {dxy.adx:.0f}",
-                dxy_context(score, dxy),
+                dxy_context(score, dxy) if score is not None else "Сила USD недоступна: DXY не сравнивается с корзиной",
                 "",
             ]
         )
@@ -1356,7 +1365,10 @@ def format_news_warning(
     else:
         lines.append("До публикации возможна повышенная волатильность. Новость пока не используется как направляющий фактор.")
     lines.append("")
-    lines.append(newsmod.scenario_before(event, score))
+    if score is not None:
+        lines.append(newsmod.scenario_before(event, score))
+    else:
+        lines.append("Текущую силу и направление нельзя подтвердить без единой закрытой H1 по всем семи парам.")
     lines.append("")
     lines.append("Если валюта усилится:")
     lines.extend(newsmod.pair_pressure(event.currency, True) or ["—"])
@@ -1370,7 +1382,7 @@ def format_actual_update(
     event: newsmod.NewsEvent,
     verdict: Optional[str],
     dxy: Optional[IndexView],
-    usd_score: float,
+    usd_score: float | None,
     events: Optional[list[newsmod.NewsEvent]] = None,
 ) -> Optional[str]:
     cpi_consensus = None
@@ -1405,7 +1417,8 @@ def format_actual_update(
     lines.extend(["", tone, ""])
     if event.currency == "USD" and dxy and dxy.available:
         lines.append(f"DXY: {dxy.price:.2f} · {_dir_word(dxy.bias)}")
-        lines.append(dxy_context(usd_score, dxy))
+        lines.append(dxy_context(usd_score, dxy) if usd_score is not None
+                     else "Нет проверенной силы USD на этой закрытой H1; вывод по DXY независим")
         lines.append("")
     if newsmod.is_cpi_event(event):
         lines.append("После CPI первый импульс не считаем самостоятельным входом: ждём пост-CPI стабилизацию и подтверждение цены.")
@@ -2001,12 +2014,51 @@ def _merge_record(disk_v, mem_v):
     return mem_v if mem_v is not None else disk_v
 
 
+def _merge_live_briefing_state(disk_v, mem_v):
+    """Never roll a published live revision backward on parallel job saves.
+
+    Whole-dict last-write-wins used to resurrect stale baseline/reference when
+    the scan and briefing schedulers saved two independently loaded states.
+    """
+    if not isinstance(disk_v, dict):
+        return mem_v
+    if not isinstance(mem_v, dict):
+        return disk_v
+    a, b = disk_v, mem_v
+    if a.get('session') != b.get('session'):
+        # Session labels are not sortable by themselves (ASIA/EUROPE/AMERICA).
+        # Compare actual baseline H1 timestamps instead.
+        a_close = str((a.get('baseline') or {}).get('h1_close') or '')
+        b_close = str((b.get('baseline') or {}).get('h1_close') or '')
+        return b if b_close > a_close else a
+    out = dict(a)
+    out.update(b)
+    for key in ('last_checked_h1', 'last_sent_h1'):
+        out[key] = max(str(a.get(key) or ''), str(b.get(key) or ''))
+    out['last_report_ts'] = max(float(a.get('last_report_ts') or 0),
+                                float(b.get('last_report_ts') or 0))
+    # Reference and its scores must come from the SAME last delivered H1.
+    ref_a, ref_b = a.get('reference') or {}, b.get('reference') or {}
+    out['reference'] = ref_b if str(ref_b.get('h1_close') or '') > str(ref_a.get('h1_close') or '') else ref_a
+    if a.get('baseline'):
+        out['baseline'] = a['baseline']
+    combined = list(a.get('history') or []) + list(b.get('history') or [])
+    dedup = {}
+    for rec in combined:
+        if isinstance(rec, dict) and rec.get('h1_close'):
+            dedup[(str(rec['h1_close']), str(rec.get('severity')))] = rec
+    out['history'] = [dedup[k] for k in sorted(dedup)][-24:]
+    return out
+
+
 def merge_states(disk: dict, mem: dict) -> dict:
     out = dict(disk or {})
     for key, val in (mem or {}).items():
         if key == "_corrupt":
             continue
-        if key in _MERGE_MAPS and isinstance(val, dict):
+        if key == 'live_briefing' and isinstance(val, dict):
+            out[key] = _merge_live_briefing_state(out.get(key), val)
+        elif key in _MERGE_MAPS and isinstance(val, dict):
             base = dict(out.get(key) or {})
             incoming = dict(val)
             for ik, iv in incoming.items():

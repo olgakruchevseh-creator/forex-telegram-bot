@@ -439,8 +439,14 @@ def market_coverage(market: dict[str, dict[str, list]]) -> dict:
                 closed = closed_candles(candles)
                 if len(closed) < min_h1:
                     short_h1.append(f"{symbol}:{len(closed)}")
-    complete = not missing and not short_h1
+    coherence = None
+    if getattr(cfg, "MARKET_DATA_COHERENCE_ENABLED", True):
+        import market_data_coherence
+        coherence = market_data_coherence.inspect(market)
+    complete = not missing and not short_h1 and (coherence is None or coherence["ok"])
     return {
+        "coherence": coherence,
+        "coherence_reasons": (coherence or {}).get("reasons", []),
         "complete": complete,
         "present": present,
         "expected": expected,

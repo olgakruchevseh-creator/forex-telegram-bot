@@ -1,0 +1,17 @@
+FOREX · ИЗМЕНЁННЫЕ ФАЙЛЫ · 05.11.2026
+
+analysis.py
+bot.py
+briefing.py
+briefing_strength_verified.py
+config.py
+currency_strength_math.py
+direction_consistency.py
+live_briefing.py
+market_data_coherence.py
+multi_tf_currency_strength.py
+test_briefing_strength_verified_20261103.py
+test_live_briefing_20261105.py
+test_live_state_coherence_20261105.py
+test_market_coverage.py
+test_market_data_coherence_20261105.py

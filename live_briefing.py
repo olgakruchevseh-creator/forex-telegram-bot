@@ -11,6 +11,7 @@ import math
 
 import briefing
 import briefing_strength_verified as verified
+import direction_consistency
 import config as cfg
 
 LOCAL_TZ = ZoneInfo('Europe/Amsterdam')
@@ -65,6 +66,7 @@ def snapshot(market: dict, events: list | None = None, as_of: datetime | None = 
     if len(briefs) != len(cfg.PAIRS) or any(b.symbol not in cfg.PAIRS for b in briefs):
         return None
     leaders = briefing.pick_leaders(briefs)
+    methods = direction_consistency.inspect(frozen, check)
     pairs = {}
     for b in briefs:
         direction = b.side if b.side in ('LONG', 'SHORT') else None
@@ -78,6 +80,7 @@ def snapshot(market: dict, events: list | None = None, as_of: datetime | None = 
         'h1_close': check.last_closed_at.isoformat(),
         'session': briefing.briefing_id(as_of.astimezone(LOCAL_TZ)),
         'currencies': {k: round(v, 6) for k, v in check.scores.items()},
+        'method_coherence': methods,
         'pairs': pairs,
         'leader': leaders[0].symbol if leaders else None,
         'leader_side': leaders[0].side if leaders else None,
@@ -122,6 +125,12 @@ def changes(previous: dict, current: dict) -> dict | None:
         return None
     all_changed = list(dict.fromkeys(flips + lost + gained + (
         h1_changes if len(h1_changes) >= 2 else [])))
+    # A leader can change solely because the priorities were re-ranked.
+    # This is still a meaningful briefing change even when no pair's final
+    # direction flips: include the new leader in the changed-pair cards.
+    if leader_changed and current.get('leader') in cfg.PAIRS:
+        if current['leader'] not in all_changed:
+            all_changed.append(current['leader'])
     if not all_changed:
         return None
     return {
@@ -193,6 +202,10 @@ def report(previous: dict, current: dict, delta: dict, events: list | None = Non
     new = current.get('leader')
     if last != new or previous.get('leader_side') != current.get('leader_side'):
         lines.extend(['', f'🏆 Приоритет: {last or "НЕТ"} {_direction(previous.get("leader_side"))} → {new or "НЕТ"} {_direction(current.get("leader_side"))}'])
+    current_methods = current.get('method_coherence') or {}
+    method_line = direction_consistency.note(current_methods)
+    if method_line:
+        lines.extend(['', method_line])
     context_events = recently_scheduled_events(events, current)
     if context_events:
         lines.extend(['', '📰 События рядом по времени (причинная связь НЕ подтверждена):'])

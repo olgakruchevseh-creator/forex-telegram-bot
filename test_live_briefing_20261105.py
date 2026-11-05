@@ -150,3 +150,12 @@ def test_revision_projection_keys_do_not_overwrite_session_original(monkeypatch)
     assert 'session|echo_pivot|EUR/USD' in state['session_projection_delivered']
     projections.mark_delivered(state,revised[0]['key'])
     assert not projections.pending_report_bundles(market,[],state,force_symbols={'EUR/USD'},revision_id='2026-11-05T10:00:00+00:00')
+
+
+def test_priority_swap_alone_reports_new_leader_pair():
+    p = example(); q = newer(p)
+    q['leader'] = 'GBP/USD'
+    delta = live.changes(p, q)
+    assert delta is not None
+    assert delta['pairs'] == ['GBP/USD']
+    assert 'Приоритет:' in live.report(p, q, delta)

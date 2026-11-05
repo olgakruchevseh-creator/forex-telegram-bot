@@ -13,7 +13,9 @@ import math
 from zoneinfo import ZoneInfo
 
 import config as cfg
-from analysis import Candle, closed_candles, rank_currencies
+from analysis import Candle, rank_currencies
+from market_data_coherence import validated_closed, opened_utc
+from currency_strength_math import stable_log_return_pct, usd_star_scores
 
 
 # These are design weights (not empirically optimised or verified probabilities).
@@ -38,8 +40,8 @@ class StrengthCheck:
 
 def _utc_opened(value: str) -> datetime | None:
     try:
-        return datetime.strptime(str(value).strip().replace("T", " ")[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    except ValueError:
+        return opened_utc(value)
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -51,22 +53,15 @@ def _blend(series: dict[str, list[Candle]]) -> dict[str, float]:
     S[C] - S[USD] = weighted_log_return(C/USD) with sum(S) = 0. This is
     the unique zero-centred solution for the 7 edges in this USD star.
     """
-    relative: dict[str, float] = {}
+    returns = {}
     for pair in cfg.PAIRS:
-        base, quote = pair.split("/")
-        if (base == "USD") == (quote == "USD"):
-            raise ValueError(f"not an USD-cross in briefing strength: {pair}")
-        other = quote if base == "USD" else base
         bars = series[pair]
-        weighted_log_return = sum(
-            weight * 100.0 * math.log(float(bars[-1].close) / float(bars[-1-lookback].close))
+        returns[pair] = math.fsum(
+            weight * stable_log_return_pct(bars[-1].close, bars[-1-lookback].close)
             for lookback, weight in HORIZONS
         )
-        relative[other] = -weighted_log_return if base == "USD" else weighted_log_return
-    if len(relative) != len(cfg.CURRENCIES) - 1:
-        raise ValueError("USD basket does not contain seven distinct other currencies")
-    usd = -sum(relative.values()) / len(cfg.CURRENCIES)
-    return {c: (usd if c == "USD" else usd + relative[c]) for c in cfg.CURRENCIES}
+    return usd_star_scores(returns)
+
 
 
 def calculate(market: dict, as_of: datetime | None = None) -> StrengthCheck:
@@ -83,7 +78,9 @@ def calculate(market: dict, as_of: datetime | None = None) -> StrengthCheck:
     reference: tuple[str, ...] | None = None
     for pair in cfg.PAIRS:
         raw = ((market or {}).get(pair) or {}).get("H1") or []
-        bars = closed_candles(raw)
+        bars, error = validated_closed(raw, "H1", as_of)
+        if error:
+            return StrengthCheck(reason=f"{pair}: {error}")
         if len(bars) < NEEDED_BARS:
             return StrengthCheck(reason=f"{pair}: только {len(bars)} закрытых H1, необходимо {NEEDED_BARS}")
         recent = bars[-NEEDED_BARS:]
@@ -118,19 +115,25 @@ def calculate(market: dict, as_of: datetime | None = None) -> StrengthCheck:
             last_closed_at=closed_at, age_minutes=age_minutes,
         )
 
-    current = _blend(window)
-    previous = _blend({p: bars[:-1] for p, bars in window.items()})
+    try:
+        current = _blend(window)
+        previous = _blend({p: bars[:-1] for p, bars in window.items()})
+    except (ValueError, TypeError, OverflowError, ArithmeticError) as exc:
+        return StrengthCheck(reason=f"математическая проверка силы: {exc}")
     if not all(math.isfinite(s) for s in [*current.values(), *previous.values()]):
         return StrengthCheck(reason="нечисловые результаты расчёта силы")
     changes = {c: current[c] - previous[c] for c in cfg.CURRENCIES}
-    source_returns = {
-        pair: {str(n): (bars[-1].close / bars[-1-n].close - 1) * 100 for n, _ in HORIZONS}
-        for pair, bars in window.items()
-    }
     source_log_returns = {
-        pair: {str(n): 100.0 * math.log(bars[-1].close / bars[-1-n].close) for n, _ in HORIZONS}
+        pair: {str(n): stable_log_return_pct(bars[-1].close, bars[-1-n].close) for n, _ in HORIZONS}
         for pair, bars in window.items()
     }
+    source_returns = {
+        pair: {str(n): 100.0 * math.expm1(log_ret / 100.0) if log_ret < 70000 else float('inf')
+               for n, log_ret in horizons.items()}
+        for pair, horizons in source_log_returns.items()
+    }
+    if any(not math.isfinite(r) for values in source_returns.values() for r in values.values()):
+        return StrengthCheck(reason="переполнение простой доходности H1")
     source_prices = {
         pair: {"last": bars[-1].close, **{f"start_{n}": bars[-1-n].close for n, _ in HORIZONS}}
         for pair, bars in window.items()

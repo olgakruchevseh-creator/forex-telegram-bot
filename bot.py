@@ -522,6 +522,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             lines.append("Нет: " + ", ".join(coverage["missing"][:8]))
         if coverage["short_h1"]:
             lines.append("Мало H1: " + ", ".join(coverage["short_h1"][:8]))
+        if coverage.get("coherence_reasons"):
+            lines.append("Согласованность: " + "; ".join(coverage["coherence_reasons"][:4]))
         lines.append(f"Последняя закрытая H1: {latest} UTC")
     except Exception as exc:
         log.exception("STATUS market health")
@@ -535,15 +537,13 @@ async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _remember_effective_chat(update)
     await update.message.reply_text("Считаю силу валют по H1…")
     market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
-    h1 = h1_series(market)
-    if not any(len(closed_candles(v)) > cfg.STRENGTH_LOOKBACK for v in h1.values()):
+    checked = briefing.briefing_strength_verified.calculate(market)
+    if not checked.ok:
         await update.message.reply_text(
-            "Котировки H1 сейчас не пришли. Повтори /now через минуту."
+            "💱 Сила валют · НЕТ ДОСТОВЕРНЫХ ДАННЫХ\nПричина: " + checked.reason
         )
         return
-    strength = currency_strength(h1, cfg.STRENGTH_LOOKBACK)
-    rank = rank_currencies(strength)
-    await update.message.reply_text(format_strength(rank, last_closed_h1_dt(h1)))
+    await update.message.reply_text("\n".join(briefing.briefing_strength_verified.format_block(checked)))
 
 
 async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -560,6 +560,13 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Собираю стек по {raw}…")
     market = fetch_market(env("TWELVE_DATA_API_KEY"), force=True)
     got = {k: len(v) for k, v in (market.get(raw) or {}).items()}
+    coverage = market_coverage(market)
+    if not coverage['complete']:
+        await update.message.reply_text(
+            'Не могу достоверно сравнить направления: повреждённая или несинхронная корзина. '
+            + '; '.join((coverage.get('coherence_reasons') or coverage.get('missing') or [])[:3])
+        )
+        return
     strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
     stack = build_stack(raw, market.get(raw) or {}, strength)
     if not stack:
@@ -580,6 +587,13 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         market = fetch_market(api_key)
         if not any(h1_series(market).values()):
             market = fetch_market(api_key, force=True)
+        check = market_coverage(market)
+        if not check['complete']:
+            await update.message.reply_text(
+                'Брифинг не собрался: несинхронные или устаревшие свечи. '
+                + '; '.join((check.get('coherence_reasons') or check.get('missing') or check.get('short_h1') or [])[:3])
+            )
+            return
         strength = currency_strength(h1_series(market), cfg.STRENGTH_LOOKBACK)
         rank = rank_currencies(strength)
         if not rank:
@@ -595,6 +609,7 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             log.exception("DXY для /briefing")
         events = []; upcoming_events = []
+        all_events = []
         try:
             all_events = newsmod.load_events()
             events = briefing.session_events(all_events)
@@ -684,6 +699,7 @@ async def _publish_market_health(app: Application, chat_id: int, state: dict, co
     if changed or now_ts - last_notice >= repeat_sec:
         missing = ", ".join((coverage.get("missing") or [])[:10]) or "—"
         short_h1 = ", ".join((coverage.get("short_h1") or [])[:8]) or "—"
+        coherence = "; ".join((coverage.get("coherence_reasons") or [])[:3]) or "—"
         try:
             await _send_parts(
                 app,
@@ -693,6 +709,7 @@ async def _publish_market_health(app: Application, chat_id: int, state: dict, co
                 f"Данные: {coverage.get('present', 0)}/{coverage.get('expected', 0)} TF-серий.\n"
                 f"Отсутствуют: {missing}\n"
                 f"Недостаточно H1: {short_h1}\n"
+                f"Согласованность свечей: {coherence}\n"
                 "Торговые сигналы временно fail-safe заблокированы; журнальные отчёты продолжают отправляться.",
             )
         except Exception:
@@ -863,9 +880,28 @@ async def _maybe_send_live_briefing(
         return False
     # Use the same as-of-H1 basket for the summary, all renewed pair cards,
     # and revised Echo/Pivot/ZigZag images, even if fetch occurred 30m later.
+    # Multiple Railway jobs may reach this H1 together. Reuse the existing
+    # cross-process SQLite issue claim; the state-only last_sent_h1 is NOT an
+    # atomic deduplication barrier. Never claim before a material revision.
+    iid = f"live_briefing:{session_id}:{closed_iso}"
+    if not briefing.claim_issue(state, iid):
+        log.info("LIVE_BRIEFING_DUPLICATE_H1 session=%s h1=%s", session_id, closed_iso)
+        return False
+    box = state.get("live_briefing") or box
+    # Another job could have advanced this session while we computed the
+    # snapshot; do not emit a historical revision after a newer one.
+    if (box.get('session') != session_id
+            or str(box.get('last_sent_h1') or '') >= closed_iso
+            or (box.get('reference') or {}).get('h1_close') != previous.get('h1_close')):
+        briefing.release_issue(state, iid)
+        return False
     delivery_market = live_briefing.anchored_market(market, check.last_closed_at)
     text_report = live_briefing.report(previous, current, change, all_events)
-    await _send_parts(context.application, int(chat_id), text_report)
+    try:
+        await _send_parts(context.application, int(chat_id), text_report)
+    except Exception:
+        briefing.release_issue(state, iid)
+        raise
     # A successful Telegram report advances the durable comparison point.
     box.update({"reference": current, "last_sent_h1": closed_iso, "last_report_ts": time.time()})
     history = list(box.get("history") or [])
@@ -874,6 +910,7 @@ async def _maybe_send_live_briefing(
     box["history"] = history[-24:]
     state["live_briefing"] = box
     save_state(state)
+    briefing.mark_issue_sent(state, iid, parts=1)
     if getattr(cfg, "LIVE_BRIEFING_SEND_FULL", True):
         try:
             api_key = env("TWELVE_DATA_API_KEY")
@@ -1379,6 +1416,10 @@ async def _briefing_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("LIVE_BRIEFING_MONITOR_FAILED")
         dxy = briefing.collect_extras(api_key, market=market)
+        # Macro release alerts stay informative even when the candle basket is
+        # impaired, but never publish fabricated strength 0 or an 0/100 rank.
+        event_strength = briefing.briefing_strength_verified.calculate(market)
+        usd_score_for_news = event_strength.scores.get('USD') if event_strength.ok else None
         all_events = newsmod.load_events()
         now_utc = datetime.now(timezone.utc)
         for event in all_events:
@@ -1389,8 +1430,11 @@ async def _briefing_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if event.event_id in state["news_warned"]:
                     continue
                 fresh_m = fetch_market(api_key, force=True)
-                fresh_s = currency_strength(h1_series(fresh_m), cfg.STRENGTH_LOOKBACK)
-                fresh_r = rank_currencies(fresh_s)
+                fresh_check = briefing.briefing_strength_verified.calculate(fresh_m)
+                fresh_s = fresh_check.scores if fresh_check.ok else {}
+                fresh_r = rank_currencies(fresh_s) if fresh_check.ok else []
+                if not fresh_check.ok:
+                    log.warning('NEWS_STRENGTH_UNAVAILABLE reason=%s', fresh_check.reason)
                 fresh_dxy = briefing.collect_extras(api_key, market=fresh_m)
                 await _send_parts(
                     context.application,
@@ -1404,7 +1448,7 @@ async def _briefing_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             if newsmod.has_actual(event) and event.event_id not in state["news_actual_sent"]:
                 verdict = newsmod.interpret_print(event)
                 msg = briefing.format_actual_update(
-                    event, verdict, dxy, strength.get("USD", 0.0), all_events
+                    event, verdict, dxy, usd_score_for_news, all_events
                 )
                 if msg:
                     await _send_parts(context.application, int(chat_id), msg)

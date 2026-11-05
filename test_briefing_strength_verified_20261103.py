@@ -72,7 +72,10 @@ def test_cross_pair_h1_alignment_checked_even_if_market_coverage_says_complete()
     for pair in cfg.PAIRS:
         for tf in cfg.MARKET_REQUIRED_TFS:
             m[pair][tf] = m[pair]['H1']
-    assert market_coverage(m)['complete']  # Original bug: counts but never aligns.
+    # Repaired: the shared gate must reject this basket *before* any trade scan.
+    cov = market_coverage(m)
+    assert not cov['complete']
+    assert any('H1: несинхронны' in r for r in cov['coherence_reasons'])
     report = verified.calculate(m)
     assert not report.ok and 'несинхронные' in report.reason
 

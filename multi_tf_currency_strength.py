@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import math
 
 import config as cfg
+from currency_strength_math import stable_log_return_pct, usd_star_scores
 
 TF_SPEC = {
     "W1": (10080, 4, 12 * 24 * 60, 0.12),
@@ -89,17 +90,18 @@ def _tf(market: dict, tf: str, as_of: datetime) -> dict:
     # contemporaneous; this is an exact algebraic identity, not a forecast.
     stages: list[dict[str, float]] = []
     for endpoint_offset in (2, 1, 0):
-        rel = {}
+        returns = {}
         for pair, rows in window.items():
-            base, quote = pair.split("/")
             recent = rows[-1 - endpoint_offset][1]
             old = rows[-1 - endpoint_offset - lookback][1]
-            rate = 100.0 * math.log(recent / old)
-            rel[quote if base == "USD" else base] = -rate if base == "USD" else rate
-        if len(rel) != 7:
-            return _unavailable("повторяющиеся валюты в USD-корзине")
-        usd = -sum(rel.values()) / 8.0
-        stages.append({c: (usd if c == "USD" else usd + rel[c]) for c in currency_names})
+            try:
+                returns[pair] = stable_log_return_pct(recent, old)
+            except (TypeError, ValueError, OverflowError, ArithmeticError) as exc:
+                return _unavailable(f"{pair}: {exc}")
+        try:
+            stages.append(usd_star_scores(returns))
+        except (TypeError, ValueError, OverflowError, ArithmeticError) as exc:
+            return _unavailable(f"математика {tf}: {exc}")
     if not all(math.isfinite(x) for stage in stages for x in stage.values()):
         return _unavailable("переполнение расчёта")
     latest = stages[-1]

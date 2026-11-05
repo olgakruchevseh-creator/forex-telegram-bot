@@ -59,7 +59,14 @@ UNIFIED_SIGNAL_JOURNAL_ENABLED = True
 # Полный скан торгует только при синхронной корзине 7 мажоров на рабочих ТФ.
 MARKET_REQUIRE_COMPLETE = True
 MARKET_REQUIRED_TFS = ("H1", "M15", "M5", "H4")
-MARKET_MIN_CLOSED_H1 = 20
+MARKET_MIN_CLOSED_H1 = 26
+# One shared closed-bar integrity rule for the scanner and session updates.
+# A TF can lag by its normal duration; all seven pairs still need the same
+# closed timestamp. Never apply a D1/W1 freshness gate to intraday sessions.
+MARKET_DATA_COHERENCE_ENABLED = True
+MARKET_MAX_CLOSED_TF_AGE_MINUTES = {
+    "M5": 20, "M15": 45, "H1": 90, "H4": 300,
+}
 # Operational recovery only: when Twelve Data returns a partial multi-symbol
 # payload, retry only the missing symbols instead of accepting an incomplete
 # basket and silencing the whole scan.
