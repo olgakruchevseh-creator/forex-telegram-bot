@@ -1476,6 +1476,17 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         market = fetch_market(env("TWELVE_DATA_API_KEY"))
+        # Optional OHLC archive of ACTUALLY OBSERVED closed candles. No new API
+        # requests; an archive failure cannot veto a trade or change signals.
+        if os.getenv("OHLC_JOURNAL_ENABLED", "0").strip() == "1":
+            try:
+                from ohlc_history_journal import capture_market
+                archived = capture_market(market)
+                if archived["inserted"] or archived["rejected_series"]:
+                    log.info("OHLC_JOURNAL inserted=%s rejected_series=%s",
+                             archived["inserted"], archived["rejected_series"])
+            except Exception:
+                log.exception("OHLC_JOURNAL_SAVE_FAILED")
         # Closed-H1 Livermore Market Key: isolated OBSERVE_ONLY. Never veto signals.
         try:
             from livermore_observer import observe_market
