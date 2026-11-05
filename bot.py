@@ -1482,9 +1482,32 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 from ohlc_history_journal import capture_market
                 archived = capture_market(market)
-                if archived["inserted"] or archived["rejected_series"]:
-                    log.info("OHLC_JOURNAL inserted=%s rejected_series=%s",
-                             archived["inserted"], archived["rejected_series"])
+                if archived["inserted"]:
+                    log.info("OHLC_JOURNAL inserted=%s by_tf=%s rejected_series=%s",
+                             archived["inserted"],
+                             {tf: v["inserted"] for tf, v in archived["by_tf"].items()},
+                             archived["rejected_series"])
+                if archived["rejected_series"]:
+                    # Report first change and at most once/hour thereafter.
+                    # A persistent copy of the full diagnostics is in SQLite.
+                    issues = archived["rejections"]
+                    signature = tuple(sorted((x["pair"], x["tf"], x["code"], x["reason"])
+                                              for x in issues))
+                    last = getattr(_scan_job_impl, "_ohlc_last_diagnostics", None)
+                    if last is None or last[0] != signature or time.time() - last[1] >= 3600:
+                        log.warning("OHLC_JOURNAL_REJECTED series=%s details=%s",
+                                    archived["rejected_series"],
+                                    json.dumps(issues, ensure_ascii=False))
+                        _scan_job_impl._ohlc_last_diagnostics = (signature, time.time())
+                # Lightweight coverage summary on startup and every six
+                # hours, useful from Railway mobile without shell access.
+                last_coverage = getattr(_scan_job_impl, "_ohlc_coverage_at", 0.0)
+                if time.time() - last_coverage >= 6 * 3600:
+                    from ohlc_history_journal import compact_status
+                    summary = compact_status()
+                    log.info("OHLC_JOURNAL_COVERAGE %s",
+                             json.dumps(summary, ensure_ascii=False))
+                    _scan_job_impl._ohlc_coverage_at = time.time()
             except Exception:
                 log.exception("OHLC_JOURNAL_SAVE_FAILED")
         # Closed-H1 Livermore Market Key: isolated OBSERVE_ONLY. Never veto signals.

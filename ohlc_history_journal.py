@@ -60,6 +60,12 @@ def init_db(path: Path) -> sqlite3.Connection:
                 observed_utc TEXT NOT NULL, action TEXT NOT NULL,
                 UNIQUE(pair, tf, opened_utc, new_ohlc_json, action)
             );
+            CREATE TABLE IF NOT EXISTS capture_issues (
+                pair TEXT NOT NULL, tf TEXT NOT NULL, code TEXT NOT NULL,
+                reason TEXT NOT NULL, first_seen_utc TEXT NOT NULL,
+                last_seen_utc TEXT NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(pair, tf, code)
+            );
             CREATE TABLE IF NOT EXISTS ingest_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, created_utc TEXT NOT NULL,
                 source TEXT NOT NULL, pair TEXT NOT NULL, tf TEXT NOT NULL,
@@ -83,13 +89,15 @@ def _valid_time(ts: datetime, tf: str, as_of: datetime) -> None:
     utc = ts.astimezone(timezone.utc)
     if utc.second or utc.microsecond:
         raise ValueError(f"{tf}: неверная точность UTC-времени открытия")
-    if tf == "W1":
-        # Weekly candle opening can be Sunday or Monday depending on provider
-        # and market conventions; don't falsely fabricate a Monday anchor.
+    if tf in ("H4", "D1", "W1"):
+        # Twelve Data FX higher-TF bars may be anchored to the FX session
+        # rather than UTC midnight (e.g. 22:00 UTC daily, 02:00 UTC H4).
+        # Require a full-hour OPEN, but never invent a UTC-midnight anchor.
+        # Lower TFs retain strict UTC-grid validation. DST shifts are possible.
         if utc.minute:
-            raise ValueError("W1: начало должно приходиться на целый час UTC")
+            raise ValueError(f"{tf}: время открытия не на границе часа UTC")
     elif (utc.hour * 60 + utc.minute) % minutes != 0:
-        raise ValueError(f"{tf}: неверное UTC-время открытия {ts}")
+        raise ValueError(f"{tf}: неверная UTC-сетка времени открытия")
     if utc + timedelta(minutes=minutes) > as_of.astimezone(timezone.utc):
         raise ValueError("будущая или незакрытая свеча")
 
@@ -98,9 +106,15 @@ def validate_row(row: dict, tf: str, as_of: datetime | None = None) -> tuple[str
     """The CSV/Twelve Data timestamp is candle OPEN, in UTC."""
     if tf not in INTERVALS:
         raise ValueError(f"неизвестный TF {tf}")
-    ts = opened_utc(str(row["datetime"]))
+    try:
+        ts = opened_utc(str(row["datetime"]))
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError("неверная метка времени открытия datetime") from None
     _valid_time(ts, tf, as_of or datetime.now(timezone.utc))
-    vals = tuple(float(row[k]) for k in COLUMNS[1:])
+    try:
+        vals = tuple(float(row[k]) for k in COLUMNS[1:])
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError("неверное числовое значение OHLC") from None
     op, hi, lo, cl = vals
     if not all(math.isfinite(v) and v > 0 for v in vals):
         raise ValueError("OHLC: цены должны быть конечными и положительными")
@@ -123,7 +137,9 @@ def put_rows(db: sqlite3.Connection, pair: str, tf: str, rows: Iterable[dict],
     for count, row in enumerate(rows, 1):
         try:
             opened, vals = validate_row(row, tf, now)
-        except (KeyError, ValueError, TypeError, OverflowError) as exc:
+        except KeyError as exc:
+            raise ValueError(f"{pair}/{tf} строка {count}: нет обязательного поля datetime/OHLC") from None
+        except (ValueError, TypeError, OverflowError) as exc:
             raise ValueError(f"{pair}/{tf} строка {count}: {exc}") from exc
         if opened in validated:
             raise ValueError(f"{pair}/{tf}: повторная UTC-метка {opened}")
@@ -249,20 +265,52 @@ def fetch(db: sqlite3.Connection, *, start: date, end: date,
 
 
 
+def _capture_code(reason: str) -> str:
+    """Stable, low-cardinality diagnostic identifiers, no source payload."""
+    if "UTC-сетка" in reason or "границе часа" in reason or "точность UTC" in reason:
+        return "TIME_ALIGNMENT"
+    if "незакрытая" in reason or "будущая" in reason:
+        return "OPEN_BAR"
+    if "метка времени" in reason or "datetime" in reason or "timezone-aware" in reason:
+        return "TIME_PARSE"
+    if "OHLC" in reason or "цен" in reason or "числовое значение" in reason:
+        return "PRICE_INVALID"
+    if "повторная UTC-метка" in reason:
+        return "DUPLICATE_TIME"
+    return "DATA_INVALID"
+
+
+def _record_capture_issue(db: sqlite3.Connection, pair: str, tf: str,
+                          code: str, reason: str, timestamp: str) -> None:
+    """A single row per issue family keeps long-running Railway DB bounded."""
+    with db:
+        db.execute("""
+            INSERT INTO capture_issues
+                (pair, tf, code, reason, first_seen_utc, last_seen_utc, occurrences)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(pair, tf, code) DO UPDATE SET
+                reason=excluded.reason,
+                last_seen_utc=excluded.last_seen_utc,
+                occurrences=capture_issues.occurrences+1
+        """, (pair, tf, code, reason[:220], timestamp, timestamp))
+
+
 def capture_market(market: dict, *, db_path: Path | None = None,
                    as_of: datetime | None = None,
                    timeframes: tuple[str, ...] = ("H1", "H4", "D1", "W1", "M15", "M5")) -> dict:
-    """Passive append of candles already present in the bot's market snapshot.
+    """Passive storage of real closed candles already fetched by the live bot.
 
-    No fresh provider requests, no price predictions, no trading side effects.
-    Designed for explicit opt-in from the bot's one-minute scan. Cached source
-    candles are labelled as observed in that scan, NOT as original history.
-    Existing candles are untouched; use an explicit backfill for older gaps.
+    Each pair/TF is isolated: malformed batches never partially commit, while
+    valid neighbouring series continue. Diagnostics contain no API credentials.
+    The trading pipeline cannot be vetoed by journal validation failures.
     """
     if db_path is None and not os.getenv("STATE_DIR", "").strip():
         raise ValueError("Для автоматической истории нужен постоянный STATE_DIR (Railway Volume)")
     now = as_of or datetime.now(timezone.utc)
-    stats = {"inserted": 0, "pairs": 0, "series": 0, "rejected_series": 0}
+    stats = {"inserted": 0, "pairs": 0, "series": 0, "rejected_series": 0,
+             "skipped_open": 0, "skipped_existing": 0,
+             "rejections": [], "by_tf": {tf: {"inserted": 0, "series": 0,
+                 "rejected": 0, "missing": 0} for tf in timeframes}}
     with closing(init_db(db_path or db_default())) as db:
         for pair in cfg.PAIRS:
             series = (market or {}).get(pair) or {}
@@ -271,16 +319,23 @@ def capture_market(market: dict, *, db_path: Path | None = None,
                     raise ValueError(f"неизвестный TF {tf}")
                 bars = series.get(tf) or []
                 if not bars:
+                    stats["by_tf"][tf]["missing"] += 1
                     continue
-                recent = db.execute("SELECT MAX(opened_utc) FROM candles WHERE pair=? AND tf=?",
-                                    (pair, tf)).fetchone()[0]
                 current = []
                 try:
+                    recent = db.execute(
+                        "SELECT MAX(opened_utc) FROM candles WHERE pair=? AND tf=?",
+                        (pair, tf)).fetchone()[0]
                     for bar in bars:
-                        ts = opened_utc(bar)
+                        try:
+                            ts = opened_utc(bar)
+                        except (ValueError, TypeError, OverflowError):
+                            raise ValueError("неверная метка времени открытия datetime") from None
                         if recent and iso(ts) <= recent:
+                            stats["skipped_existing"] += 1
                             continue
                         if ts + timedelta(minutes=INTERVALS[tf][0]) > now:
+                            stats["skipped_open"] += 1
                             continue
                         current.append({"datetime": iso(ts),
                                         **{key: getattr(bar, key) for key in COLUMNS[1:]}})
@@ -288,14 +343,68 @@ def capture_market(market: dict, *, db_path: Path | None = None,
                         result = put_rows(db, pair, tf, current,
                                           source="BOT_SCAN_TWELVE_DATA_OR_CACHE", as_of=now)
                         stats["inserted"] += result["inserted"]
+                        stats["by_tf"][tf]["inserted"] += result["inserted"]
                         stats["series"] += 1
+                        stats["by_tf"][tf]["series"] += 1
                         stats["pairs"] += int(tf == "H1")
-                except (ValueError, TypeError, AttributeError, OverflowError):
-                    # An invalid TF should not prevent archiving the other 41
-                    # series and must never disable live trading.
+                except (ValueError, TypeError, AttributeError, OverflowError) as exc:
+                    # Never print provider row contents or secrets. Only
+                    # controlled validation text and the known pair/TF labels.
+                    reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+                    if len(reason) > 220:
+                        reason = reason[:220]
+                    code = _capture_code(reason)
                     stats["rejected_series"] += 1
+                    stats["by_tf"][tf]["rejected"] += 1
+                    issue = {"pair": pair, "tf": tf, "code": code, "reason": reason}
+                    stats["rejections"].append(issue)
+                    _record_capture_issue(db, pair, tf, code, reason, iso(now))
                     continue
     return stats
+
+
+def diagnostic_status(db: sqlite3.Connection) -> dict:
+    """Per-TF coverage and persisted causes, useful after Railway restarts."""
+    series = db.execute("""
+        SELECT pair, tf, COUNT(*), MIN(opened_utc), MAX(opened_utc)
+        FROM candles GROUP BY pair,tf ORDER BY tf,pair
+    """).fetchall()
+    rows = {(pair, tf): {"bars": count, "first": first, "last": last}
+            for pair, tf, count, first, last in series}
+    by_tf = {}
+    for tf in INTERVALS:
+        counts = {pair: rows.get((pair, tf), {"bars": 0, "first": None, "last": None})
+                  for pair in cfg.PAIRS}
+        by_tf[tf] = {"total_bars": sum(x["bars"] for x in counts.values()),
+                     "pairs_with_data": sum(x["bars"] > 0 for x in counts.values()),
+                     "pairs": counts}
+    issues = db.execute("""
+        SELECT pair, tf, code, reason, last_seen_utc, occurrences
+        FROM capture_issues ORDER BY last_seen_utc DESC, pair, tf
+    """).fetchall()
+    return {"by_tf": by_tf, "capture_issues": [
+        {"pair": pair, "tf": tf, "code": code, "reason": reason,
+         "last_seen_utc": last, "occurrences": occurrences}
+        for pair, tf, code, reason, last, occurrences in issues],
+        "note": "Это фактически сохранённые свечи. Причины отклонения не означают ошибку торгового сигнала."}
+
+
+def compact_status(db_path: Path | None = None) -> dict:
+    """Small aggregate for periodic Railway logs (no OHLC values/secrets)."""
+    with closing(init_db(db_path or db_default())) as db:
+        rows = db.execute(
+            "SELECT tf, COUNT(*), COUNT(DISTINCT pair), MAX(opened_utc) "
+            "FROM candles GROUP BY tf"
+        ).fetchall()
+        issues = db.execute("SELECT COUNT(*) FROM capture_issues").fetchone()[0]
+        by_tf = {tf: {"bars": 0, "pairs": 0, "latest_open_utc": None}
+                 for tf in INTERVALS}
+        for tf, bars, pairs, latest in rows:
+            if tf in by_tf:
+                by_tf[tf] = {"bars": bars, "pairs": pairs,
+                             "latest_open_utc": latest}
+        return {"by_tf": by_tf, "issue_categories": issues}
+
 
 def coverage(db: sqlite3.Connection, *, tf: str = "H1") -> dict:
     if tf not in INTERVALS:
@@ -364,7 +473,8 @@ def main(argv: list[str] | None = None) -> int:
     for name, desc in (("fetch", "Скачать РЕАЛЬНУЮ историю Twelve Data"),
                        ("import-csv", "Загрузить уже сохранённые CSV"),
                        ("export", "Создать CSV для калибровки"),
-                       ("status", "Проверить полноту истории")):
+                       ("status", "Проверить полноту истории"),
+                       ("diagnostics", "Статистика по всем TF и причины отклонений")):
         p = sub.add_parser(name, help=desc)
         if name == "fetch":
             p.add_argument("--start-date", required=True)
@@ -397,8 +507,10 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "export":
                 result = export(db, args.out, timeframes=args.tfs)
                 print(f"CSV + ohlc_manifest.json: {args.out}; файлов {len(result['csv'])}")
-            else:
+            elif args.command == "status":
                 print(json.dumps(coverage(db, tf=args.tf), ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps(diagnostic_status(db), ensure_ascii=False, indent=2))
     except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
         print(f"Ошибка OHLC-журнала: {exc}", file=sys.stderr)
         return 2
