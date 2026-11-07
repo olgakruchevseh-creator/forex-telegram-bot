@@ -1,0 +1,18 @@
+Маленький ZIP — только доработка после 11 отказов GitHub Actions
+
+ИЗМЕНЁННЫЕ:
+config.py
+bot.py
+master_direction.py
+patterns.py
+test_scanners.py
+test_pattern_geometry_quality_v119.py
+
+НОВЫЕ:
+test_ci_fix_regressions_20261107.py
+FOREX_CI_11_FAILURES_AUDIT_2026_11_07_RU.md
+CHANGED_FILES_FOREX_CI_REPAIRS_2026_11_07_RU.txt
+
+ЗАГРУЗКА: распаковать ZIP, загрузить файлы в КОРЕНЬ Forex-репозитория GitHub.
+Не менять .github/workflows/forex-tests.yml, STATE_DIR или Railway Volume.
+После коммита открыть Actions -> Forex — Python + Telegram tests.

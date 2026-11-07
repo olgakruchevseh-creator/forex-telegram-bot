@@ -46,6 +46,15 @@ class Pattern:
     fact: str
     level: float
     dt: str
+    # Optional stable identifier of the geometric setup (e.g. pivot D time).
+    # All existing eight-argument Pattern constructors remain valid.
+    geometry_id: str = ""
+
+
+def _pattern_key(symbol: str, pattern: Pattern) -> str:
+    """Stable key for a completed geometry; fallback remains event-time based."""
+    anchor = pattern.geometry_id or pattern.dt
+    return f"{symbol}|{pattern.tf}|{pattern.name}|{pattern.side}|{anchor}"
 
 
 def _path() -> Path:
@@ -553,14 +562,23 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     tol = float(getattr(cfg, "FIB_TOL", .06))
     for key, label in labels.items():
         rules = getattr(cfg, "HARMONIC_RATIOS", {}).get(key) or {}
-        if rules and all(name in ratios and _inside(ratios[name], limits, tol)
+        # For retracement patterns Gartley/Bat, the target ~0.786/~0.886
+        # means A→D relative to XA. Extension patterns (butterfly/crab etc.)
+        # retain X→D, which is the convention already encoded in their rules.
+        local_ratios = dict(ratios)
+        if key in ("gartley", "bat"):
+            local_ratios["xd"] = abs(d[1] - a[1]) / xa
+        if rules and all(name in local_ratios and _inside(local_ratios[name], limits, tol)
                          for name, limits in rules.items()):
-            details = ", ".join(f"{name.upper()}={ratios[name]:.2f}" for name in rules)
-            ratio_q = sum(_ratio_quality(ratios[name], limits, tol) for name, limits in rules.items()) / len(rules)
+            details = ", ".join(f"{name.upper()}={local_ratios[name]:.2f}" for name in rules)
+            ratio_q = sum(_ratio_quality(local_ratios[name], limits, tol) for name, limits in rules.items()) / len(rules)
             geometry_bonus = int(round(ratio_q * 5))
+            old_count = len(out)
             _add(out, f"Гармонический паттерн {label}", side, tf, 84+geometry_bonus, 79+geometry_bonus,
                  f"Завершена зеркальная структура XABCD ({details}); закрытая свеча подтвердила реакцию от точки D.",
                  d[1], last)
+            if len(out) > old_count:
+                out[-1].geometry_id = f"XABCD:{bars[d[0]].dt}:{d[1]:.8f}" if 0 <= d[0] < len(bars) else ""
     return out
 
 
@@ -592,7 +610,10 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
             time_sym = min(time_ab, time_cd) / max(time_ab, time_cd)
             geometry = int(round(ratio_q*5 + time_sym*3))
             q = min(92, 82 + geometry)
+            old_count = len(out)
             _add(out, "Гармонический AB=CD", side, tf, q, min(90, 78+geometry), f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last)
+            if len(out) > old_count:
+                out[-1].geometry_id = f"ABCD:{bars[d[0]].dt}:{d[1]:.8f}" if 0 <= d[0] < len(bars) else ""
     return out
 
 
@@ -626,7 +647,10 @@ def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[st
     M15/M5 могут использоваться внутренними контекстными фильтрами, но не
     заменяют закрытие H1 и не выпускают часовую торговую карточку раньше времени.
     """
-    if not _strength_confirms(symbol, side, strength) and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True):
+    # Harmonic confirmation needs the pair's actual currency strength gap;
+    # a global advisory flag for ordinary signals must not silently override
+    # this dedicated harmonic confirmation contract.
+    if not _strength_confirms(symbol, side, strength):
         return False
     h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
     return _directional_break(h1, side)
@@ -1047,7 +1071,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 if p.name in CANDLE_PATTERN_NAMES:
                     fact += " " + candle_context.describe(candle_ctx) + "."
                 adjusted.append(Pattern(p.name, p.side, p.tf, max(1,min(96,p.quality+d)),
-                                        max(1,min(94,p.confidence+d)), fact, p.level, p.dt))
+                                        max(1,min(94,p.confidence+d)), fact, p.level, p.dt, p.geometry_id))
             candidates = sorted(adjusted, key=lambda p: (p.quality, p.confidence), reverse=True)
 
             # Внутренний журнал наблюдения: бот знает, какую свежую геометрию видел,
@@ -1061,12 +1085,12 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             }
             if first:
                 for p in candidates:
-                    sent[f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"] = p.dt
+                    sent[_pattern_key(symbol, p)] = p.dt
                 continue
 
             news_note, penalty = _pattern_news_context(symbol, now_utc, pattern_events)
             for p in candidates:
-                key = f"{symbol}|{p.tf}|{p.name}|{p.side}|{p.dt}"
+                key = _pattern_key(symbol, p)
                 if key in sent:
                     continue
                 if key in pending_keys:
@@ -1092,7 +1116,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 # уверенности и явно предупреждают о риске ложного продолжения.
                 if penalty:
                     p = Pattern(p.name, p.side, p.tf, p.quality, max(1, p.confidence-penalty),
-                                p.fact, p.level, p.dt)
+                                p.fact, p.level, p.dt, p.geometry_id)
                 text = _fmt(symbol, p, context_side, news_note, by_tf)
                 digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                 if digest not in pending:

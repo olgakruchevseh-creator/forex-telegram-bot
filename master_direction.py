@@ -49,6 +49,39 @@ from analysis import PairStack, build_stack, split_pair
 log = logging.getLogger("fxbot.master_direction")
 
 
+def _lower_timeframes_fresh(by_tf: dict) -> bool:
+    """Check that the latest CLOSED M15 and M5 belong to the H1 just closed.
+
+    This helper is intentionally read-only, relative to the verified H1
+    candle rather than the wall clock.  It must not mistake a cached M5 from
+    an earlier hour for a new H1 confirmation.
+    """
+    from analysis import closed_candles
+    from datetime import timedelta
+
+    durations = {"H1": 60, "M15": 15, "M5": 5}
+    def latest(tf: str):
+        candles = closed_candles((by_tf or {}).get(tf) or [], durations[tf])
+        if not candles:
+            return None
+        raw = str(candles[-1].dt or "").replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    h1 = latest("H1")
+    m15 = latest("M15")
+    m5 = latest("M5")
+    if h1 is None or m15 is None or m5 is None:
+        return False
+    end = h1 + timedelta(hours=1)
+    # A candle is valid only if its close ends at the reference H1 close.
+    return (m15 + timedelta(minutes=15) == end
+            and m5 + timedelta(minutes=5) == end)
+
+
 def _consensus(stack: PairStack, keys: tuple[str, ...], minimum: int) -> int:
     votes = [stack.views[k].bias for k in keys if k in stack.views]
     up = sum(v > 0 for v in votes)

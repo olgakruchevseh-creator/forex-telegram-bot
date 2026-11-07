@@ -22,15 +22,20 @@ class PatternGeometryQualityV119(unittest.TestCase):
         self.assertLess(fit[2],.8)
         self.assertGreater(fit[3],0.05)
 
-    def test_xabcd_uses_x_to_d_ratio(self):
-        # Synthetic Gartley: XA=1.0, AB=.618, BC=.5*AB, CD chosen so XD=.786.
+    def test_gartley_uses_a_to_d_retracement_not_x_to_d_extension(self):
+        # Bullish Gartley: XA=1.0, AB=.618, BC=.5*AB, D is 78.6% from A toward X.
         bars=[Candle(str(i),1.0,1.01,.99,1.0) for i in range(30)]
-        piv=[(5,0.0,'L'),(10,1.0,'H'),(14,.382,'L'),(18,.691,'H'),(22,.786,'L')]
-        bars[-1]=Candle(bars[-1].dt,.79,.82,.77,.81)
+        piv=[(5,0.0,'L'),(10,1.0,'H'),(14,.382,'L'),(18,.691,'H'),(22,.214,'L')]
+        bars[-1]=Candle(bars[-1].dt,.21,.23,.20,.22)
         from unittest.mock import patch
-        rules={"gartley":{"xb":(.60,.64),"ac":(.45,.55),"bd":(.25,.35),"xd":(.76,.81)}}
+        # Isolate the XD retracement convention from the other geometric ratios.
+        rules={"gartley":{"xb":(.60,.64),"ac":(.45,.55),"xd":(.76,.81)}}
         with patch.object(patterns,'_pivots',return_value=piv), patch.object(patterns.cfg,'HARMONIC_RATIOS',rules):
             found=patterns.harmonic_xabcd('H1',bars)
         self.assertTrue(any('Гартли' in x.name for x in found))
+        # This shape must not pass if D lies near A rather than in the PRZ.
+        invalid=[*piv[:-1], (22,.780,'L')]
+        with patch.object(patterns,'_pivots',return_value=invalid), patch.object(patterns.cfg,'HARMONIC_RATIOS',rules):
+            self.assertFalse(any('Гартли' in x.name for x in patterns.harmonic_xabcd('H1',bars)))
 
 if __name__ == '__main__': unittest.main()

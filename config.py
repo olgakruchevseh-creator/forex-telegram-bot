@@ -117,7 +117,9 @@ ZIGZAG_EARLY_MIN_STRENGTH_GAP = 0.05
 # early-LTF engine available for research, but never let it emit a standalone
 # ZigZag event in production unless explicitly re-enabled.
 ZIGZAG_EARLY_LTF_EVENTS_ENABLED = False
-SIGNAL_BLOCK_OPPOSITE_H4_ZIGZAG = False
+# Confirmed opposite H4 structure is a protective veto on NEW entries.
+# Unconfirmed / mixed H4 (0) remains neutral.
+SIGNAL_BLOCK_OPPOSITE_H4_ZIGZAG = True
 DXY_IMPULSE_MIN_CHANGE_PCT = 0.05
 DXY_IMPULSE_MIN_ADX = 25
 

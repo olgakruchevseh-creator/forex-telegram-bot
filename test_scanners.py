@@ -68,18 +68,26 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(any(p.name == "Гармонический паттерн Гартли" and p.side == "LONG" for p in found))
 
     def test_triangle_requires_fresh_closed_breakout(self):
-        bars = trend_bars(40, step=.0001)
+        # Triangles were moved from structural_patterns() to chart_patterns().
+        # Use 70 bars to satisfy the chart regression/lookback contract.
+        bars = trend_bars(70, step=.0001)
         bars[-2] = Candle(bars[-2].dt, 1.185, 1.195, 1.180, 1.190)
         bars[-1] = Candle(bars[-1].dt, 1.190, 1.215, 1.188, 1.210)
         pivots = [
-            (5, 1.200, "H"), (8, 1.150, "L"),
-            (12, 1.201, "H"), (16, 1.165, "L"),
-            (21, 1.199, "H"), (25, 1.180, "L"),
+            (42, 1.200, "H"), (44, 1.150, "L"),
+            (49, 1.201, "H"), (51, 1.165, "L"),
+            (56, 1.199, "H"), (58, 1.180, "L"),
         ]
         with patch.object(patterns, "_pivots", return_value=pivots), \
              patch.object(patterns, "atr", return_value=.010):
-            found = patterns.structural_patterns("H1", bars)
-        self.assertTrue(any(p.name == "Восходящий треугольник" and p.side == "LONG" for p in found))
+            found = patterns.chart_patterns("H1", bars)
+        self.assertTrue(any(p.name.startswith("Восходящий треугольник") and p.side == "LONG" for p in found))
+        # A wick without close outside the projected ceiling is not a breakout.
+        bars[-1] = Candle(bars[-1].dt, 1.190, 1.215, 1.188, 1.195)
+        with patch.object(patterns, "_pivots", return_value=pivots), \
+             patch.object(patterns, "atr", return_value=.010):
+            self.assertFalse(any(p.name.startswith("Восходящий треугольник") for p in patterns.chart_patterns("H1", bars)))
+
 
     def test_head_shoulders_only_on_first_neckline_break(self):
         bars = trend_bars(40, step=.0001)
@@ -87,8 +95,10 @@ class ScannerTests(unittest.TestCase):
             (5, 1.200, "H"), (10, 1.150, "L"),
             (15, 1.250, "H"), (20, 1.160, "L"), (25, 1.201, "H"),
         ]
-        bars[-2] = Candle(bars[-2].dt, 1.170, 1.175, 1.155, 1.160)
-        bars[-1] = Candle(bars[-1].dt, 1.160, 1.162, 1.138, 1.140)
+        # Neckline through (10,1.150) and (20,1.160) reaches ~1.178 at bar 38.
+        # A first break therefore needs the preceding close ABOVE that line.
+        bars[-2] = Candle(bars[-2].dt, 1.190, 1.195, 1.180, 1.184)
+        bars[-1] = Candle(bars[-1].dt, 1.184, 1.185, 1.138, 1.140)
         with patch.object(patterns, "_pivots", return_value=pivots), \
              patch.object(patterns, "atr", return_value=.010):
             first = patterns.structural_patterns("H1", bars)
@@ -104,6 +114,8 @@ class ScannerTests(unittest.TestCase):
         first = patterns.Pattern("Гармонический AB=CD", "LONG", "H1", 88, 83, "x", 1.12345, "10:00", "D@09:00")
         later = patterns.Pattern("Гармонический AB=CD", "LONG", "H1", 88, 83, "x", 1.12345, "11:00", "D@09:00")
         self.assertEqual(patterns._pattern_key("EUR/USD", first), patterns._pattern_key("EUR/USD", later))
+        new_geometry = patterns.Pattern("Гармонический AB=CD", "LONG", "H1", 88, 83, "x", 1.12345, "11:00", "D@10:00")
+        self.assertNotEqual(patterns._pattern_key("EUR/USD", first), patterns._pattern_key("EUR/USD", new_geometry))
     def setUp(self):
         self.old = os.environ.get("STATE_DIR")
         self.tmp = tempfile.mkdtemp()

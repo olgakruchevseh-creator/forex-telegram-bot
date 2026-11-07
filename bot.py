@@ -334,28 +334,38 @@ def bars(score: float) -> str:
 
 def closed_bar_utc(dt_str: str | None) -> datetime | None:
     """Время последней закрытой H1 как UTC. Не часы хоста."""
-    raw = str(dt_str or "")[:19]
+    raw = str(dt_str or "").strip()
     if not raw:
         return None
     try:
-        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        try:
-            parsed = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def last_closed_h1_dt(h1: dict[str, list[Candle]]) -> str:
-    dts = []
-    for candles in h1.values():
-        closed = closed_candles(candles)
+    """Most widely shared *closed* H1 open time across currency pairs.
+
+    One pair arriving one hour ahead must not advance the common H1 clock.
+    Datetimes are compared as UTC instants, never lexicographically by strings.
+    On a tie, choose the older H1 to avoid claiming a fresh market-wide close.
+    """
+    from collections import Counter
+    votes = Counter()
+    for candles in (h1 or {}).values():
+        closed = closed_candles(candles or [], 60)
         if closed:
-            dts.append(closed[-1].dt)
-    return max(dts) if dts else ""
+            instant = closed_bar_utc(closed[-1].dt)
+            if instant is not None:
+                votes[instant] += 1
+    if not votes:
+        return ""
+    best_count = max(votes.values())
+    reference = min(dt for dt, count in votes.items() if count == best_count)
+    return reference.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def h1_just_closed(dt_str: str, max_min: int = 12) -> bool:
@@ -1243,6 +1253,16 @@ async def _flush_navigator_outbox(app: Application, chat_id: int, state: dict, m
             log.exception("Доставка обязательного сопровождения Навигатора")
             save_state(state)
             break
+
+
+def is_context_alert(text: str) -> bool:
+    """An informational ZigZag pullback is not an independent entry event.
+
+    A structural ZigZag event is different and may be considered by the
+    ordinary candidate pipeline; this helper alone does not grant delivery.
+    """
+    upper = str(text or "").upper()
+    return "ZIGZAG" in upper and ("ОТКАТ" in upper or "PULLBACK" in upper) and "СТРУКТУРА" not in upper
 
 
 def _alert_pair(text: str) -> str:
