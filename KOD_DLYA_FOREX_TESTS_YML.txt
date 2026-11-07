@@ -1,0 +1,85 @@
+name: Forex — Python + Telegram tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      deep_coverage:
+        description: 'Измерить покрытие строк/ветвей всех модулей (медленно)'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest pytest-cov
+
+      - name: Verify Telegram library
+        run: |
+          python -c 'import telegram; print("python-telegram-bot:", telegram.__version__)'
+          python -c 'from telegram.ext import Application, JobQueue; print("Telegram imports: OK")'
+
+      - name: Static inventory of ALL source modules
+        run: |
+          python forex_module_audit.py
+          python -m compileall -q .
+
+      - name: Run ALL tests (fast, every push)
+        if: github.event_name != 'workflow_dispatch' || !inputs.deep_coverage
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m pytest -q --junitxml=pytest-results.xml
+
+      - name: Run ALL tests with line and branch coverage (manual deep audit)
+        if: github.event_name == 'workflow_dispatch' && inputs.deep_coverage
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          cat > forex_coverage.ini <<'EOF'
+          [run]
+          branch = True
+          source = .
+          omit =
+              test_*.py
+              */test_*.py
+              forex_module_audit.py
+          [report]
+          precision = 1
+          skip_covered = True
+          show_missing = False
+          EOF
+          python -m pytest -q --cov=. --cov-config=forex_coverage.ini --cov-branch --cov-report=xml:coverage.xml --cov-report=term:skip-covered --junitxml=pytest-results.xml
+
+      - name: Attach audit and test evidence, even when tests fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forex-module-audit-and-tests
+          path: |
+            forex_module_audit.json
+            forex_module_audit.md
+            coverage.xml
+            pytest-results.xml
+          if-no-files-found: warn
+        
