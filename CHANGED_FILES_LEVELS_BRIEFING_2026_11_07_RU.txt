@@ -1,0 +1,16 @@
+Изменённые файлы для доработки уровней поддержки/сопротивления в брифинговых картинках:
+
+1. levels.py
+   - добавлен briefing_levels_snapshot(): read-only выборка ближайших уровней S/R для брифингов и картинок.
+
+2. session_projection_reports.py
+   - в unified Echo + Next Pivot + ZigZag картинку добавлены уровни S1/S2/R1/R2;
+   - в combined_pair_caption() добавлен текстовый блок поддержки/сопротивления;
+   - в pending_report_bundles() добавлено построение levels_brief для каждой пары.
+
+3. briefing_delivery.py
+   - compact_pair_caption() теперь сохраняет в caption строки:
+     Эхо / Next Pivot / Adaptive ZigZag / Поддержка / Сопротивление.
+
+4. test_session_brief_levels_20261107.py
+   - новые тесты на snapshot уровней, текст подписи и compact caption.

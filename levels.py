@@ -1312,6 +1312,65 @@ def _strength_confirms(
     return gap >= minimum if side == "LONG" else gap <= -minimum
 
 
+
+
+def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dict:
+    """Nearest support/resistance snapshot for briefing display only.
+
+    Read-only helper: computes fresh clustered levels from the current closed
+    candles without touching Levels state, anti-spam memory or publication
+    logic. The result is suitable for session briefings and image annotations.
+    """
+    by_tf = by_tf or {}
+    frames: dict[str, list[Candle]] = {}
+    atr_map: dict[str, float] = {}
+    for tf in TF_ORDER:
+        raw = by_tf.get(tf) or []
+        closed = tf_closed(symbol, tf, raw)
+        if closed:
+            frames[tf] = closed
+            atr_map[tf] = float(atr(closed, 14) or 0.0)
+    h1 = frames.get("H1") or []
+    if not h1:
+        return {"symbol": symbol, "current_price": None, "supports": [], "resistances": []}
+    current_price = float(h1[-1].close)
+    items: list[dict] = []
+    for tf, candles in frames.items():
+        items.extend(cluster_tf(symbol, tf, candles, collect_raw_levels(symbol, tf, candles)))
+    zones = merge_cluster(symbol, items, atr_map)
+
+    def _zone_row(idx: int, zone: Zone) -> dict:
+        ctx = level_context(zone)
+        dist_price = (current_price - zone.mid) if zone.kind == "support" else (zone.mid - current_price)
+        dist_pips = dist_price / max(pip_size(symbol), 1e-12)
+        return {
+            "label": ("S" if zone.kind == "support" else "R") + str(idx),
+            "price": float(zone.mid),
+            "low": float(zone.low),
+            "high": float(zone.high),
+            "distance_pips": float(dist_pips),
+            "tfs": list(zone.tfs or []),
+            "tfs_text": format_tfs(zone.tfs or []),
+            "strength": int(round(float(zone.strength or 0.0))),
+            "rank": ctx.get("rank", ""),
+            "reliability": int(ctx.get("reliability", 0) or 0),
+            "kind": zone.kind,
+        }
+
+    supports = [z for z in zones if z.kind == "support" and z.mid <= current_price]
+    resistances = [z for z in zones if z.kind == "resistance" and z.mid >= current_price]
+    supports.sort(key=lambda z: (abs(current_price - z.mid), -float(z.strength or 0.0), -len(z.tfs or [])))
+    resistances.sort(key=lambda z: (abs(z.mid - current_price), -float(z.strength or 0.0), -len(z.tfs or [])))
+    support_rows = [_zone_row(i + 1, z) for i, z in enumerate(supports[:max(1, int(max_each))])]
+    resistance_rows = [_zone_row(i + 1, z) for i, z in enumerate(resistances[:max(1, int(max_each))])]
+    return {
+        "symbol": symbol,
+        "current_price": current_price,
+        "supports": support_rows,
+        "resistances": resistance_rows,
+    }
+
+
 def render_chart(zone: Zone, event: str, side: str, closed_by_tf: dict[str, list[Candle]]) -> io.BytesIO:
     """График подтвержденного события Levels на реальных закрытых свечах."""
     from PIL import Image, ImageDraw, ImageFont

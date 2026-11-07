@@ -17,6 +17,7 @@ import news as newsmod
 import next_pivot_projection
 import classic_pivot_points
 import zigzag_scanner
+import levels
 import session_pullback_consensus
 import pair_character_matrix
 from analysis import closed_candles, currency_strength
@@ -463,6 +464,30 @@ def _side_badge(side: str | None) -> str:
     return "🟡 НЕЙТРАЛЬНО"
 
 
+def _fmt_level_price(symbol: str, price: float) -> str:
+    return f"{float(price):.{3 if 'JPY' in symbol else 5}f}"
+
+
+def _levels_lines(symbol: str, info: dict | None) -> list[str]:
+    info = info or {}
+    sups = list(info.get('supports') or [])
+    ress = list(info.get('resistances') or [])
+    if not sups and not ress:
+        return []
+    lines = ["Уровни поддержки / сопротивления:"]
+    if sups:
+        parts = []
+        for row in sups[:2]:
+            parts.append(f"{row.get('label', 'S?')} {_fmt_level_price(symbol, row.get('price', 0.0))} ({int(round(abs(float(row.get('distance_pips', 0.0)))))} п.) · {row.get('tfs_text', '')}")
+        lines.append("Поддержка: " + " | ".join(parts))
+    if ress:
+        parts = []
+        for row in ress[:2]:
+            parts.append(f"{row.get('label', 'R?')} {_fmt_level_price(symbol, row.get('price', 0.0))} ({int(round(abs(float(row.get('distance_pips', 0.0)))))} п.) · {row.get('tfs_text', '')}")
+        lines.append("Сопротивление: " + " | ".join(parts))
+    return lines
+
+
 def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     """Compact vertical stack first; plain-text explanation below it."""
     symbol = str(bundle.get("symbol") or "")
@@ -512,6 +537,7 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     pullback = bundle.get("pullback_consensus") or {}
     if pullback.get("text"):
         lines.append(str(pullback["text"]))
+    lines.extend(_levels_lines(symbol, bundle.get("levels_brief")))
     if pr:
         reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else None)
         reaction_text = {"LONG": "ЛОНГ", "SHORT": "ШОРТ"}.get(reaction, "НЕЙТРАЛЬНО")
@@ -548,6 +574,7 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
     echo = ((bundle.get("echo") or {}).get("result") or {})
     pivot = ((bundle.get("pivot") or {}).get("result") or {})
     zz = bundle.get("zigzag") or zigzag_scanner.analyze_symbol(symbol, by_tf)
+    levels_brief = bundle.get("levels_brief") or {}
 
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#10131d")
@@ -616,6 +643,11 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
             zz_projection = [(0, current), (corner_h, corner_price), (reverse_h, reverse_price)]
 
     prices = [v for b in bars for v in (b.low,b.high)] + [v for _,v in echo_points] + [v for _,v in zz_projection]
+    for row in list(levels_brief.get("supports") or [])[:2] + list(levels_brief.get("resistances") or [])[:2]:
+        try:
+            prices.append(float(row.get("price")))
+        except Exception:
+            pass
     if pivot:
         prices += [float(pivot.get("zone_low", current)), float(pivot.get("zone_high", current))]
         sign = 1 if pivot.get("side") == "LONG" else -1
@@ -693,11 +725,36 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         kind="ВЕРШИНА" if pivot.get("kind")=="high" else "ОСНОВАНИЕ"
         draw.text((max(left,zx1-15),max(top+32,y_at(zh)-26)),f"PIVOT {kind}",fill="#8cc8ff",font=small)
 
+    level_specs = []
+    for row in list(levels_brief.get("supports") or [])[:2]:
+        level_specs.append((row, "#42e889"))
+    for row in list(levels_brief.get("resistances") or [])[:2]:
+        level_specs.append((row, "#ff6575"))
+    for idx, (row, color) in enumerate(level_specs):
+        try:
+            price = float(row.get("price"))
+        except Exception:
+            continue
+        y = y_at(price)
+        # Do not obscure candles: use thin translucent guides and compact tags.
+        draw.line((left, y, right, y), fill=color + "66", width=2)
+        label = f"{row.get('label', '?')} {price:.{decimals}f}"
+        tf_text = str(row.get('tfs_text') or '')
+        tag_w = 170 if tf_text else 120
+        bx1 = min(right - tag_w - 8, right - 220)
+        bx2 = bx1 + tag_w
+        by1 = max(top + 4, min(bottom - 34, y - 14 + (idx % 2) * 3))
+        by2 = by1 + 28
+        draw.rounded_rectangle((bx1, by1, bx2, by2), radius=8, fill="#161b27dd", outline=color, width=2)
+        draw.text((bx1 + 8, by1 + 5), label, fill=color, font=small)
+        if tf_text:
+            draw.text((left + 6, max(top + 2, y - 18)), tf_text, fill=color, font=small)
+
     zdir=(zz.get("zigzag_directions") or {}).get("H1",0); zword="LONG" if zdir>0 else "SHORT" if zdir<0 else "RANGE"
     draw.text((left,24),f"{symbol} · H1 · ЭХО + NEXT PIVOT + ADAPTIVE ZIGZAG",fill="#f1f5fb",font=font)
     eta = f" · до вероятного угла ≈ {zz_low}–{zz_high} H1" if zz_low and zz_high else ""
     draw.text((left,51),f"ZigZag H1: {zword} · белый: структура + прогноз двумя ветвями{eta}",fill="#b9c3d3",font=small)
-    draw.text((left,665),"Единый вероятностный сценарий · закрытые H1 · не торговая гарантия",fill="#9aa4b5",font=small)
+    draw.text((left,665),"Единый вероятностный сценарий · закрытые H1 · S/R уровни информативны, не отдельный сигнал",fill="#9aa4b5",font=small)
     out=io.BytesIO(); out.name=f"echo_pivot_zigzag_{symbol.replace('/','')}.png"; image.save(out,format="PNG",optimize=True); out.seek(0); return out
 
 def pending_report_bundles(
@@ -755,8 +812,13 @@ def pending_report_bundles(
                 continue
             zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
             character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength), by_tf=by_tf)
+            try:
+                levels_brief = levels.briefing_levels_snapshot(symbol, by_tf, max_each=2)
+            except Exception:
+                log.exception("SESSION_LEVELS_BRIEF_FAILED symbol=%s", symbol)
+                levels_brief = {}
             bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot, "zigzag": zz,
-                      "pair_character": character,
+                      "pair_character": character, "levels_brief": levels_brief,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}
             pb_states = state.setdefault("session_pullback_consensus", {})
             previous_pb = pb_states.get(symbol) or {}

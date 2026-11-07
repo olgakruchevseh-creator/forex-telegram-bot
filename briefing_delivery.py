@@ -65,13 +65,22 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
     limit = max(1, min(1024, int(limit)))
     selected = _relevant_lines(pair_text)
     chart_lines = [line.strip() for line in (visual or "").splitlines() if line.strip()]
-    # A pattern's direction is useful context, but is not an independent trade signal.
-    chart = " · ".join(chart_lines[:2])
+    important_prefixes = ("Пара:", "Эхо:", "Next Pivot:", "Adaptive ZigZag:", "Поддержка:", "Сопротивление:")
+    chart_selected: list[str] = []
+    for line in chart_lines:
+        if line.startswith("Пара:"):
+            continue
+        if line.startswith(important_prefixes) and line not in chart_selected:
+            chart_selected.append(line)
+    if not chart_selected and chart_lines:
+        # Fallback: preserve previous behaviour for other visual cards.
+        chart_selected = [" · ".join(chart_lines[:2])]
     pieces: list[str] = []
     if selected:
         pieces.append(selected[0])
-    if chart and chart not in pieces and _telegram_len("\n".join(pieces + [chart])) <= limit:
-        pieces.append(chart)
+    for line in chart_selected:
+        if line and line not in pieces and _telegram_len("\n".join(pieces + [line])) <= limit - 80:
+            pieces.append(line)
     count = 1 if selected else 0
     for line in selected[count:]:
         if _telegram_len("\n".join(pieces + [line])) > limit - 56:
@@ -83,12 +92,13 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
     if _telegram_len("\n".join(pieces + [note])) <= limit:
         pieces.append(note)
     result = "\n".join(pieces)
+    fallback_chart = "\n".join(chart_selected).strip()
     if not result:
-        result = chart if chart else "Данные по паре временно недоступны"
+        result = fallback_chart if fallback_chart else "Данные по паре временно недоступны"
     if _telegram_len(result) > limit:
         # Only the pathological single-line case: clip on Unicode boundaries.
         result = ""
-        for char in chart:
+        for char in fallback_chart:
             if _telegram_len(result + char) > limit:
                 break
             result += char
