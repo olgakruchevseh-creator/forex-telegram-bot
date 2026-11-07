@@ -1,0 +1,90 @@
+name: Forex — Python + Telegram tests
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Выберите обычные тесты или полный аудит покрытия'
+        required: true
+        default: tests
+        type: choice
+        options:
+          - tests
+          - full_audit
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest pytest-cov
+
+      - name: Verify Telegram library
+        run: |
+          python -c 'import telegram; print("python-telegram-bot:", telegram.__version__)'
+          python -c 'from telegram.ext import Application, JobQueue; print("Telegram imports: OK")'
+
+      - name: Run all available tests
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'full_audit'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m pytest -q
+
+      - name: Run complete module coverage audit (manual only)
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full_audit'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          cat > .coveragerc <<'EOF'
+          [run]
+          branch = True
+          source = .
+          omit =
+              */test_*.py
+              */forex_module_audit.py
+              */forex_coverage_report.py
+          [report]
+          precision = 2
+          EOF
+          set +e
+          python -m pytest -q --cov=. --cov-config=.coveragerc --cov-branch --cov-report=json:coverage.json --cov-report=xml:coverage.xml --cov-report=term > coverage_test_results.txt 2>&1
+          result=$?
+          set -e
+          cat coverage_test_results.txt
+          python forex_module_audit.py --json forex_module_audit.json --markdown forex_module_audit.md
+          python forex_coverage_report.py --coverage-json coverage.json --output FOREX_TEST_COVERAGE_RU.md
+          exit "$result"
+
+      - name: Upload full audit reports
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'full_audit'
+        uses: actions/upload-artifact@v4
+        with:
+          name: forex-full-audit
+          path: |
+            coverage.json
+            coverage.xml
+            coverage_test_results.txt
+            forex_module_audit.json
+            forex_module_audit.md
+            FOREX_TEST_COVERAGE_RU.md
+          if-no-files-found: warn
+          retention-days: 14

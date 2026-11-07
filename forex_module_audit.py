@@ -41,7 +41,7 @@ def _imports(tree: ast.AST) -> set[str]:
 
 
 def scan(root: Path = ROOT) -> dict:
-    sources = sorted(p for p in root.glob('*.py') if not p.name.startswith('test_') and p.name != 'forex_module_audit.py')
+    sources = sorted(p for p in root.glob('*.py') if not p.name.startswith('test_') and p.name not in ('forex_module_audit.py', 'forex_coverage_report.py'))
     tests = sorted(root.glob('test_*.py'))
     direct = defaultdict(list)
     importers = defaultdict(list)
