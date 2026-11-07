@@ -118,9 +118,12 @@ def classify_news(symbol: str, side: int, events: list, now_utc: datetime | None
         left = newsmod.minutes_left(event, now_utc)
         if not (-after <= left <= before):
             continue
-        printed = newsmod.has_actual(event) or left <= 0
-        surprise_dir = _print_usd_dir(event) if printed else 0
-        if not printed or left > 0 and not newsmod.has_actual(event):
+        released = newsmod.has_released_actual(event, now_utc)
+        # IMPORTANT: minutes_left() rounds to minutes; left==0 may still
+        # mean the scheduled publication is seconds in the future.
+        before_release = now_utc < event.dt_utc
+        surprise_dir = _print_usd_dir(event) if released else 0
+        if before_release:
             mode = NEWS_PRE_EVENT
         elif surprise_dir == 0:
             mode = NEWS_POST_NO_SURPRISE

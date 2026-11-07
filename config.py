@@ -315,6 +315,8 @@ NEWS_CACHE_MAX_AGE_HOURS = 168
 # more than ~2 downloads / 5 minutes / IP. Scan+briefing used to hit it
 # every minute and then saw HTML 429 as "calendar does not exist".
 NEWS_FETCH_MIN_MINUTES = 45
+# Live calendar pre-release/actual provenance, observational only. No new API costs.
+MACRO_EVENT_JOURNAL_ENABLED = True
 # CPI — отдельный строгий фундаментальный слой.
 # Сюрприз измеряется в процентных пунктах (например 3.2 vs 3.1 = +0.1 п.п.).
 CPI_MIN_SURPRISE_PP = 0.05

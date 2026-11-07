@@ -1445,7 +1445,7 @@ async def _briefing_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # При ошибке Telegram следующий скан повторит попытку.
                 state["news_warned"][event.event_id] = time.time()
                 save_state(state)
-            if newsmod.has_actual(event) and event.event_id not in state["news_actual_sent"]:
+            if newsmod.has_released_actual(event, now_utc) and event.event_id not in state["news_actual_sent"]:
                 verdict = newsmod.interpret_print(event)
                 msg = briefing.format_actual_update(
                     event, verdict, dxy, usd_score_for_news, all_events

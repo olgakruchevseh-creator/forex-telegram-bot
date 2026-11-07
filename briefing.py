@@ -1356,7 +1356,10 @@ def format_news_warning(
         )
     lines.append("🧭 ЧТО МОЖЕТ ПРОИЗОЙТИ")
     lines.append("")
-    if event.economic_effect == "higher_is_negative":
+    if newsmod.is_cpi_event(event) or any(x in event.title.lower() for x in ("interest rate", "cash rate", "bank rate", "federal funds rate")):
+        lines.append("Сюрприз по CPI/ставке может изменить ожидания политики ЦБ, но не задаёт направление автоматически.")
+        lines.append("Сравним фактический релиз с предварительно зафиксированным прогнозом и реакцией H1.")
+    elif event.economic_effect == "higher_is_negative":
         lines.append("Если факт существенно выше прогноза → отрицательно для валюты.")
         lines.append("Если факт существенно ниже прогноза → положительно для валюты.")
     elif event.economic_effect == "higher_is_positive":
@@ -1401,6 +1404,13 @@ def format_actual_update(
         "mixed": "СМЕШАННЫЙ CPI — НАПРАВЛЕНИЕ НЕ УТВЕРЖДАЕМ",
         "neutral": "CPI БЕЗ ЗНАЧИМОГО СЮРПРИЗА",
     }.get(verdict, "КОНТЕКСТ ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ ЦЕНОЙ")
+    if newsmod.is_cpi_event(event):
+        tone = {"positive": "CPI ВЫШЕ ПРОГНОЗА — РЕАКЦИЯ ЗАВИСИТ ОТ ОЖИДАНИЙ СТАВОК",
+                "negative": "CPI НИЖЕ ПРОГНОЗА — РЕАКЦИЯ ЗАВИСИТ ОТ ОЖИДАНИЙ СТАВОК",
+                "mixed": "СМЕШАННЫЙ CPI — НАПРАВЛЕНИЕ НЕ УТВЕРЖДАЕМ",
+                "neutral": "CPI БЕЗ ЗНАЧИМОГО СЮРПРИЗА"}.get(verdict, tone)
+    elif any(x in event.title.lower() for x in ("interest rate", "cash rate", "bank rate", "federal funds rate")):
+        tone = "РЕШЕНИЕ ПО СТАВКЕ — НАПРАВЛЕНИЕ ТОЛЬКО ПО РЕАКЦИИ РЫНКА"
     lines = [
         "📰 ФАКТ ПО НОВОСТИ", "", f"{event.local_hm} · {event.currency}",
         newsmod.translate_title(event.title),
@@ -1415,6 +1425,21 @@ def format_actual_update(
             f"Предыдущее: {event.previous}", f"Прогноз: {event.forecast}", f"Факт: {event.actual}",
         ])
     lines.extend(["", tone, ""])
+    # Explicit provenance instead of hindsight: a revised/post-event forecast
+    # is not proof that the bot knew the consensus at the original release.
+    try:
+        import macro_event_journal
+        snapshot = macro_event_journal.provenance(event.event_id)
+    except Exception:
+        snapshot = None
+    if snapshot and snapshot.get("forecast_before_release"):
+        anchor = snapshot["forecast_before_release"]
+        lines.append(f"Прогноз, зафиксированный до релиза: {anchor}")
+        if anchor.strip() != (event.forecast or "").strip():
+            lines.append("⚠️ Прогноз в календаре изменился после фиксации; сравнение требует проверки.")
+    else:
+        lines.append("Предрелизный прогноз не подтверждён журналом: историческая оценка сюрприза недостоверна.")
+    lines.append("")
     if event.currency == "USD" and dxy and dxy.available:
         lines.append(f"DXY: {dxy.price:.2f} · {_dir_word(dxy.bias)}")
         lines.append(dxy_context(usd_score, dxy) if usd_score is not None

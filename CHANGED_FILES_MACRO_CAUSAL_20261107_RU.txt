@@ -1,0 +1,15 @@
+Изменённые файлы (заменить существующие в корне проекта GitHub):
+bot.py
+briefing.py
+config.py
+news.py
+trade_lifecycle.py
+
+Новые файлы (добавить в корень проекта):
+macro_event_journal.py
+test_macro_event_journal_20261107.py
+FOREX_MACRO_CAUSAL_AUDIT_2026_11_07_RU.md
+CHANGED_FILES_MACRO_CAUSAL_20261107_RU.txt
+
+Всего файлов в маленьком ZIP: 9.
+Новые переменные Railway не нужны. Для сохранения SQLite требуется STATE_DIR на Volume.

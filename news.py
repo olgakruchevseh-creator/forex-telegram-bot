@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -242,12 +243,13 @@ def cpi_pair_guard(symbol: str, events: list[NewsEvent], now_utc: datetime | Non
         return ""
     _, delta, event = min(relevant, key=lambda x: x[0])
     title = translate_title(event.title)
-    if delta > 0:
+    if now_utc < event.dt_utc:
         return f"⛔ CPI-ФИЛЬТР: вход запрещён до публикации {event.currency} {title} (через {delta} мин) и подтверждения реакции цены."
     consensus = cpi_release_consensus(events, event.currency, event)
     state = consensus.get("verdict")
-    label = {"positive":"выше ожиданий / поддержка валюты", "negative":"ниже ожиданий / давление на валюту",
-             "mixed":"смешанный headline/core CPI", "neutral":"без значимого сюрприза"}.get(state, "неопределённый релиз")
+    label = {"positive":"инфляция выше прогноза — реакция зависит от ожиданий ставок",
+             "negative":"инфляция ниже прогноза — реакция зависит от ожиданий ставок",
+             "mixed":"смешанный headline/core CPI", "neutral":"без значимого числового сюрприза"}.get(state, "неопределённый релиз")
     return f"⛔ CPI-ФИЛЬТР: {event.currency} · {label}. После релиза прошло {abs(delta)} мин; новый вход только после пост-CPI стабилизации и подтверждения цены."
 
 
@@ -416,16 +418,16 @@ def _parse_dt(value) -> Optional[datetime]:
 def _num(text: str) -> Optional[float]:
     if text is None:
         return None
-    s = str(text).strip().replace(",", "").replace("%", "").replace("K", "").replace("M", "")
-    s = s.replace("B", "")
-    if s in ("", "-", "—", "n/a", "NA", "None"):
-        return None
-    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    s = str(text).strip().replace("−", "-").replace("–", "-")
+    # K/M/B are actual units, not decorative letters. Do not silently turn
+    # 1.2M and 950K into 1.2 and 950 and invert the surprise sign.
+    m = re.fullmatch(r"([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*([KkMmBb]?)\s*(%?)", s)
     if not m:
         return None
     try:
-        return float(m.group(0))
-    except ValueError:
+        result = float(m.group(1).replace(",", "")) * {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9}[m.group(2).upper()]
+        return result if math.isfinite(result) else None
+    except (ValueError, OverflowError):
         return None
 
 
@@ -512,6 +514,15 @@ def load_events() -> list[NewsEvent]:
     try:
         events = fetch_ff()
         if events:
+            # OBSERVE_ONLY: write genuine live-fetch snapshots BEFORE caching.
+            # Cached/backfilled calendars must never be mistaken for a prior
+            # consensus forecast. Journal failure cannot stop news monitoring.
+            if bool(getattr(cfg, "MACRO_EVENT_JOURNAL_ENABLED", True)):
+                try:
+                    import macro_event_journal
+                    macro_event_journal.observe(events)
+                except Exception:
+                    log.exception("MACRO_EVENT_JOURNAL_UNAVAILABLE")
             _save_cache(events)
             _MEM_EVENTS = list(events)
             _MEM_TS = time.time()
@@ -557,6 +568,14 @@ def has_actual(event: NewsEvent) -> bool:
     return a not in ("", "-", "—", "n/a", "NA", "None")
 
 
+def has_released_actual(event: NewsEvent, now_utc: datetime | None = None) -> bool:
+    """Не принимать наперёд появившийся Actual за состоявшийся релиз."""
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None or event.dt_utc.tzinfo is None:
+        return False
+    return now.astimezone(timezone.utc) >= event.dt_utc.astimezone(timezone.utc) and has_actual(event)
+
+
 def interpret_print(event: NewsEvent) -> Optional[str]:
     """
     Возвращает 'positive' / 'negative' / None.
@@ -573,12 +592,10 @@ def interpret_print(event: NewsEvent) -> Optional[str]:
     fc = _num(event.forecast)
     if act is None or fc is None:
         return None
-    if fc == 0:
-        diff = abs(act)
-        rel = diff
-    else:
-        diff = act - fc
-        rel = abs(diff / fc)
+    diff = act - fc
+    # A zero forecast is common for jobs / growth. Keep its SIGN: taking
+    # abs(actual) here reversed negative surprises to positive ones.
+    rel = abs(diff) if fc == 0 else abs(diff / fc)
     # Слишком маленькое отклонение не комментируем направленно.
     if abs(diff) < 1e-9 or rel < 0.04:
         return None
@@ -599,6 +616,12 @@ def scenario_before(event: NewsEvent, ccy_score: float) -> str:
             f"У события нет однозначного числового сценария. Возможна повышенная волатильность {event.currency}; "
             f"направление определяем только после подтверждённой реакции цены."
         )
+    # The same CPI/interest-rate surprise can strengthen or weaken a currency
+    # depending on repricing and positioning. Never promise a causal direction.
+    title = (event.title or "").lower()
+    if is_cpi_event(event) or any(x in title for x in ("interest rate", "cash rate", "bank rate", "federal funds rate")):
+        return (f"Сравниваем факт и прогноз по {event.currency}, но направление не выводим автоматически. "
+                "Оцениваем ожидания ставок, другие показатели релиза и реакцию цены после закрытой H1.")
     weak = ccy_score <= -0.03
     strong = ccy_score >= 0.03
     current = (
