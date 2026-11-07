@@ -93,6 +93,7 @@ class PairBrief:
     weekly_bias: dict | None = None
     adaptive_direction: dict | None = None
     weekly_rhythm: object | None = None
+    levels_brief: dict | None = None
 
 
 def now_local() -> datetime:
@@ -752,6 +753,14 @@ def build_pair_briefs(
         except Exception:
             log.exception("Weekly Rhythm для брифинга %s", symbol)
             weekly_rhythm = None
+        # Informational Levels snapshot only: no effect on directional votes,
+        # signal quality, scoring or guard thresholds.
+        try:
+            import levels as levels_module
+            level_snapshot = levels_module.briefing_levels_snapshot(symbol, market.get(symbol) or {}, max_each=2)
+        except Exception:
+            log.exception("Levels snapshot для брифинга %s", symbol)
+            level_snapshot = {}
         brief = PairBrief(
             symbol=symbol,
             stack=stack,
@@ -776,6 +785,7 @@ def build_pair_briefs(
             weekly_bias=weekly_bias,
             adaptive_direction=adaptive_direction,
             weekly_rhythm=weekly_rhythm,
+            levels_brief=level_snapshot,
         )
         technical_side = technical_pair_side(brief)
         brief.strength_relation = _strength_relation(brief.gap, technical_side)
@@ -1068,6 +1078,11 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         lines.append(f"Направление текущей сессии: {_ru_display(session_side) if session_side else 'НЕ ПОДТВЕРЖДЕНО'}")
         relation = b.strength_relation or _strength_relation(b.gap, technical_pair_side(b))
         lines.append(f"Сила: {force} · {relation}")
+        try:
+            import session_projection_reports as projection_reports
+            lines.extend(projection_reports._levels_lines(b.symbol, b.levels_brief))
+        except Exception:
+            log.exception("Не удалось сформировать текст Levels для %s", b.symbol)
         lines.append(f"Матрица среды: {b.character_matrix_score:.0f}/100 · {b.character_matrix_band}")
         if b.context_support or b.context_against:
             lines.append(f"Внутренний контекст: +{b.context_support} / -{b.context_against} групп подтверждения")

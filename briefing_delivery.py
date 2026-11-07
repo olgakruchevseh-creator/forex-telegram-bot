@@ -37,6 +37,9 @@ def _relevant_lines(pair_text: str) -> list[str]:
         lambda x: "💱" in x and "━━" in x,
         lambda x: "НАПРАВЛЕНИЕ:" in x,
         lambda x: x.startswith("W1 "),
+        lambda x: x.startswith("Текущая зона:"),
+        lambda x: x.startswith("Поддержка:"),
+        lambda x: x.startswith("Сопротивление:"),
         lambda x: x.startswith("Текущее положение:"),
         lambda x: x.startswith("Состояние:"),
         lambda x: x.startswith("Согласие D1/H4/H1:"),
@@ -65,7 +68,8 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
     limit = max(1, min(1024, int(limit)))
     selected = _relevant_lines(pair_text)
     chart_lines = [line.strip() for line in (visual or "").splitlines() if line.strip()]
-    important_prefixes = ("Пара:", "Эхо:", "Next Pivot:", "Adaptive ZigZag:", "Поддержка:", "Сопротивление:")
+    important_prefixes = ("Пара:", "Эхо:", "Next Pivot:", "Adaptive ZigZag:",
+                          "Текущая зона:", "Поддержка:", "Сопротивление:", "Пробой/проверка:")
     chart_selected: list[str] = []
     for line in chart_lines:
         if line.startswith("Пара:"):

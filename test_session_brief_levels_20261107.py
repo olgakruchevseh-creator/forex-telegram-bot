@@ -8,7 +8,7 @@ import briefing_delivery as delivery
 
 
 def _bars(count=80, base=1.1000, amp=0.0060, step=0.00035, start=None, minutes=60):
-    start = start or datetime(2026, 11, 7, 0, 0)
+    start = start or datetime(2026, 10, 20, 0, 0)
     out = []
     price = base
     for i in range(count):

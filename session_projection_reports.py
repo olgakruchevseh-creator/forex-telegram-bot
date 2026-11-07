@@ -423,6 +423,7 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
             side = brief.side or briefing.technical_pair_side(brief)
             if side:
                 session_sides[brief.symbol] = side
+            session_levels[brief.symbol] = brief.levels_brief or {}
     except Exception:
         log.exception("SESSION_THESIS_CONTEXT_FAILED; Echo/Pivot без сверки с брифингом")
     reports = []
@@ -470,22 +471,31 @@ def _fmt_level_price(symbol: str, price: float) -> str:
 
 def _levels_lines(symbol: str, info: dict | None) -> list[str]:
     info = info or {}
-    sups = list(info.get('supports') or [])
-    ress = list(info.get('resistances') or [])
-    if not sups and not ress:
-        return []
+    supports = list(info.get("supports") or [])[:2]
+    resistances = list(info.get("resistances") or [])[:2]
+    current = list(info.get("current_zones") or [])[:1]
+    warnings = list(info.get("observations") or [])[:1]
+    if info.get("current_price") is None and not (supports or resistances or current):
+        return ["Уровни S/R: нет закрытой H1 для расчёта"]
+    def fmt(row: dict) -> str:
+        low = _fmt_level_price(symbol, float(row.get("low", row.get("price", 0.0))))
+        high = _fmt_level_price(symbol, float(row.get("high", row.get("price", 0.0))))
+        status = str(row.get("status") or "НЕ ПРОВЕРЕНА")
+        distance = float(row.get("distance_pips") or 0)
+        dist = f" · до зоны {distance:.0f} п." if distance > 0 else ""
+        return f"{row.get('label', '?')} {low}–{high}{dist} · {row.get('tfs_text', '—')} · {status}"
     lines = ["Уровни поддержки / сопротивления:"]
-    if sups:
-        parts = []
-        for row in sups[:2]:
-            parts.append(f"{row.get('label', 'S?')} {_fmt_level_price(symbol, row.get('price', 0.0))} ({int(round(abs(float(row.get('distance_pips', 0.0)))))} п.) · {row.get('tfs_text', '')}")
-        lines.append("Поддержка: " + " | ".join(parts))
-    if ress:
-        parts = []
-        for row in ress[:2]:
-            parts.append(f"{row.get('label', 'R?')} {_fmt_level_price(symbol, row.get('price', 0.0))} ({int(round(abs(float(row.get('distance_pips', 0.0)))))} п.) · {row.get('tfs_text', '')}")
-        lines.append("Сопротивление: " + " | ".join(parts))
+    if current:
+        lines.append("Текущая зона: " + fmt(current[0]))
+    lines.append("Поддержка: " + ("; ".join(fmt(z) for z in supports) if supports else "рядом не определена"))
+    lines.append("Сопротивление: " + ("; ".join(fmt(z) for z in resistances) if resistances else "рядом не определено"))
+    if warnings:
+        row = warnings[0]
+        lines.append(f"Пробой/проверка: {_fmt_level_price(symbol, row['low'])}–{_fmt_level_price(symbol, row['high'])} · {row['status']}")
+    if not info.get("lifecycle_synced"):
+        lines.append("Журнал Levels не синхронизирован с этой H1: статус реакции не подтверждён")
     return lines
+
 
 
 def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
@@ -528,6 +538,7 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     period = str(bundle.get("period") or "")
     if period:
         lines.append(f"Период: {period}")
+    lines.extend(_levels_lines(symbol, bundle.get("levels_brief")))
     character = bundle.get("pair_character") or {}
     if character:
         lines.append(pair_character_matrix.compact_text(character))
@@ -537,7 +548,6 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     pullback = bundle.get("pullback_consensus") or {}
     if pullback.get("text"):
         lines.append(str(pullback["text"]))
-    lines.extend(_levels_lines(symbol, bundle.get("levels_brief")))
     if pr:
         reaction = "SHORT" if pside == "LONG" else ("LONG" if pside == "SHORT" else None)
         reaction_text = {"LONG": "ЛОНГ", "SHORT": "ШОРТ"}.get(reaction, "НЕЙТРАЛЬНО")
@@ -549,10 +559,17 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
             lines.append(f"Связка: Echo {echo_text} → движение к Pivot {pivot_text} → после зоны возможна реакция {reaction_text}.")
         else:
             lines.append(f"Связка: Pivot — локальная зона; реакция {reaction_text} учитывается только после подтверждения M15/H1.")
-    lines.append("Единый график: Adaptive ZigZag + Echo + Next Pivot")
+    lines.append("Единый график: Adaptive ZigZag + Echo + Next Pivot + зоны Levels")
     lines.append("Информационный вероятностный сценарий, не торговый сигнал.")
     text = "\n".join(lines)
-    return text if len(text) <= limit else text[:limit-1].rstrip() + "…"
+    if len(text) <= limit:
+        return text
+    kept: list[str] = []
+    for line in lines:
+        if len("\n".join(kept + [line])) > limit:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 
@@ -643,10 +660,13 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
             zz_projection = [(0, current), (corner_h, corner_price), (reverse_h, reverse_price)]
 
     prices = [v for b in bars for v in (b.low,b.high)] + [v for _,v in echo_points] + [v for _,v in zz_projection]
-    for row in list(levels_brief.get("supports") or [])[:2] + list(levels_brief.get("resistances") or [])[:2]:
+    displayed_levels = (list(levels_brief.get("supports") or [])[:2]
+                        + list(levels_brief.get("resistances") or [])[:2]
+                        + list(levels_brief.get("current_zones") or [])[:1])
+    for row in displayed_levels:
         try:
-            prices.append(float(row.get("price")))
-        except Exception:
+            prices.extend((float(row["low"]), float(row["high"])))
+        except (ValueError, KeyError, TypeError):
             pass
     if pivot:
         prices += [float(pivot.get("zone_low", current)), float(pivot.get("zone_high", current))]
@@ -725,36 +745,48 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         kind="ВЕРШИНА" if pivot.get("kind")=="high" else "ОСНОВАНИЕ"
         draw.text((max(left,zx1-15),max(top+32,y_at(zh)-26)),f"PIVOT {kind}",fill="#8cc8ff",font=small)
 
-    level_specs = []
-    for row in list(levels_brief.get("supports") or [])[:2]:
-        level_specs.append((row, "#42e889"))
-    for row in list(levels_brief.get("resistances") or [])[:2]:
-        level_specs.append((row, "#ff6575"))
-    for idx, (row, color) in enumerate(level_specs):
+    # Display the same zones as in the text, not an invented single-tick level.
+    level_specs = ([(r, "#42e889") for r in (levels_brief.get("supports") or [])[:2]]
+                   + [(r, "#ff6575") for r in (levels_brief.get("resistances") or [])[:2]]
+                   + [(r, "#ffd35d") for r in (levels_brief.get("current_zones") or [])[:1]])
+    occupied_tags: list[float] = []
+    for row, color in level_specs:
         try:
-            price = float(row.get("price"))
-        except Exception:
+            low, high = float(row["low"]), float(row["high"])
+            if not (0 < low <= high):
+                continue
+        except (KeyError, ValueError, TypeError):
             continue
-        y = y_at(price)
-        # Do not obscure candles: use thin translucent guides and compact tags.
-        draw.line((left, y, right, y), fill=color + "66", width=2)
-        label = f"{row.get('label', '?')} {price:.{decimals}f}"
-        tf_text = str(row.get('tfs_text') or '')
-        tag_w = 170 if tf_text else 120
-        bx1 = min(right - tag_w - 8, right - 220)
-        bx2 = bx1 + tag_w
-        by1 = max(top + 4, min(bottom - 34, y - 14 + (idx % 2) * 3))
-        by2 = by1 + 28
-        draw.rounded_rectangle((bx1, by1, bx2, by2), radius=8, fill="#161b27dd", outline=color, width=2)
-        draw.text((bx1 + 8, by1 + 5), label, fill=color, font=small)
-        if tf_text:
-            draw.text((left + 6, max(top + 2, y - 18)), tf_text, fill=color, font=small)
+        y1, y2 = y_at(high), y_at(low)
+        # Narrow transparent band; show boundaries as guides, avoiding solid
+        # horizontal lines that falsely imply precision to one tick.
+        draw.rectangle((left, y1, right, y2), fill=color + "18")
+        draw.line((left, y1, right, y1), fill=color + "99", width=2)
+        draw.line((left, y2, right, y2), fill=color + "99", width=2)
+        price = float(row.get("price", (low + high) / 2))
+        label = f"{row.get('label', 'Z')} {price:.{decimals}f}"
+        if row.get("status") == "ОСЛАБЛЕНА":
+            label += " !"
+        tag_width = 173
+        tx = right - tag_width - 8
+        ytag = max(top + 4, min(bottom - 31, y_at(price) - 13))
+        for prior_y in occupied_tags:
+            if abs(ytag - prior_y) < 31:
+                ytag = min(bottom - 31, max(top + 4, prior_y + 32))
+        occupied_tags.append(ytag)
+        draw.rounded_rectangle((tx, ytag, tx + tag_width, ytag + 27),
+                               radius=7, fill="#161b27e8", outline=color, width=2)
+        draw.text((tx + 7, ytag + 3), label, fill=color, font=small)
+    if not levels_brief.get("lifecycle_synced"):
+        draw.text((left, 669), "Levels: журнал состояний не сверён с последней H1", fill="#ffd35d", font=small)
 
     zdir=(zz.get("zigzag_directions") or {}).get("H1",0); zword="LONG" if zdir>0 else "SHORT" if zdir<0 else "RANGE"
     draw.text((left,24),f"{symbol} · H1 · ЭХО + NEXT PIVOT + ADAPTIVE ZIGZAG",fill="#f1f5fb",font=font)
     eta = f" · до вероятного угла ≈ {zz_low}–{zz_high} H1" if zz_low and zz_high else ""
     draw.text((left,51),f"ZigZag H1: {zword} · белый: структура + прогноз двумя ветвями{eta}",fill="#b9c3d3",font=small)
-    draw.text((left,665),"Единый вероятностный сценарий · закрытые H1 · S/R уровни информативны, не отдельный сигнал",fill="#9aa4b5",font=small)
+    h1_open = str(levels_brief.get("as_of_h1") or bars[-1].dt)
+    draw.text((left, 640), f"Закрытие H1: {levels.candle_close_time(h1_open, 'H1')}", fill="#aeb8c9", font=small)
+    draw.text((left,698),"Зоны S/R из закрытых свечей · без гарантии отскока или пробоя · не сигнал",fill="#9aa4b5",font=small)
     out=io.BytesIO(); out.name=f"echo_pivot_zigzag_{symbol.replace('/','')}.png"; image.save(out,format="PNG",optimize=True); out.seek(0); return out
 
 def pending_report_bundles(
@@ -782,6 +814,7 @@ def pending_report_bundles(
         gap = float(getattr(cfg, "ECHO_STRENGTH_MIN_GAP", 0.04))
         dxy_bias = 1 if usd >= gap else (-1 if usd <= -gap else 0)
     session_sides = {}
+    session_levels: dict[str, dict] = {}
     try:
         briefs = briefing.build_pair_briefs(market, strength or {}, events, datetime.now(timezone.utc))
         for brief in briefs:
@@ -813,7 +846,7 @@ def pending_report_bundles(
             zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
             character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength), by_tf=by_tf)
             try:
-                levels_brief = levels.briefing_levels_snapshot(symbol, by_tf, max_each=2)
+                levels_brief = session_levels.get(symbol) or levels.briefing_levels_snapshot(symbol, by_tf, max_each=2)
             except Exception:
                 log.exception("SESSION_LEVELS_BRIEF_FAILED symbol=%s", symbol)
                 levels_brief = {}

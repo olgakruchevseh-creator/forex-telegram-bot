@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import asdict, dataclass, field
@@ -97,6 +98,7 @@ class Zone:
     last_touch_dt: str = ""
     tests_recent: int = 0
     false_wicks: int = 0
+    last_false_wick_dt: str = ""
     closes_beyond: int = 0
     break_dt: str = ""
     hold_dt: str = ""
@@ -327,6 +329,7 @@ def zone_from_dict(raw: dict) -> Zone:
     data.setdefault("last_touch_dt", "")
     data.setdefault("tests_recent", 0)
     data.setdefault("false_wicks", 0)
+    data.setdefault("last_false_wick_dt", "")
     data.setdefault("closes_beyond", 0)
     data.setdefault("counted_beyond_dts", [])
     data.setdefault("sent_events", [])
@@ -499,7 +502,7 @@ def cluster_tf(symbol: str, tf_key: str, candles: list[Candle], raw: list[dict])
     return clustered
 
 
-def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float]) -> list[Zone]:
+def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float], *, limit: int | None = MAX_ZONES_PAIR) -> list[Zone]:
     if not items:
         return []
     items = sorted(items, key=lambda x: (x["kind"], x["mid"]))
@@ -560,7 +563,7 @@ def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float]) -> 
             )
         )
     zones.sort(key=lambda z: z.strength, reverse=True)
-    return zones[:MAX_ZONES_PAIR]
+    return zones[:limit] if limit is not None else zones
 
 
 def score_zone(tfs: list[str], reactions: int, pack: list[dict], now: float) -> float:
@@ -743,6 +746,7 @@ def attach_existing(old: dict[str, Zone], fresh: list[Zone]) -> list[Zone]:
             z.last_touch_dt = match.last_touch_dt
             z.tests_recent = match.tests_recent
             z.false_wicks = match.false_wicks
+            z.last_false_wick_dt = match.last_false_wick_dt
             z.closes_beyond = match.closes_beyond
             z.break_dt = match.break_dt
             z.hold_dt = match.hold_dt
@@ -1082,14 +1086,16 @@ def detect_events(
             zone.pending_bounce_dt = ""
             zone.pending_bounce_close = 0.0
 
-    # ложный прокол
-    if wick_in_zone(c1, zone) and not (
+    # A wick belongs to one *closed H1* bar, even if the scanner reruns
+    # because a lower timeframe refreshed. Duplicate counts fake exhaustion.
+    if zone.last_false_wick_dt != c1.dt and wick_in_zone(c1, zone) and not (
         closed_beyond(c1, zone, "up", buf) or closed_beyond(c1, zone, "down", buf)
     ):
-        if zone.kind == "resistance" and c1.high > zone.high and c1.close < zone.high:
+        if (zone.kind == "resistance" and c1.high > zone.high and c1.close < zone.high) or (
+            zone.kind == "support" and c1.low < zone.low and c1.close > zone.low
+        ):
             zone.false_wicks += 1
-        if zone.kind == "support" and c1.low < zone.low and c1.close > zone.low:
-            zone.false_wicks += 1
+            zone.last_false_wick_dt = c1.dt
 
     # отбой
     bounce_just_confirmed = any(ev in ("bounce_res", "bounce_sup") for ev, _fact, _side in events)
@@ -1314,61 +1320,230 @@ def _strength_confirms(
 
 
 
-def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dict:
-    """Nearest support/resistance snapshot for briefing display only.
+def _briefing_saved_levels(symbol: str, closed_h1_dt: str) -> tuple[list[Zone], bool]:
+    """Read the scanner's last persisted lifecycle without locking or writing it.
 
-    Read-only helper: computes fresh clustered levels from the current closed
-    candles without touching Levels state, anti-spam memory or publication
-    logic. The result is suitable for session briefings and image annotations.
+    An unmatched/stale H1 snapshot is not evidence that a zone remains active.
+    Never run ``detect_events`` from this display-only function.
+    """
+    path = levels_state_path()
+    try:
+        if not path.is_file():
+            return [], False
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(saved, dict):
+            return [], False
+        synced = (str((saved.get("last_closed") or {}).get(f"{symbol}:H1") or "")
+                  == str(closed_h1_dt))
+        if not synced:
+            return [], False
+        result = []
+        for row in (saved.get("zones") or {}).values():
+            if not isinstance(row, dict) or row.get("symbol") != symbol:
+                continue
+            try:
+                z = zone_from_dict(row)
+                if 0 < z.low <= z.high and math.isfinite(z.mid):
+                    result.append(z)
+            except (ValueError, KeyError, TypeError, OverflowError):
+                continue
+        return result, True
+    except (OSError, ValueError, TypeError):
+        log.exception("LEVELS_BRIEF_READ_ONLY_STATE_FAILED pair=%s", symbol)
+        return [], False
+
+
+def _briefing_matching_saved(fresh: Zone, old: list[Zone], used: set[str]) -> Zone | None:
+    matches = []
+    for z in old:
+        if z.zone_id in used or z.symbol != fresh.symbol:
+            continue
+        if not _kinds_same_level(z, fresh):
+            continue
+        ratio = _overlap_ratio(z, fresh)
+        if ratio >= 0.45:
+            matches.append((ratio, -abs(z.mid - fresh.mid), z))
+    if not matches:
+        return None
+    found = max(matches, key=lambda x: (x[0], x[1]))[2]
+    used.add(found.zone_id)
+    return found
+
+
+def _briefing_state_label(z: Zone, synced: bool) -> str:
+    if not synced:
+        return "СТАТУС НЕ ПРОВЕРЕН"
+    state = str(z.state or "")
+    if state == "роль изменена":
+        return "СМЕНА РОЛИ ПОДТВЕРЖДЕНА"
+    if state == "отбой подтверждён":
+        return "ОТБОЙ ПОДТВЕРЖДЁН"
+    if state == "ослаблена" or z.tests_recent >= 4 or z.false_wicks >= 3:
+        return "ОСЛАБЛЕНА"
+    if state == "протестирована":
+        return "ПРОТЕСТИРОВАНА"
+    if state == "активна":
+        return "РАСЧЁТНАЯ, РЕАКЦИЯ НЕ ПОДТВЕРЖДЕНА"
+    return "НЕ ПРОВЕРЕНА"
+
+
+def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dict:
+    """Display-only closest zones, with aligned H1 facts and persisted lifecycle.
+
+    This does not change scanner limits, threshold values, direction or sending.
+    A price inside a zone is not called S/R; breached/invalidated levels are not
+    presented as valid support/resistance, and no "probability" is invented.
     """
     by_tf = by_tf or {}
-    frames: dict[str, list[Candle]] = {}
+    now_utc = datetime.now(timezone.utc)
+    h1 = [c for c in tf_closed(symbol, "H1", by_tf.get("H1") or [])
+          if (opened := _parse_market_dt(c.dt)) is not None
+          and opened + timedelta(hours=1) <= now_utc]
+    empty = {"symbol": symbol, "current_price": None, "supports": [],
+             "resistances": [], "current_zones": [], "observations": [],
+             "lifecycle_synced": False, "as_of_h1": ""}
+    if len(h1) < 2:
+        return empty
+    anchor = _parse_market_dt(h1[-1].dt)
+    if anchor is None:
+        return empty
+    anchor += timedelta(minutes=60)
+    frames: dict[str, list[Candle]] = {"H1": h1[-LOOKBACK["H1"]:]}
     atr_map: dict[str, float] = {}
     for tf in TF_ORDER:
-        raw = by_tf.get(tf) or []
-        closed = tf_closed(symbol, tf, raw)
+        if tf == "H1":
+            closed = frames["H1"]
+        else:
+            closed = tf_closed(symbol, tf, by_tf.get(tf) or [])
+            minutes = TF_MINUTES.get(tf, 60)
+            # Preserve causality even if TF feeds were fetched at different times.
+            closed = [c for c in closed
+                      if (opened := _parse_market_dt(c.dt)) is not None
+                      and opened + timedelta(minutes=minutes) <= anchor]
         if closed:
-            frames[tf] = closed
-            atr_map[tf] = float(atr(closed, 14) or 0.0)
-    h1 = frames.get("H1") or []
-    if not h1:
-        return {"symbol": symbol, "current_price": None, "supports": [], "resistances": []}
-    current_price = float(h1[-1].close)
-    items: list[dict] = []
+            frames[tf] = closed[-LOOKBACK[tf]:]
+            atr_map[tf] = float(atr(frames[tf], 14) or 0.0)
+    current = float(h1[-1].close)
+    if not math.isfinite(current) or current <= 0:
+        return empty
+    raw: list[dict] = []
     for tf, candles in frames.items():
-        items.extend(cluster_tf(symbol, tf, candles, collect_raw_levels(symbol, tf, candles)))
-    zones = merge_cluster(symbol, items, atr_map)
+        if len(candles) < 20:
+            continue
+        raw.extend(cluster_tf(symbol, tf, candles, collect_raw_levels(symbol, tf, candles)))
+    # The alert engine retains only 18 strongest. That is NOT a charting limit:
+    # keeping all candidates here prevents weak-but-nearby zones disappearing.
+    fresh = merge_cluster(symbol, raw, atr_map, limit=None)
+    persisted, synced = _briefing_saved_levels(symbol, h1[-1].dt)
+    used: set[str] = set()
+    combined: list[Zone] = []
+    for z in fresh:
+        match = _briefing_matching_saved(z, persisted, used) if synced else None
+        if match:
+            # Scanner owns lifecycle/role; fresh calculation owns current geometry.
+            z.kind = match.kind
+            z.state = match.state
+            z.original_kind = match.original_kind
+            z.tests_recent = match.tests_recent
+            z.false_wicks = match.false_wicks
+            z.last_false_wick_dt = match.last_false_wick_dt
+            z.closes_beyond = match.closes_beyond
+            z.broken_side = match.broken_side
+            z.strength = min(z.strength, match.strength)
+            z.zone_id = match.zone_id
+            z._brief_synced = True
+        else:
+            z._brief_synced = False
+        combined.append(z)
+    # Retain role-changed zones that a fresh swing scan did not rediscover.
+    if synced:
+        for z in persisted:
+            if z.zone_id not in used and z.state == "роль изменена":
+                z._brief_synced = True
+                combined.append(z)
 
-    def _zone_row(idx: int, zone: Zone) -> dict:
-        ctx = level_context(zone)
-        dist_price = (current_price - zone.mid) if zone.kind == "support" else (zone.mid - current_price)
-        dist_pips = dist_price / max(pip_size(symbol), 1e-12)
-        return {
-            "label": ("S" if zone.kind == "support" else "R") + str(idx),
-            "price": float(zone.mid),
-            "low": float(zone.low),
-            "high": float(zone.high),
-            "distance_pips": float(dist_pips),
-            "tfs": list(zone.tfs or []),
-            "tfs_text": format_tfs(zone.tfs or []),
-            "strength": int(round(float(zone.strength or 0.0))),
-            "rank": ctx.get("rank", ""),
-            "reliability": int(ctx.get("reliability", 0) or 0),
-            "kind": zone.kind,
-        }
+    av = float(atr_map.get("H1") or 0.0)
+    recents = h1[-40:]
+    visible_span = max(c.high for c in recents) - min(c.low for c in recents)
+    max_distance = max(5.0 * av, 1.2 * visible_span, current * 0.0003)
+    supports, resistances, current_zones, observations = [], [], [], []
+    for z in combined:
+        if not (math.isfinite(z.low) and math.isfinite(z.high) and math.isfinite(z.mid)):
+            continue
+        if not (0 < z.low <= z.mid <= z.high):
+            continue
+        if not (set(z.tfs or []) & (SENIOR | WORKING)):
+            continue  # no M5/M15-only zones masquerading as strategic levels
+        distance = max(z.low - current, current - z.high, 0.0)
+        if distance > max_distance:
+            continue
+        known = bool(getattr(z, "_brief_synced", False))
+        status = _briefing_state_label(z, known)
+        if known and z.state in ("пробита", "удержание подтверждено", "ретест подтверждён", "недействительна"):
+            observations.append({"price": z.mid, "low": z.low, "high": z.high,
+                                 "status": z.state.upper(), "tfs_text": format_tfs(z.tfs)})
+            continue
+        # No untested weak H1-only pivot should occupy a scarce S1/R1 slot.
+        # This is a chart filter only; the real Levels alert engine is untouched.
+        if z.strength < (30 if known else 50):
+            continue
+        if z.low <= current <= z.high:
+            kind = "current"
+            boundary_distance = 0.0
+        elif z.high < current:
+            if z.kind != "support":
+                # A resistance now below price is NOT automatically support.
+                # Reversal of role needs the separate confirmed H1 lifecycle.
+                observations.append({"price": z.mid, "low": z.low, "high": z.high,
+                                     "status": "ВОЗМОЖНА СМЕНА РОЛИ · НЕ ПОДТВЕРЖДЕНА",
+                                     "tfs_text": format_tfs(z.tfs)})
+                continue
+            kind = "support"
+            boundary_distance = current - z.high
+        else:
+            if z.kind != "resistance":
+                observations.append({"price": z.mid, "low": z.low, "high": z.high,
+                                     "status": "ВОЗМОЖНА СМЕНА РОЛИ · НЕ ПОДТВЕРЖДЕНА",
+                                     "tfs_text": format_tfs(z.tfs)})
+                continue
+            kind = "resistance"
+            boundary_distance = z.low - current
+        row = {"price": float(z.mid), "low": float(z.low), "high": float(z.high),
+               "distance_pips": float(boundary_distance / pip_size(symbol)),
+               "tfs": list(z.tfs), "tfs_text": format_tfs(z.tfs),
+               "strength": int(round(float(z.strength or 0))),
+               "rank": level_context(z)["rank"], "kind": kind,
+               "status": status, "lifecycle_verified": known,
+               "state": z.state if known else "не проверена"}
+        if kind == "support":
+            supports.append(row)
+        elif kind == "resistance":
+            resistances.append(row)
+        else:
+            current_zones.append(row)
 
-    supports = [z for z in zones if z.kind == "support" and z.mid <= current_price]
-    resistances = [z for z in zones if z.kind == "resistance" and z.mid >= current_price]
-    supports.sort(key=lambda z: (abs(current_price - z.mid), -float(z.strength or 0.0), -len(z.tfs or [])))
-    resistances.sort(key=lambda z: (abs(z.mid - current_price), -float(z.strength or 0.0), -len(z.tfs or [])))
-    support_rows = [_zone_row(i + 1, z) for i, z in enumerate(supports[:max(1, int(max_each))])]
-    resistance_rows = [_zone_row(i + 1, z) for i, z in enumerate(resistances[:max(1, int(max_each))])]
-    return {
-        "symbol": symbol,
-        "current_price": current_price,
-        "supports": support_rows,
-        "resistances": resistance_rows,
-    }
+    def select(rows: list[dict], prefix: str, limit: int) -> list[dict]:
+        rows.sort(key=lambda r: (r["distance_pips"], -r["strength"], -len(r["tfs"])))
+        chosen: list[dict] = []
+        for r in rows:
+            # One price area should not be labelled as two independent levels.
+            if any(min(r["high"], c["high"]) >= max(r["low"], c["low"])
+                   or abs(r["price"] - c["price"]) < max(av * .15, pip_size(symbol) * 2)
+                   for c in chosen):
+                continue
+            r["label"] = f"{prefix}{len(chosen)+1}"
+            chosen.append(r)
+            if len(chosen) >= limit:
+                break
+        return chosen
+    count = max(1, min(3, int(max_each)))
+    return {"symbol": symbol, "current_price": current,
+            "as_of_h1": h1[-1].dt, "lifecycle_synced": synced,
+            "supports": select(supports, "S", count),
+            "resistances": select(resistances, "R", count),
+            "current_zones": select(current_zones, "Z", 1),
+            "observations": sorted(observations, key=lambda r: abs(r["price"] - current))[:2]}
+
 
 
 def render_chart(zone: Zone, event: str, side: str, closed_by_tf: dict[str, list[Candle]]) -> io.BytesIO:
