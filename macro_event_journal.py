@@ -20,7 +20,8 @@ MISSING = {"", "-", "—", "n/a", "na", "none", "null"}
 
 
 def _present(value) -> bool:
-    return str(value or "").strip().lower() not in MISSING
+    # Numeric zero is an observed figure, not a missing field.
+    return value is not None and str(value).strip().lower() not in MISSING
 
 
 def _utc(value: datetime) -> str:

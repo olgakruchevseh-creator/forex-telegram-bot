@@ -68,6 +68,10 @@ def source_timeframe(text: str, source: str = "") -> str:
     if source == "patterns" or "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
         m = re.search(r"(?im)^\s*Таймфрейм:\s*(W1|D1|H4|H1|M15|M5)\b", text)
         return m.group(1).upper() if m else "UNKNOWN"
+    if source == "levels":
+        # Levels explicitly states which confirmation candle closed (M5/M15/H1).
+        m = re.search(r"(?im)^\s*(?:🕯\s*)?Подтверждение\s+(?:пробоя|реакции):\s*закрытая\s+(H1|M15|M5)\b", text or "")
+        return m.group(1).upper() if m else "H1"
     if source == "bpr":
         m = re.search(r"Таймфрейм BPR:\s*(H1|M15|M5)\b", text)
         return m.group(1) if m else "UNKNOWN"
@@ -112,7 +116,7 @@ def event_close_utc(text: str, source: str = "") -> datetime | None:
             if t is not None:
                 # patterns already print actual Amsterdam close. Other modules
                 # print Twelve Data candle *open* timestamps as a 'close'.
-                if source == "patterns" or "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
+                if source in ("patterns", "levels") or "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
                     return t
                 tf = source_timeframe(text, source)
                 return t + timedelta(minutes={"H1": 60, "M15": 15, "M5": 5}.get(tf, 60))

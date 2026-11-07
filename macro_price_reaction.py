@@ -218,6 +218,7 @@ def update(*, macro_path: Path | None = None, ohlc_path: Path | None = None,
     stats = {"events_considered": 0, "events_verified": 0, "unverified_forecast": 0,
              "no_actual": 0, "pending_h1": 0, "missing_h1": 0, "records_new": 0,
              "records_present": 0, "confounded_records": 0,
+             "overlap_reclassified": 0,
              "no_macro_db": False, "no_ohlc_db": False}
     if not src_macro.is_file():
         stats["no_macro_db"] = True
@@ -251,26 +252,38 @@ def update(*, macro_path: Path | None = None, ohlc_path: Path | None = None,
                 continue
             stats["events_verified"] += 1
             release = _parse(event["scheduled_utc"])
-            overlapping = sum(
-                other["event_id"] != event["event_id"]
-                and abs((_parse(other["scheduled_utc"]) - release).total_seconds()) <= 60 * OVERLAP_MINUTES
-                and bool(set(_event_pairs(other["currency"])) & set(_event_pairs(event["currency"])))
-                for other in relevant
-            )
             first_full = _hour_ceil(release)
             for pair in _event_pairs(event["currency"]):
+                # Publication in the pre-release hour or DURING a measured
+                # post-release horizon can contaminate its price path.
+                # Include other currency's news when that currency is on this
+                # pair, even when its calendar snapshot has no Actual yet.
+                def overlap_count(horizon: int) -> int:
+                    start = release - timedelta(minutes=OVERLAP_MINUTES)
+                    finish = first_full + timedelta(hours=horizon)
+                    return sum(
+                        other["event_id"] != event["event_id"]
+                        and other["currency"] in pair.split("/")
+                        and start <= _parse(other["scheduled_utc"]) < finish
+                        for other in relevant
+                    )
                 existing = {h for (h,) in out.execute(
                     "SELECT horizon_h1 FROM macro_h1_reactions WHERE event_id=? AND pair=?",
                     (event["event_id"], pair))}
                 # Another release may appear in a later calendar fetch. Never
                 # permanently label an older reaction "unconfounded" merely
                 # because the calendar had not yet shown the second event.
-                if overlapping and existing:
+                if existing:
+                    # The calendar may learn about another event after the
+                    # first evaluation: update each horizon independently.
                     with out:
-                        out.execute("""UPDATE macro_h1_reactions
-                            SET overlap_events=MAX(overlap_events,?)
-                            WHERE event_id=? AND pair=?""",
-                            (overlapping, event["event_id"], pair))
+                        for horizon in existing:
+                            overlap = overlap_count(horizon)
+                            cursor = out.execute("""UPDATE macro_h1_reactions
+                                SET overlap_events=?
+                                WHERE event_id=? AND pair=? AND horizon_h1=? AND overlap_events<?""",
+                                (overlap, event["event_id"], pair, horizon, overlap))
+                            stats["overlap_reclassified"] += cursor.rowcount
                 if len(existing) == len(HORIZONS):
                     stats["records_present"] += len(HORIZONS)
                     continue
@@ -285,7 +298,8 @@ def update(*, macro_path: Path | None = None, ohlc_path: Path | None = None,
                     if first_full + timedelta(hours=horizon) > now:
                         stats["pending_h1"] += 1
                         continue
-                    rec = _row_metrics(event, pair, horizon, bars, atr=atr, overlapping=overlapping, now=now)
+                    overlaps = overlap_count(horizon)
+                    rec = _row_metrics(event, pair, horizon, bars, atr=atr, overlapping=overlaps, now=now)
                     if rec is None:
                         stats["missing_h1"] += 1
                         continue
@@ -299,7 +313,7 @@ def update(*, macro_path: Path | None = None, ohlc_path: Path | None = None,
                             ",".join("?" for _ in keys) + ")", tuple(rec.values()))
                     if cursor.rowcount:
                         stats["records_new"] += 1
-                        if overlapping:
+                        if overlaps:
                             stats["confounded_records"] += 1
     return stats
 

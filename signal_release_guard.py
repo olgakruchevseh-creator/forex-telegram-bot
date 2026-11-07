@@ -90,10 +90,12 @@ def _h1_context(by_tf: dict, now: datetime):
     if len(bars) < 25:
         return bars, None, "h1_insufficient"
     try:
-        raw = str(bars[-1].dt).replace("T", " ")[:19]
-        opened = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        raw = str(bars[-1].dt).strip().replace("Z", "+00:00")
+        opened = datetime.fromisoformat(raw)
+        opened = (opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None
+                  else opened.astimezone(timezone.utc))
         end = opened + timedelta(hours=1)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return bars, None, "h1_time_invalid"
     age = (now - end).total_seconds() / 60
     max_minutes = max(1, int(getattr(cfg, "UNIFIED_H1_RELEASE_WINDOW_MINUTES", 16)))

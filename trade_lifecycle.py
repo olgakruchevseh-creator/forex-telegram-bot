@@ -33,6 +33,7 @@ STAND_DOWN = "STAND_DOWN"
 NEWS_CLEAR = "CLEAR"
 NEWS_PRE_EVENT = "PRE_EVENT"
 NEWS_POST_NO_SURPRISE = "POST_NO_SURPRISE"
+NEWS_POST_UNCERTAIN = "POST_DIRECTION_UNCONFIRMED"
 NEWS_SURPRISE_WITH = "SURPRISE_WITH"
 NEWS_SURPRISE_AGAINST = "SURPRISE_AGAINST"
 
@@ -41,6 +42,7 @@ _REASON_RU = {
     "pre_event_stand_down": "до важного события новые входы закрыты",
     "surprise_against": "сюрприз новости против сценария",
     "post_event_no_surprise": "после события нет подтверждённого сюрприза",
+    "post_event_direction_unconfirmed": "после CPI направление не подтверждено реакцией цены",
     "asia_compression": "азиатское сжатие — не новый вход",
     "session_balance": "сессия в балансе/накоплении",
     "regime_compression": "рынок в сжатии",
@@ -72,7 +74,14 @@ def _usd_expected(symbol: str, side: int) -> int:
 
 
 def _print_usd_dir(event: newsmod.NewsEvent) -> int:
-    """+1 = валюта события усилилась, -1 = ослабла, 0 = нет сюрприза."""
+    """+1/-1: directional interpretation where justified; 0: no verified side.
+
+    A hot/cold CPI print is a *numerical* surprise, not proof that a currency
+    strengthened/weakened. Monetary-policy repricing and the price response
+    must be observed before asserting a trading direction.
+    """
+    if newsmod.is_cpi_event(event):
+        return 0
     verdict = newsmod.interpret_print(event)
     if verdict == "positive":
         return 1
@@ -97,6 +106,7 @@ def classify_news(symbol: str, side: int, events: list, now_utc: datetime | None
     rank = {
         NEWS_CLEAR: 0,
         NEWS_POST_NO_SURPRISE: 1,
+        NEWS_POST_UNCERTAIN: 3,
         NEWS_SURPRISE_WITH: 2,
         NEWS_PRE_EVENT: 3,
         NEWS_SURPRISE_AGAINST: 4,
@@ -126,7 +136,7 @@ def classify_news(symbol: str, side: int, events: list, now_utc: datetime | None
         if before_release:
             mode = NEWS_PRE_EVENT
         elif surprise_dir == 0:
-            mode = NEWS_POST_NO_SURPRISE
+            mode = NEWS_POST_UNCERTAIN if newsmod.is_cpi_event(event) else NEWS_POST_NO_SURPRISE
         else:
             event_usd = surprise_dir if event.currency == "USD" else (
                 -surprise_dir if event.currency in (base, quote) and "USD" in (base, quote) else 0
@@ -273,8 +283,9 @@ def evaluate(
         return Lifecycle(STAND_DOWN, "surprise_against", mode, sess["session"], sess["phase"], False, False, detail)
     if mode == NEWS_PRE_EVENT:
         return Lifecycle(STAND_DOWN, "pre_event_stand_down", mode, sess["session"], sess["phase"], False, True, detail)
-    if mode == NEWS_POST_NO_SURPRISE:
-        return Lifecycle(WATCH, "post_event_no_surprise", mode, sess["session"], sess["phase"], False, True, detail)
+    if mode in (NEWS_POST_NO_SURPRISE, NEWS_POST_UNCERTAIN):
+        reason = "post_event_direction_unconfirmed" if mode == NEWS_POST_UNCERTAIN else "post_event_no_surprise"
+        return Lifecycle(WATCH, reason, mode, sess["session"], sess["phase"], False, True, detail)
 
     # 2. Hard significance reasons that mean "direction may live, entry is late"
     late_reasons = {
@@ -319,4 +330,4 @@ def evaluate(
 
 def news_blocks_new_entry(symbol: str, events: list, now_utc: datetime | None = None, side: int = 1) -> bool:
     info = classify_news(symbol, side, events or [], now_utc)
-    return info["mode"] in {NEWS_PRE_EVENT, NEWS_SURPRISE_AGAINST, NEWS_POST_NO_SURPRISE}
+    return info["mode"] in {NEWS_PRE_EVENT, NEWS_SURPRISE_AGAINST, NEWS_POST_NO_SURPRISE, NEWS_POST_UNCERTAIN}

@@ -330,12 +330,15 @@ def closed_candles(candles: list[Candle], timeframe_minutes: int = 60) -> list[C
     if not candles:
         return []
     out = list(candles)
-    raw = str(out[-1].dt or "").strip().replace("T", " ")[:19]
+    raw = str(out[-1].dt or "").strip().replace("Z", "+00:00")
     try:
-        opened = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    except ValueError:
-        # Preserve the conservative legacy behaviour for an unknown timestamp.
-        return out[:-1] if len(out) >= 2 else out
+        opened = datetime.fromisoformat(raw)
+        # Twelve Data's timezone-naive Forex H1 timestamps are UTC.
+        opened = (opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None
+                  else opened.astimezone(timezone.utc))
+    except (ValueError, TypeError, OverflowError):
+        # An unknown timestamp is never evidence of a fully closed last bar.
+        return out[:-1] if len(out) >= 2 else []
     minutes = max(1, int(timeframe_minutes or 60))
     if opened + timedelta(minutes=minutes) > datetime.now(timezone.utc):
         return out[:-1]

@@ -1,0 +1,23 @@
+FOREX · АУДИТ И ИСПРАВЛЕНИЯ · ЭТАП 3 · 07.11.2026
+На основе forex-telegram-bot-main (3).zip
+
+ИЗМЕНЁННЫЕ ФАЙЛЫ (10):
+analysis.py
+signal_contract.py
+signal_release_guard.py
+macro_event_journal.py
+macro_price_reaction.py
+news.py
+trade_lifecycle.py
+killer_audit.py
+decision_journal.py
+test_trade_lifecycle.py
+
+НОВЫЕ ФАЙЛЫ (2):
+test_audit_regressions_20261107.py
+CHANGED_FILES_FOREX_AUDIT_STAGE3_RU.txt
+
+Все файлы должны находиться в КОРНЕ репозитория.
+Не загружайте сам ZIP как файл проекта: распакуйте его на устройстве.
+Не меняйте RailWay Volume и переменные STATE_DIR/OHLC_JOURNAL_ENABLED.
+Никакие SQLite/JSONL из Railway не включены.

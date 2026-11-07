@@ -252,13 +252,15 @@ def daily_digest(day):
     top = ", ".join(f"{names.get(name,name)} {n}" for name,n in reasons.most_common(3)) or "—"
     ids={r.get("id") for r in rows}
     reviews=[r for r in _tail(_path("killer_reviews.jsonl"),5000) if r.get("candidate_id") in ids]
+    frozen_ids={r.get("candidate_id") for r in reviews if r.get("type")=="FROZEN_REPLAY"}
     replays=Counter(r.get("verdict") for r in reviews if r.get("type")=="FROZEN_REPLAY")
+    replay_pending=max(0, status['REJECTED']-len(frozen_ids))
     outcomes=sum(r.get("type")=="FORWARD_OUTCOME_6H1" for r in reviews)
     gates=[r for r in _tail(_path("killer_final_gates.jsonl"),5000) if local_day(r)==day]
     final_blocks=Counter(r.get("reason") for r in gates if "BLOCKED" in r.get("reason","") or "final_" in r.get("reason",""))
     return ("🏹 KILLER · ОТДЕЛЬНЫЙ ЖУРНАЛ (OBSERVE_ONLY)\n"
             f"Кандидаты: {len(rows)} · отклонено {status['REJECTED']} · прошли Killer {status['CANDIDATE']}\n"
             f"Основные причины: {top}\n"
-            f"Повторный расчёт: совпал {replays['REPRODUCED']} · расхождение {replays['REPLAY_DIFFERENCE']} · итог 6H1 {outcomes}\n"
+            f"Повторный расчёт: совпал {replays['REPRODUCED']} · расхождение {replays['REPLAY_DIFFERENCE']} · ожидание {replay_pending} · итог 6H1 {outcomes}\n"
             f"Финальные отказы после Killer: {sum(final_blocks.values())} · отдельных записей {len(gates)}\n"
             "Исторически удачная отклонённая сделка НЕ возобновляется автоматически.")

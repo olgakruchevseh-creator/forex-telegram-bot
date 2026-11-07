@@ -33,13 +33,15 @@ def test_pre_event_is_stand_down():
     assert life.allow_manage is True
 
 
-def test_usd_hot_cpi_supports_short_eurusd():
+def test_usd_hot_cpi_is_not_an_automatic_fx_direction():
     ev = _event("CPI m/m", "USD", -5, actual="3.4", forecast="3.0")
     now = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
     info = tl.classify_news("EUR/USD", -1, [ev], now)
-    assert info["mode"] == tl.NEWS_SURPRISE_WITH
+    assert info["mode"] == tl.NEWS_POST_UNCERTAIN
     against = tl.classify_news("EUR/USD", 1, [ev], now)
-    assert against["mode"] == tl.NEWS_SURPRISE_AGAINST
+    assert against["mode"] == tl.NEWS_POST_UNCERTAIN
+    assert tl.news_blocks_new_entry("EUR/USD", [ev], now, side=-1)
+    assert tl.news_blocks_new_entry("EUR/USD", [ev], now, side=1)
 
 
 def test_late_room_becomes_manage_not_new_entry():
@@ -97,3 +99,12 @@ def test_asia_compression_is_watch():
 def test_reason_ru_covers_core_codes():
     assert "TR1" in tl.reason_ru("insufficient_room_to_tr1")
     assert "события" in tl.reason_ru("pre_event_stand_down")
+
+
+def test_cpi_uncertainty_overrides_simultaneous_favorable_announcement():
+    now = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+    cpi = _event("CPI m/m", "USD", -5, actual="3.4", forecast="3.0")
+    payroll = _event("Nonfarm Payrolls", "USD", -5, actual="140K", forecast="100K")
+    # A second headline cannot re-enable trade during CPI's uncertainty window.
+    for events in ([cpi, payroll], [payroll, cpi]):
+        assert tl.classify_news("EUR/USD", -1, events, now)["mode"] == tl.NEWS_POST_UNCERTAIN

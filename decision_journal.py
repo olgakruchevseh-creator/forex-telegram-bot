@@ -345,6 +345,17 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
    log.exception('MULTI_TF_STRENGTH_JOURNAL_FAILED pair=%s',pair)
    ctx['currency_strength_mtf']={'status':'НЕТ ДАННЫХ','decision_authority':False}
 
+ # Diagnostic contract is NOT the same as an observed event timeframe.
+ # Keep 'timeframe' UNKNOWN when a detector card does not declare its TF.
+ try:
+  from signal_contract import source_timeframe as _source_tf, event_close_utc as _source_close
+  import signal_release_guard as _release
+  source_id=_release.infer_source(text)
+  inferred_tf=_source_tf(text, source_id) if source_id else "UNKNOWN"
+  inferred_close=_source_close(text, source_id) if source_id else None
+  inferred_close_utc=inferred_close.isoformat() if inferred_close is not None else None
+ except Exception:
+  inferred_tf='UNKNOWN'; inferred_close_utc=None
  quality,quality_label=_score(text,['Качество','Качество реакции','Качество пробоя','Сходство фигуры'])
  probability,probability_label=_score(text,['Вероятность','Уверенность модели','Уверенность чертежа'])
  progress=_observed_progress(ctx)
@@ -365,6 +376,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   'master_snapshot':_master_snapshot(master),
   'observed_h1_dt':obs.get('dt') or '','h1_close_price':obs.get('close'),
   'quality':quality,'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'confirmation_tf':_confirmation_tf(text),'session':_session(local_now),
+  'source_tf_contract':inferred_tf,'source_event_close_utc':inferred_close_utc,
   'entry_timing':('late' if 'late_' in str(reason) or (progress is not None and progress > float(getattr(cfg,'SIGNAL_INITIAL_MAX_PROGRESS_PCT',35)) and (ctx or {}).get('mode') != 'PULLBACK') else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
   'residual_potential_pct':(round(max(0.0,100.0-progress),1) if progress is not None else None),
   'confirmation_price':_price(text,['Цена подтверждения','Цена закрытия','Вход']),

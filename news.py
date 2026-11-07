@@ -441,6 +441,11 @@ def pairs_touched(currency: str) -> list[str]:
     return out
 
 
+def _calendar_value(value) -> str:
+    """Keep a real numeric zero distinct from a missing calendar field."""
+    return "—" if value is None or str(value).strip() == "" else str(value)
+
+
 def _parse_ff_rows(data) -> list[NewsEvent]:
     events: list[NewsEvent] = []
     if not isinstance(data, list):
@@ -464,9 +469,9 @@ def _parse_ff_rows(data) -> list[NewsEvent]:
                 currency=ccy,
                 impact=map_impact(row.get("impact")),
                 dt_utc=dt,
-                previous=str(row.get("previous") or "—"),
-                forecast=str(row.get("forecast") or "—"),
-                actual=str(row.get("actual") or "—"),
+                previous=_calendar_value(row.get("previous")),
+                forecast=_calendar_value(row.get("forecast")),
+                actual=_calendar_value(row.get("actual")),
                 economic_effect=classify_effect(title),
             )
         )
