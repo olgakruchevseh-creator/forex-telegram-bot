@@ -1537,12 +1537,53 @@ def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dic
                 break
         return chosen
     count = max(1, min(3, int(max_each)))
-    return {"symbol": symbol, "current_price": current,
+    snapshot = {"symbol": symbol, "current_price": current,
             "as_of_h1": h1[-1].dt, "lifecycle_synced": synced,
             "supports": select(supports, "S", count),
             "resistances": select(resistances, "R", count),
             "current_zones": select(current_zones, "Z", 1),
             "observations": sorted(observations, key=lambda r: abs(r["price"] - current))[:2]}
+    snapshot["movement"] = briefing_level_movement(symbol, snapshot, h1, now_utc=now_utc)
+    return snapshot
+
+
+def briefing_level_movement(symbol: str, snapshot: dict, h1: list[Candle],
+                            *, now_utc: datetime | None = None) -> str:
+    """Observable H1 motion toward a *published* boundary, not a prediction.
+
+    The direction uses only closed H1 at the same as-of timestamp as Levels.
+    No inferred probability or automatic LONG/SHORT signal is produced.
+    """
+    if not h1 or len(h1) < 3 or snapshot.get("current_price") is None:
+        return "Цена: недостаточно закрытых H1 для оценки движения к уровням"
+    last_open = _parse_market_dt(h1[-1].dt)
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if last_open is None or now_utc - (last_open + timedelta(hours=1)) > timedelta(hours=3):
+        return "Последняя H1 устарела · текущее движение к уровням не оцениваем"
+    zones = snapshot.get("current_zones") or []
+    if zones:
+        z = zones[0]
+        return f"Цена тестирует текущую зону {z['label']} · направление выхода не подтверждено"
+    av = float(atr(h1[-16:], 14) or 0.0)
+    pips = pip_size(symbol)
+    current = float(h1[-1].close)
+    move = current - float(h1[-3].close)
+    last = current - float(h1[-2].close)
+    threshold = max(pips * 3, av * .15)
+    if not (math.isfinite(move) and math.isfinite(last)) or abs(move) < threshold or move * last <= 0:
+        return "Цена между уровнями · направление движения по H1 не подтверждено"
+    rising = move > 0
+    candidates = snapshot.get("resistances") if rising else snapshot.get("supports")
+    if not candidates:
+        return ("H1 повышается · ближайшее сопротивление не определено" if rising
+                else "H1 снижается · ближайшая поддержка не определена")
+    zone = candidates[0]
+    distance = max(0.0, float(zone["distance_pips"]))
+    near = distance <= max(4 * pips, av * .35) / pips
+    action = "приближается" if near else "движется"
+    role = "сопротивлению" if rising else "поддержке"
+    return (f"По закрытым H1 цена {action} к {role} {zone['label']}"
+            f" · до границы {distance:.1f} п. · не прогноз пробоя/отскока")
 
 
 

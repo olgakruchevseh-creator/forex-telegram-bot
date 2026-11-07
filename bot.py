@@ -38,6 +38,7 @@ import live_briefing
 import multi_tf_currency_strength
 import news as newsmod
 import levels
+import briefing_level_watch
 import zigzag_scanner
 import disbalance
 import imbalance
@@ -718,6 +719,51 @@ async def _publish_market_health(app: Application, chat_id: int, state: dict, co
     health.update({"market_status": "degraded", "market_signature": signature})
 
 
+def _register_briefing_level_watch(session_id: str, market: dict) -> None:
+    """Snapshot only levels actually visible in a delivered briefing.
+
+    Presentation telemetry is nonblocking and cannot affect trading rules.
+    """
+    if not getattr(cfg, "BRIEF_LEVEL_WATCH_ENABLED", True):
+        return
+    for symbol in cfg.PAIRS:
+        try:
+            snapshot = levels.briefing_levels_snapshot(symbol, (market or {}).get(symbol) or {}, max_each=2)
+            recorded = briefing_level_watch.register_briefing(session_id, symbol, snapshot)
+            if recorded:
+                log.info("BRIEF_LEVEL_WATCH_REGISTERED pair=%s count=%s session=%s",
+                         symbol, recorded, session_id)
+        except Exception:
+            log.exception("BRIEF_LEVEL_WATCH_REGISTER_FAILED pair=%s", symbol)
+
+
+async def _observe_and_send_brief_levels(app: Application, chat_id: int, market: dict) -> None:
+    """Informational H1 follow-ups; separate from trade-score and signal limits."""
+    if not getattr(cfg, "BRIEF_LEVEL_WATCH_ENABLED", True):
+        return
+    try:
+        briefing_level_watch.observe_market(market)
+        batch = briefing_level_watch.claim_short_digests(limit=5)
+    except Exception:
+        log.exception("BRIEF_LEVEL_WATCH_OBSERVE_FAILED")
+        return
+    for event in batch:
+        try:
+            await send(app, int(chat_id), event["report"])
+        except Exception:
+            log.exception("BRIEF_LEVEL_WATCH_SEND_FAILED event_id=%s", event.get("ids"))
+            try:
+                briefing_level_watch.ack_digest(event["ids"], sent=False)
+            except Exception:
+                log.exception("BRIEF_LEVEL_WATCH_CLAIM_RELEASE_FAILED")
+        else:
+            try:
+                briefing_level_watch.ack_digest(event["ids"], sent=True)
+            except Exception:
+                # An ACK failure can cause retry; keep this auditable in logs.
+                log.exception("BRIEF_LEVEL_WATCH_ACK_FAILED event_id=%s", event.get("ids"))
+
+
 async def _maybe_send_session_briefing(
     context: ContextTypes.DEFAULT_TYPE,
     state: dict,
@@ -794,6 +840,8 @@ async def _maybe_send_session_briefing(
             context.application, int(chat_id), delivery_market, strength, rank, dxy, events, upcoming_events
         )
         briefing.mark_issue_sent(state, iid, delivered)
+        # Register after successful publication, not during chart construction.
+        _register_briefing_level_watch(iid, delivery_market)
         state["last_rank"] = [c for c, _ in rank]
         state["last_strength_h1"] = closed_dt
         state["last_strength_ts"] = time.time()
@@ -1549,6 +1597,9 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         coverage = market_coverage(market)
         await _publish_market_health(context.application, int(chat_id), state, coverage)
         save_state(state)
+        # Monitor each available pair independently even when another pair's
+        # quotes are incomplete. This is read-only, not a way around signal gates.
+        await _observe_and_send_brief_levels(context.application, int(chat_id), market)
         if not coverage["complete"]:
             log.warning(
                 "MARKET_INCOMPLETE present=%s/%s missing=%s short_h1=%s",
@@ -2376,6 +2427,13 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                         message = await context.application.bot.send_photo(
                             chat_id=int(chat_id), photo=image, caption=caption)
                         message_id = getattr(message, "message_id", None)
+                        if getattr(cfg, "BRIEF_LEVEL_WATCH_ENABLED", True):
+                            try:
+                                briefing_level_watch.register_briefing(
+                                    briefing.briefing_id(), bundle.get("symbol") or "",
+                                    bundle.get("levels_brief") or {})
+                            except Exception:
+                                log.exception("BRIEF_LEVEL_WATCH_PROJECTION_REGISTER_FAILED pair=%s", bundle.get("symbol"))
                         session_projection_reports.mark_delivered(state, bundle["key"])
                         save_state(state)
                         log.info("SESSION_ECHO_PIVOT_BUNDLE_SENT message_id=%s key=%s pid=%s",

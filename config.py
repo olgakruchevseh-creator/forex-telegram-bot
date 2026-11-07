@@ -1520,3 +1520,8 @@ BRIEFING_STRENGTH_MAX_CLOSED_H1_AGE_MINUTES = 45
 # Fixed anchor in percentage points of raw basket strength for the DISPLAY INDEX.
 # This is a presentation heuristic, not a probability or calibrated indicator.
 BRIEFING_STRENGTH_INDEX_SCALE_PCT = 0.50
+
+# Informational watch of S1/S2/R1/R2 frozen on delivery of a session briefing.
+# Does not affect Levels alerts, Navigator, Master or Killer.
+BRIEF_LEVEL_WATCH_ENABLED = True
+BRIEF_LEVEL_WATCH_HOURS = 18

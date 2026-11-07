@@ -485,6 +485,9 @@ def _levels_lines(symbol: str, info: dict | None) -> list[str]:
         dist = f" · до зоны {distance:.0f} п." if distance > 0 else ""
         return f"{row.get('label', '?')} {low}–{high}{dist} · {row.get('tfs_text', '—')} · {status}"
     lines = ["Уровни поддержки / сопротивления:"]
+    movement = str(info.get("movement") or "").strip()
+    if movement:
+        lines.append(movement)
     if current:
         lines.append("Текущая зона: " + fmt(current[0]))
     lines.append("Поддержка: " + ("; ".join(fmt(z) for z in supports) if supports else "рядом не определена"))
@@ -593,7 +596,7 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
     zz = bundle.get("zigzag") or zigzag_scanner.analyze_symbol(symbol, by_tf)
     levels_brief = bundle.get("levels_brief") or {}
 
-    width, height = 1200, 720
+    width, height = 1200, 790
     image = Image.new("RGB", (width, height), "#10131d")
     draw = ImageDraw.Draw(image, "RGBA")
     try:
@@ -778,15 +781,18 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
                                radius=7, fill="#161b27e8", outline=color, width=2)
         draw.text((tx + 7, ytag + 3), label, fill=color, font=small)
     if not levels_brief.get("lifecycle_synced"):
-        draw.text((left, 669), "Levels: журнал состояний не сверён с последней H1", fill="#ffd35d", font=small)
+        draw.text((left, 716), "Levels: журнал состояний не сверён с последней H1", fill="#ffd35d", font=small)
 
     zdir=(zz.get("zigzag_directions") or {}).get("H1",0); zword="LONG" if zdir>0 else "SHORT" if zdir<0 else "RANGE"
     draw.text((left,24),f"{symbol} · H1 · ЭХО + NEXT PIVOT + ADAPTIVE ZIGZAG",fill="#f1f5fb",font=font)
     eta = f" · до вероятного угла ≈ {zz_low}–{zz_high} H1" if zz_low and zz_high else ""
     draw.text((left,51),f"ZigZag H1: {zword} · белый: структура + прогноз двумя ветвями{eta}",fill="#b9c3d3",font=small)
     h1_open = str(levels_brief.get("as_of_h1") or bars[-1].dt)
-    draw.text((left, 640), f"Закрытие H1: {levels.candle_close_time(h1_open, 'H1')}", fill="#aeb8c9", font=small)
-    draw.text((left,698),"Зоны S/R из закрытых свечей · без гарантии отскока или пробоя · не сигнал",fill="#9aa4b5",font=small)
+    draw.text((left, 646), f"Закрытие H1: {levels.candle_close_time(h1_open, 'H1')}", fill="#aeb8c9", font=small)
+    movement = str(levels_brief.get("movement") or "Цена между уровнями · направление H1 не подтверждено")
+    # Dedicated footer space: don't overprint support/resistance labels or candles.
+    draw.text((left, 677), movement[:104], fill="#f6d77a", font=small)
+    draw.text((left,758),"Зоны S/R из закрытых свечей · без гарантии отскока или пробоя · не сигнал",fill="#9aa4b5",font=small)
     out=io.BytesIO(); out.name=f"echo_pivot_zigzag_{symbol.replace('/','')}.png"; image.save(out,format="PNG",optimize=True); out.seek(0); return out
 
 def pending_report_bundles(
