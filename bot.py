@@ -1499,6 +1499,21 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     archived["rejected_series"],
                                     json.dumps(issues, ensure_ascii=False))
                         _scan_job_impl._ohlc_last_diagnostics = (signature, time.time())
+                # Macro surprise versus realized H1: observe only. It uses the
+                # verified pre-release calendar and the persisted H1 archive,
+                # never changes any trade, score or Telegram message. Run at
+                # most once per hour after the archive has been updated.
+                if bool(getattr(cfg, "MACRO_PRICE_REACTION_ENABLED", True)):
+                    last_macro = getattr(_scan_job_impl, "_macro_reaction_at", 0.0)
+                    if time.time() - last_macro >= 3600:
+                        try:
+                            from macro_price_reaction import update as update_macro_reactions
+                            outcome = update_macro_reactions()
+                            log.info("MACRO_H1_REACTION_OBSERVE_ONLY %s",
+                                     json.dumps(outcome, ensure_ascii=False))
+                            _scan_job_impl._macro_reaction_at = time.time()
+                        except Exception:
+                            log.exception("MACRO_H1_REACTION_UNAVAILABLE")
                 # Lightweight coverage summary on startup and every six
                 # hours, useful from Railway mobile without shell access.
                 last_coverage = getattr(_scan_job_impl, "_ohlc_coverage_at", 0.0)

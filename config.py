@@ -317,6 +317,9 @@ NEWS_CACHE_MAX_AGE_HOURS = 168
 NEWS_FETCH_MIN_MINUTES = 45
 # Live calendar pre-release/actual provenance, observational only. No new API costs.
 MACRO_EVENT_JOURNAL_ENABLED = True
+# Только реализованные результаты OHLC H1 × макроновости, НЕ торговый фильтр.
+# Требует STATE_DIR и OHLC_JOURNAL_ENABLED=1 (включённый OHLC-архив).
+MACRO_PRICE_REACTION_ENABLED = True
 # CPI — отдельный строгий фундаментальный слой.
 # Сюрприз измеряется в процентных пунктах (например 3.2 vs 3.1 = +0.1 п.п.).
 CPI_MIN_SURPRISE_PP = 0.05
