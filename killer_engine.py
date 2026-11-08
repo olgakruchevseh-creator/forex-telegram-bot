@@ -85,8 +85,17 @@ def _ensure_memory_loaded():
   if not isinstance(row,dict): continue
   pair,side,fam=row.get("pair"),row.get("side"),row.get("family")
   if not pair or not side or not fam: continue
-  fact={"text":row.get("text") or "","seen_at":float(row.get("seen_at") or 0),"tf":row.get("tf") or "H1","quality":int(row.get("quality") or 70),"fingerprint":row.get("fingerprint") or ""}
-  if now-float(fact["seen_at"]) > _fresh_seconds(fact["tf"]): continue
+  try:
+   seen_at=float(row.get("seen_at") or 0)
+   quality=int(row.get("quality") or 70)
+  except (TypeError,ValueError,OverflowError):
+   # A single malformed persisted fact must not abort recovery of valid facts.
+   continue
+  if not math.isfinite(seen_at) or seen_at <= 0: continue
+  tf=row.get("tf") or "H1"
+  if not isinstance(tf,str): continue
+  if now-seen_at > _fresh_seconds(tf): continue
+  fact={"text":row.get("text") or "","seen_at":seen_at,"tf":tf,"quality":quality,"fingerprint":row.get("fingerprint") or ""}
   _FACT_MEMORY[(str(pair),str(side),str(fam))]=fact
 
 def _save_memory():

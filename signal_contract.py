@@ -93,7 +93,7 @@ def _parse_time(raw: str) -> datetime | None:
             return datetime.strptime(m.group(1) + " " + m.group(2), "%d.%m.%Y %H:%M").replace(tzinfo=_AMSTERDAM).astimezone(timezone.utc)
         except ValueError:
             return None
-    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\s*(Z|\+\d\d:?\d\d))?", value)
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\s*(Z|[+-]\d\d:?\d\d))?", value)
     if not m:
         return None
     try:

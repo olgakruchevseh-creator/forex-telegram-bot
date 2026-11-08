@@ -6,7 +6,7 @@ left opt-in so this patch cannot silently change current signal flow.
 """
 from __future__ import annotations
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 import math
 from statistics import median
 
@@ -30,7 +30,7 @@ def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2)
     bars=list(bars or [])
     if len(bars)<2:
         return QualityReport(False,len(bars),reasons=('INSUFFICIENT_BARS',))
-    times=[]; impossible=flat=0
+    times=[]; impossible=flat=invalid_times=0
     for b in bars:
         o,h,l,c=(_get(b,k) for k in ('open','high','low','close'))
         t=_get(b,'dt') or _get(b,'datetime') or _get(b,'time')
@@ -38,9 +38,22 @@ def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2)
         except (TypeError,ValueError,OverflowError): impossible+=1; continue
         if not all(math.isfinite(v) and v > 0 for v in (o,h,l,c)) or h < max(o,c,l) or l > min(o,c,h): impossible+=1
         if o==h==l==c: flat+=1
-        if isinstance(t,str):
-            try: t=datetime.fromisoformat(t.replace('Z','+00:00'))
-            except ValueError: t=None
+        if isinstance(t, str):
+            try:
+                t = datetime.fromisoformat(t.strip().replace('Z', '+00:00'))
+            except ValueError:
+                t = None
+        if not isinstance(t, datetime):
+            invalid_times += 1
+            continue
+        # Twelve Data may give UTC timestamps with or without an explicit offset.
+        # Normalize before comparisons: naive-vs-aware datetime raises TypeError.
+        try:
+            t = (t.replace(tzinfo=timezone.utc) if t.tzinfo is None
+                 else t.astimezone(timezone.utc))
+        except (ValueError, OverflowError):
+            invalid_times += 1
+            continue
         times.append(t)
     valid=[t for t in times if isinstance(t,datetime)]
     duplicates=max(0,len(valid)-len(set(valid)))
@@ -56,6 +69,7 @@ def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2)
         if is_flat: tail+=1
         else: break
     reasons=[]
+    if invalid_times: reasons.append('INVALID_TIMESTAMP')
     if duplicates: reasons.append('DUPLICATE_TIMESTAMPS')
     if nonmono: reasons.append('NON_MONOTONIC_TIME')
     if impossible: reasons.append('INVALID_OHLC')
