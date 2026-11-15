@@ -2364,7 +2364,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                         log.exception("Фиксация доставленной фазы накопления/распределения")
             if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
                 try:
-                    signal_journal.record_sent(text, market, closed_dt)
+                    signal_journal.record_sent(text, market, closed_dt, source_text=source_text)
                 except Exception:
                     log.exception("Запись отправленного сигнала в журнал")
             # Preserve the primary delivered source: ACKs above visit its allies.

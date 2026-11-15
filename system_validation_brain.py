@@ -11,19 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 import config as cfg
 import cpcv_audit
+from journal_tail import tail_jsonl
 
 
 def _root():
     raw=os.getenv('STATE_DIR','').strip(); return Path(raw) if raw else Path(__file__).resolve().parent
 
 def _load_jsonl(name, limit=20000):
-    p=_root()/name
-    if not p.exists(): return []
-    out=[]
-    for line in p.read_text(encoding='utf-8',errors='replace').splitlines()[-limit:]:
-        try: out.append(json.loads(line))
-        except Exception: pass
-    return out
+    return tail_jsonl(_root()/name,limit)
 
 def _clip(x,a=0.0,b=1.0): return max(a,min(b,float(x)))
 

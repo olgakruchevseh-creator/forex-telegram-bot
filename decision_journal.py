@@ -7,6 +7,7 @@ module never sends Telegram messages or changes a scanner verdict.
 from __future__ import annotations
 import hashlib, json, logging, math, os, re
 from collections import deque
+from journal_tail import tail_lines
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -170,24 +171,29 @@ def _observed_h1(by_tf):
 
 _SEEN_PATH=None
 _SEEN_EVENT_IDS=set()
+_SEEN_EVENT_ORDER=deque()
+_MAX_SEEN_EVENT_IDS=20000
+
+def _remember_event(eid):
+ if not eid or eid in _SEEN_EVENT_IDS:
+  return
+ if len(_SEEN_EVENT_ORDER)>=_MAX_SEEN_EVENT_IDS:
+  _SEEN_EVENT_IDS.discard(_SEEN_EVENT_ORDER.popleft())
+ _SEEN_EVENT_ORDER.append(eid)
+ _SEEN_EVENT_IDS.add(eid)
 
 def _ensure_seen_ids(path):
- global _SEEN_PATH,_SEEN_EVENT_IDS
+ global _SEEN_PATH,_SEEN_EVENT_IDS,_SEEN_EVENT_ORDER
  key=str(path)
  if _SEEN_PATH==key:
   return
- _SEEN_PATH=key; _SEEN_EVENT_IDS=set()
- if not path.exists():
-  return
+ _SEEN_PATH=key; _SEEN_EVENT_IDS=set(); _SEEN_EVENT_ORDER=deque()
  try:
-  with path.open('r',encoding='utf-8',errors='replace') as f:
-   tail=deque(f,maxlen=50000)
-  for line in tail:
+  for line in tail_lines(path,_MAX_SEEN_EVENT_IDS):
    try:
-    eid=json.loads(line).get('event_id')
-    if eid:_SEEN_EVENT_IDS.add(eid)
-   except Exception:
-    pass
+    _remember_event(json.loads(line).get('event_id'))
+   except (TypeError, ValueError, AttributeError):
+    continue
  except Exception:
   log.exception('DECISION_JOURNAL_DEDUP_LOAD_SKIPPED')
 
@@ -280,7 +286,7 @@ def _append(rec):
   if eid and eid in _SEEN_EVENT_IDS:
    return False
   with p.open('a',encoding='utf-8') as f: f.write(json.dumps(_json_safe(rec),ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n')
-  if eid:_SEEN_EVENT_IDS.add(eid)
+  if eid:_remember_event(eid)
   return True
  except Exception:
   log.exception('DECISION_JOURNAL_WRITE_SKIPPED')
@@ -405,7 +411,16 @@ def record_sent(text,market,strength=None,allies=None,ctx=None,master=None):
  """Record delivery while preserving the Signal Context bundle."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
  rec=_base(text,market,strength or {},'SENT','telegram_delivered',allies,ctx,master)
- rec['delivery']=True; _append(rec)
+ rec['delivery']=True
+ if _append(rec):
+  # Preserve every delivered decision in a compact dedicated history. The huge
+  # candidate journal's last 4000 rows may span less than an 8H replay window.
+  try:
+   sent_path=_path().with_name('decision_sent_history.jsonl')
+   with sent_path.open('a',encoding='utf-8') as f:
+    f.write(json.dumps(_json_safe(rec),ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n')
+  except Exception:
+   log.exception('DECISION_SENT_HISTORY_WRITE_SKIPPED')
  _killer_gate_observation(text,'telegram_delivered',market)
 
 def record_stage(text,market,strength,status,allies=None,ctx=None,reason='',master=None):

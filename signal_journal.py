@@ -94,7 +94,7 @@ def _local_date(raw: str) -> str:
     return dt.astimezone(ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))).date().isoformat()
 
 
-def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
+def record_sent(text: str, market: dict, closed_h1_dt: str, *, source_text: str | None = None) -> bool:
     """Записывает только уже успешно отправленное пользователю сообщение."""
     # Это информационное сообщение об удалении старого уровня, а не новая сделка.
     upper = (text or "").upper()
@@ -111,7 +111,24 @@ def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
     av = atr(bars, int(getattr(cfg, "ATR_PERIOD", 14)))
     if av <= 0:
         return False
-    digest = hashlib.sha256(f"{symbol}|{side}|{entry_dt}|{_source(text)}|{text}".encode()).hexdigest()[:20]
+    # The formatted delivery card contains summaries of allied modules. Deriving
+    # the origin from its prose can mislabel an Imbalance/FVG trade as ZigZag.
+    source_name = _source(text)
+    scenario_id = ""
+    if source_text:
+        try:
+            import signal_context
+            if signal_context.pair_of(source_text) == symbol and signal_context.side_of(source_text) == side:
+                detected = signal_context.source_name(source_text)
+                if detected != "Модуль":
+                    source_name = detected
+                source_card = source_text
+                fingerprint = signal_context.event_fingerprint(source_card)
+                scenario_basis = "|".join([symbol, side, detected, str(current.dt), fingerprint])
+                scenario_id = hashlib.sha256(scenario_basis.encode()).hexdigest()[:24]
+        except Exception:
+            log.exception("SIGNAL_JOURNAL_ORIGIN_SNAPSHOT_FAILED pair=%s", symbol)
+    digest = hashlib.sha256(f"{symbol}|{side}|{entry_dt}|{source_name}|{text}".encode()).hexdigest()[:20]
     state = _load()
     records = state.setdefault("records", {})
     if digest in records:
@@ -120,9 +137,10 @@ def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
     target_atr = float(getattr(cfg, "JOURNAL_TARGET_ATR", 1.0))
     invalid_atr = float(getattr(cfg, "JOURNAL_INVALIDATION_ATR", 0.75))
     records[digest] = {
-        "id": digest, "symbol": symbol, "side": side, "source": _source(text),
+        "id": digest, "symbol": symbol, "side": side, "source": source_name,
+        "scenario_id": scenario_id,
         "entry_dt": entry_dt, "local_date": _local_date(entry_dt),
-        "entry": current.close, "atr": av,
+        "entry": current.close, "entry_basis": "closed_h1_close", "atr": av,
         "target": current.close + wanted * av * target_atr,
         "invalidation": current.close - wanted * av * invalid_atr,
         "quality": _number(text, "Качество"), "confidence": _number(text, "Вероятность"),
@@ -137,8 +155,8 @@ def record_sent(text: str, market: dict, closed_h1_dt: str) -> bool:
     # statistics, not counted as another confirmation.
     try:
         ctx = market_state.build(symbol, market.get(symbol) or {}, wanted)
-        records[digest]["market_regime"] = str(getattr(getattr(ctx, "regime", None), "regime", "") or "")
-        records[digest]["liquidity_target"] = str(getattr(getattr(ctx, "liquidity", None), "target", "") or "")
+        records[digest]["market_regime"] = str(getattr(getattr(ctx, "regime", None), "name", "") or "")
+        records[digest]["liquidity_target"] = str(getattr(getattr(ctx, "liquidity", None), "target_side", "") or "")
         records[digest]["exhaustion_score"] = float(getattr(getattr(ctx, "exhaustion", None), "score", 0.0) or 0.0)
     except Exception:
         log.exception("MARKET_STATE_JOURNAL_SNAPSHOT_SKIPPED symbol=%s", symbol)

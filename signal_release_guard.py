@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 import math
 import os
 import re
@@ -263,6 +264,10 @@ def review(text: str, market: dict, peers=(), source_ids=None, *, now=None, cach
                     end.isoformat(), tuple(checks))
 
 
+_RECORDED_DECISIONS = set()
+_RECORDED_FIFO = deque(maxlen=20000)
+
+
 def journal(decision: Decision, event_id: str = "") -> None:
     if not getattr(cfg, "UNIFIED_SIGNAL_JOURNAL_ENABLED", True):
         return
@@ -270,11 +275,20 @@ def journal(decision: Decision, event_id: str = "") -> None:
     path = root / "unified_signal_decisions.jsonl"
     payload = {**asdict(decision), "event_id": event_id,
                "reviewed_at_utc": datetime.now(timezone.utc).isoformat()}
+    key = (str(event_id), decision.status, decision.reason, decision.h1_closed_at)
+    if event_id and key in _RECORDED_DECISIONS:
+        return
     try:
         root.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > 5_000_000:
-            path.replace(root / "unified_signal_decisions.previous.jsonl")
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            path.replace(root / f"unified_signal_decisions.{stamp}.jsonl")
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")) + "\n")
+        if event_id:
+            if len(_RECORDED_FIFO) == _RECORDED_FIFO.maxlen:
+                _RECORDED_DECISIONS.discard(_RECORDED_FIFO.popleft())
+            _RECORDED_FIFO.append(key)
+            _RECORDED_DECISIONS.add(key)
     except OSError:
         log.exception("UNIFIED_SIGNAL_JOURNAL_FAILED")

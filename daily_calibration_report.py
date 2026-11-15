@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import config as cfg
+from journal_tail import tail_jsonl
 log = logging.getLogger("fxbot.daily_calibration")
 
 
@@ -19,12 +20,7 @@ def _journal(): return _root()/'decision_journal.jsonl'
 def _replay(): return _root()/'decision_replay.jsonl'
 def _state(): return _root()/'daily_calibration_report_state.json'
 def _read_jsonl(path, limit=12000):
-    if not path.exists(): return []
-    out=[]
-    for line in path.read_text(encoding='utf-8',errors='replace').splitlines()[-limit:]:
-        try: out.append(json.loads(line))
-        except Exception: pass
-    return out
+    return tail_jsonl(path,limit)
 
 def _dedupe(rows):
     out=[]; seen=set()
@@ -157,8 +153,13 @@ def _previous_cohorts(decisions, outcomes, day, lookback_days=10):
     return 'Дозревшие SENT предыдущих дней (окно 10 дней, дата исходного сигнала): ' + ' ; '.join(lines)
 
 def _report(day):
-    all_recent_decisions=_dedupe(_read_jsonl(_journal()))
-    raw_decisions=[r for r in _read_jsonl(_journal()) if _local_date(r.get('recorded_utc'))==day]
+    sent_history=_read_jsonl(_journal().with_name('decision_sent_history.jsonl'),10000)
+    candidate_history=_read_jsonl(_journal())
+    candidate_ids={r.get('event_id') for r in candidate_history if r.get('event_id')}
+    # SENT rows already present in the main tail are not technical duplicates.
+    joined=candidate_history+[r for r in sent_history if r.get('event_id') not in candidate_ids]
+    all_recent_decisions=_dedupe(joined)
+    raw_decisions=[r for r in joined if _local_date(r.get('recorded_utc'))==day]
     decisions=_dedupe(raw_decisions)
     outcomes_all=_read_jsonl(_replay())
     outcomes={r.get('decision_id'):r for r in outcomes_all if r.get('decision_id')}

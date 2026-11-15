@@ -6,6 +6,7 @@ verdicts, routing, or Telegram delivery.
 from __future__ import annotations
 import json, logging, os
 from collections import defaultdict
+from journal_tail import tail_jsonl
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,14 +46,17 @@ def _append(obj):
     with p.open('a',encoding='utf-8') as f:f.write(json.dumps(obj,ensure_ascii=False,separators=(',',':'))+'\n')
 
 def _records(limit=4000):
-    p=_journal()
-    if not p.exists(): return []
-    lines=p.read_text(encoding='utf-8',errors='replace').splitlines()[-limit:]
-    out=[]
-    for line in lines:
-        try:out.append(json.loads(line))
-        except Exception:pass
-    return out
+    # Memory and I/O safe even when /data/decision_journal.jsonl exceeds 1 GB.
+    # The separate SENT history protects delivered trades from being crowded out
+    # by thousands of later BLOCKED candidates before the 8H horizon matures.
+    recent=tail_jsonl(_journal(),limit)
+    sent=tail_jsonl(_journal().with_name('decision_sent_history.jsonl'),10000)
+    by_id={}
+    for rec in recent+sent:
+        key=rec.get('event_id')
+        if key:
+            by_id[key]=rec
+    return list(by_id.values())
 
 def _entry(rec,bars):
     # Old journals sometimes interpreted a date from 'Закрытие' as a price.
@@ -231,12 +235,7 @@ def update(market:dict)->int:
     # bounded state: journal IDs are hashes; keep recent insertion order
     if len(done)>10000: state['done']=dict(list(done.items())[-10000:])
     _save_json(_state(),state)
-    outcomes=[]
-    p=_outcomes()
-    if p.exists():
-        for line in p.read_text(encoding='utf-8',errors='replace').splitlines()[-10000:]:
-            try:outcomes.append(json.loads(line))
-            except Exception:pass
+    outcomes=tail_jsonl(_outcomes(),10000)
     _save_json(_calibration(),_build_calibration(outcomes))
     try:
         system_validation_brain.update()
