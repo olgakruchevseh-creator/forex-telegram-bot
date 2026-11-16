@@ -7,6 +7,7 @@ import hashlib
 import io
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config as cfg
@@ -173,7 +174,7 @@ def format_message(event: dict) -> str:
         f"Уровень 61.8%: {_price(event['symbol'], event['level_618'])}",
         f"OTE 61.8–78.6%: {_price(event['symbol'], event['ote_low'])}–{_price(event['symbol'], event['ote_high'])} · опорный 70.5%: {_price(event['symbol'], event['ote_reference'])}",
         f"Глубокий откат 78.6–85%: {_price(event['symbol'], event['deep_low'])}–{_price(event['symbol'], event['deep_high'])}",
-        "Проекция A–B–C: " + " · ".join(f"{r:.3f}={_price(event['symbol'], p)}" for r, p in event['fib_projection'].items()),
+        "Проекция A–B–C: " + " · ".join(f"{float(r):.3f}={_price(event['symbol'], p)}" for r, p in event['fib_projection'].items()),
         f"Откат: {event['pullback_bars']} H1 · {event['pullback_move_atr']:.2f} ATR · эффективность {event['pullback_efficiency']:.2f}",
         f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
         "Подтверждение: H1 · M15", f"Разница силы валют: {event['gap']:+.2f}",
@@ -253,6 +254,24 @@ def image_for_alert(text: str) -> io.BytesIO | None:
     return render_chart(card[0], card[1])
 
 
+
+def _pending_is_fresh(event: dict) -> bool:
+    """Do not replay a previous H1 Fibonacci setup after a delayed restart.
+
+    Candle timestamps from Twelve Data are H1 bar *open* times in UTC.
+    Allow at most 30 minutes after that bar's close for recovery.
+    """
+    try:
+        raw = str(event.get("reaction_dt") or "").strip().replace("Z", "+00:00")
+        opened = datetime.fromisoformat(raw)
+        opened = (opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None
+                  else opened.astimezone(timezone.utc))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    age = datetime.now(timezone.utc) - opened
+    return timedelta(0) <= age <= timedelta(minutes=90)
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
@@ -270,6 +289,11 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             pending.pop(digest, None)
             continue
         if event["key"] in sent:
+            pending.pop(digest, None)
+            continue
+        if not _pending_is_fresh(event):
+            log.warning("FIBONACCI_PENDING_EXPIRED symbol=%s reaction_dt=%s",
+                        event.get("symbol"), event.get("reaction_dt"))
             pending.pop(digest, None)
             continue
         text = format_message(event)
