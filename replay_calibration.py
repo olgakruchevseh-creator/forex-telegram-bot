@@ -4,13 +4,13 @@ Observes what happened after journaled decisions. Never changes scanner threshol
 verdicts, routing, or Telegram delivery.
 """
 from __future__ import annotations
-import json, logging, os
+import json, logging, os, sqlite3, time
 from collections import defaultdict
 from journal_tail import tail_jsonl
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from analysis import closed_candles, atr
+from analysis import Candle, closed_candles, atr
 import config as cfg
 import layer14_adaptive_confidence
 import system_validation_brain
@@ -18,6 +18,9 @@ import manipulation_leg_projection
 
 log=logging.getLogger('fxbot.replay_calibration')
 HORIZONS=(1,3,8)
+_ARCHIVE_LAST_SWEEP=None
+_ARCHIVE_INTERVAL_SECONDS=6*3600
+_ARCHIVE_BUDGET=60
 
 def _root():
     raw=os.getenv('STATE_DIR','').strip(); return Path(raw) if raw else Path(__file__).resolve().parent
@@ -95,19 +98,26 @@ def _evaluate(rec,h1):
     start=observed or recorded
     bars=closed_candles(h1 or [],60)
     if not start or not bars:return None
-    future=[]; prior=[]
+    # EXACT consecutive H1 opens, not simply the next 8 available rows.
+    # Otherwise an outage or Friday -> Monday gap is silently labelled an 8H
+    # outcome, which contaminates target rates and delayed calibration.
+    stamps = {}
+    prior = []
     for b in bars:
-        d=_dt(b.dt)
+        d = _dt(b.dt)
         if not d: continue
         if observed:
-            if d>start: future.append(b)
-            else: prior.append(b)
-        else:
-            # Legacy journal rows have no exact H1 anchor. Do not use the
-            # partially elapsed H1 containing recorded_utc as prior/future data.
-            if d>start: future.append(b)
-            if (d.timestamp()+3600)<=start.timestamp(): prior.append(b)
-    if len(future)<max(HORIZONS):return None
+            if d <= start: prior.append(b)
+        elif d + timedelta(hours=1) <= start:
+            prior.append(b)
+        if d > start:
+            stamps[d] = b
+    first_open = (start + timedelta(hours=1) if observed else
+                  start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+    # A time-only, uninterrupted eight-hour window is required for a mature
+    # outcome. A missing candle means UNKNOWN, never an inferred win/loss.
+    future = [stamps.get(first_open + timedelta(hours=i)) for i in range(max(HORIZONS))]
+    if any(b is None for b in future): return None
     entry=_entry(rec,future)
     if entry is None or not math.isfinite(float(entry)) or float(entry) <= 0:
         return None
@@ -212,17 +222,79 @@ def _build_calibration(outcomes):
             'probability_activation':'DISABLED_UNTIL_DELAYED_RELIABILITY_IS_STABLE',
             'groups':summary,'module_pair_regime_cells':readiness}
 
+def _archived_h1(rec: dict) -> list[Candle]:
+    """Read observed closed H1 from the persistent SQLite archive, if present.
+
+    Does not create/modify a DB, backfill candles, or reconstruct past signals.
+    This is retrospective outcome evidence, not proof of what Master knew then.
+    """
+    file = _root() / "forex_ohlc_history.sqlite"
+    pair = str(rec.get("pair") or "")
+    anchor = _dt(rec.get("observed_h1_dt")) or _dt(rec.get("recorded_utc"))
+    if not file.is_file() or pair not in cfg.PAIRS or anchor is None:
+        return []
+    # String comparisons are valid because the journal stores UTC ISO Z opens.
+    observed = bool(_dt(rec.get("observed_h1_dt")))
+    cutoff = anchor if observed else anchor - timedelta(hours=1)
+    def stamp(d):
+        return d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    uri = f"file:{file}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True, timeout=2.0) as db:
+            old = db.execute("SELECT opened_utc,open,high,low,close FROM candles "
+                             "WHERE pair=? AND tf='H1' AND opened_utc<=? "
+                             "ORDER BY opened_utc DESC LIMIT 40", (pair, stamp(cutoff))).fetchall()
+            new = db.execute("SELECT opened_utc,open,high,low,close FROM candles "
+                             "WHERE pair=? AND tf='H1' AND opened_utc>? "
+                             "ORDER BY opened_utc ASC LIMIT 10", (pair, stamp(anchor))).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        log.warning("REPLAY_ARCHIVE_READ_UNAVAILABLE pair=%s error=%s", pair, type(exc).__name__)
+        return []
+    return [Candle(stamp_utc, op, hi, lo, cl) for stamp_utc, op, hi, lo, cl in reversed(old)] + [
+        Candle(stamp_utc, op, hi, lo, cl) for stamp_utc, op, hi, lo, cl in new]
+
+
 def update(market:dict)->int:
     """Evaluate mature journal records against current H1 history. Safe to call every scan."""
     if not getattr(cfg,'REPLAY_CALIBRATION_ENABLED',True):return 0
+    global _ARCHIVE_LAST_SWEEP
     state=_load_state(); done=state.setdefault('done',{}); added=0
-    for rec in _records(int(getattr(cfg,'REPLAY_JOURNAL_SCAN_LIMIT',4000))):
+    # At most once per six hours and at most 60 SQLite queries. Prioritize
+    # actually delivered signals over counterfactual blocked candidates.
+    archive_due = (_ARCHIVE_LAST_SWEEP is None or
+                   time.monotonic() - _ARCHIVE_LAST_SWEEP >= _ARCHIVE_INTERVAL_SECONDS)
+    if archive_due: _ARCHIVE_LAST_SWEEP = time.monotonic()
+    records = _records(int(getattr(cfg,'REPLAY_JOURNAL_SCAN_LIMIT',4000)))
+    # Only delivered signals are recovered retrospectively in phase one;
+    # a BLOCKED candidate is NOT an executed trade. Rotate the bounded queue
+    # so missing history for one old signal cannot starve newer SENT signals.
+    archive_ids = set()
+    if archive_due and (_root() / "forex_ohlc_history.sqlite").is_file():
+        pending_sent = [r.get('event_id') for r in records
+                        if r.get('status') == 'SENT' and r.get('event_id')
+                        and r.get('event_id') not in done]
+        if pending_sent:
+            cursor = max(0, int(state.get('archive_sent_cursor') or 0)) % len(pending_sent)
+            rotated = pending_sent[cursor:] + pending_sent[:cursor]
+            take = min(_ARCHIVE_BUDGET, len(rotated))
+            archive_ids = set(rotated[:take])
+            state['archive_sent_cursor'] = (cursor + take) % len(pending_sent)
+    archive_added = 0
+    for rec in records:
         did=rec.get('event_id')
         if not did or did in done or rec.get('status') not in ('SENT','BLOCKED','ALLOWED'):continue
         pair=rec.get('pair'); h1=(market.get(pair) or {}).get('H1') if pair else None
         try:
             result=_evaluate(rec,h1)
-        except (ArithmeticError, TypeError, ValueError, OverflowError, AttributeError):
+            if result is None and did in archive_ids:
+                archived = _archived_h1(rec)
+                if archived:
+                    result = _evaluate(rec, archived)
+                    if result:
+                        result['ohlc_basis'] = 'PERSISTED_CLOSED_H1_RETROSPECTIVE'
+                        result['as_known_at_decision'] = False
+                        archive_added += 1
+        except (ArithmeticError, TypeError, ValueError, OverflowError, AttributeError, sqlite3.Error):
             log.exception('REPLAY_INVALID_SAMPLE decision_id=%s pair=%s', did, pair)
             continue
         if result:
@@ -232,6 +304,9 @@ def update(market:dict)->int:
             except Exception:
                 log.exception('LAYER14_CALIBRATION_INGEST_SKIPPED decision_id=%s', did)
             done[did]=result['evaluated_utc']; added+=1
+    if archive_ids:
+        log.info('REPLAY_ARCHIVE_OBSERVE_ONLY checked=%s matured=%s next_sweep_hours=6',
+                 len(archive_ids), archive_added)
     # bounded state: journal IDs are hashes; keep recent insertion order
     if len(done)>10000: state['done']=dict(list(done.items())[-10000:])
     _save_json(_state(),state)

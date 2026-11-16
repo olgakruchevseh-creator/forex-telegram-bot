@@ -82,8 +82,9 @@ def _source(text: str) -> str:
 
 def _parse_dt(raw: str) -> datetime | None:
     try:
-        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -165,7 +166,26 @@ def record_sent(text: str, market: dict, closed_h1_dt: str, *, source_text: str 
 
 
 def _future_bars(record: dict, bars: list[Candle]) -> list[Candle]:
-    return [bar for bar in bars if bar.dt > record.get("entry_dt", "")]
+    """Use only a contiguous prefix of full H1 after the frozen entry H1.
+
+    If hours are missing, we cannot know if targets or invalidation were hit
+    during the gap. Never jump forward and call later bars the next H1.
+    """
+    entry = _parse_dt(record.get("entry_dt"))
+    if entry is None or entry.minute or entry.second or entry.microsecond:
+        return []
+    index = {}
+    for bar in bars:
+        opened = _parse_dt(bar.dt)
+        if opened is not None and opened > entry:
+            index[opened] = bar
+    result = []
+    for hour in range(1, 9):
+        bar = index.get(entry + timedelta(hours=hour))
+        if bar is None:
+            break
+        result.append(bar)
+    return result
 
 
 def _update_record(record: dict, bars: list[Candle]) -> None:
