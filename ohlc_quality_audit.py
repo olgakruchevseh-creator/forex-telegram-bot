@@ -21,6 +21,10 @@ from ohlc_history_journal import INTERVALS, db_default, iso
 _AUDITED_TFS = ("H1", "H4", "D1", "W1", "M15", "M5")
 # These labels cannot distinguish a raw API response from a cached response.
 _AMBIGUOUS_SOURCES = {"BOT_SCAN_TWELVE_DATA_OR_CACHE", "CSV_IMPORT_UNVERIFIED"}
+_DIRECT_API_SOURCES = {"BOT_SCAN_API_RESPONSE"}
+_CACHE_SOURCES = {"BOT_SCAN_IN_PROCESS_CACHE_TTL",
+                  "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK"}
+_PRICE_FIELDS = ("open", "high", "low", "close")
 
 
 def _parse_utc(stamp: str) -> datetime:
@@ -39,6 +43,53 @@ def _match_ohlc(stored: tuple[float, ...], bars: list[tuple[float, ...]], pair: 
     tick = 0.001 if pair.endswith("/JPY") else 0.00001
     return all(math.isclose(a, b, rel_tol=0.0, abs_tol=tick + 1e-12)
                for a, b in zip(stored, aggregated))
+
+
+def _mismatch_examples(archive: dict, large_tf: str, small_tf: str,
+                       offset: int, max_windows: int, *, limit_per_pair: int = 2) -> dict:
+    """Bounded, price-free locations of discrepancies for read-only investigation.
+
+    Stored-minus-aggregated differences are in quote ticks, not measured
+    prediction errors. The snapshots do not claim that either TF is correct.
+    """
+    step = timedelta(minutes=INTERVALS[small_tf][0])
+    length = INTERVALS[large_tf][0] // INTERVALS[small_tf][0]
+    count_by_pair = {}
+    examples = []
+    worst_ticks = 0.0
+    for pair in cfg.PAIRS:
+        small = archive.get((pair, small_tf), {})
+        large = sorted(archive.get((pair, large_tf), {}).items())[-max_windows:]
+        mismatches = 0
+        pair_examples = []
+        tick = 0.001 if pair.endswith("/JPY") else 0.00001
+        for labelled, stored in large:
+            origin = labelled + timedelta(hours=offset)
+            bars = [small.get(origin + i * step) for i in range(length)]
+            if any(v is None for v in bars):
+                continue
+            if _match_ohlc(stored, bars, pair):
+                continue
+            aggregated = (bars[0][0], max(v[1] for v in bars),
+                          min(v[2] for v in bars), bars[-1][3])
+            deltas = tuple(round((a - b) / tick, 3) for a, b in zip(stored, aggregated))
+            absolute_max = max(abs(v) for v in deltas)
+            worst_ticks = max(worst_ticks, absolute_max)
+            mismatches += 1
+            if len(pair_examples) < limit_per_pair:
+                pair_examples.append({
+                    "pair": pair, "large_tf_label_utc": iso(labelled),
+                    "compared_small_tf_start_utc": iso(origin),
+                    "delta_quote_ticks_stored_minus_aggregated": dict(zip(_PRICE_FIELDS, deltas)),
+                    "max_abs_delta_quote_ticks": absolute_max,
+                })
+        if mismatches:
+            count_by_pair[pair] = mismatches
+            examples.extend(pair_examples)
+    return {"mismatches_by_pair": count_by_pair,
+            "max_abs_delta_quote_ticks": round(worst_ticks, 3),
+            "sample_count": len(examples), "examples": examples,
+            "interpretation": "Сравнение закрытых OHLC, без указания верного источника"}
 
 
 def _alignment(archive: dict, large_tf: str, small_tf: str,
@@ -73,7 +124,12 @@ def _alignment(archive: dict, large_tf: str, small_tf: str,
     observed = observed and best_data["matching_windows"] / best_data["complete_windows"] >= 0.8
     tie = any(h != best and result[h]["matching_windows"] == best_data["matching_windows"]
               for h in result)
+    details_best = _mismatch_examples(archive, large_tf, small_tf, best, max_windows)
+    details_zero = (details_best if best == 0 else
+                    _mismatch_examples(archive, large_tf, small_tf, 0, max_windows))
     return {"large_tf": large_tf, "small_tf": small_tf,
+            "mismatch_details_best_offset": details_best,
+            "mismatch_details_zero_offset": details_zero,
             "label_offset_hours_for_best_match": best if observed and not tie else None,
             "offset_is_provider_timezone_proof": False,
             "multiple_equally_supported_offsets": bool(tie and observed),
@@ -99,6 +155,8 @@ def audit(db_path: Path | str | None = None, *, as_of: datetime | None = None) -
     weekend = Counter()
     weekend_moving = Counter()
     seen_late = Counter()
+    weekend_examples = []
+    weekend_per_pair = Counter()
     bad_time = Counter()
     for pair, tf, stamp, op, hi, lo, cl, source, first_seen in rows:
         if pair not in cfg.PAIRS or tf not in _AUDITED_TFS:
@@ -117,6 +175,12 @@ def audit(db_path: Path | str | None = None, *, as_of: datetime | None = None) -
             weekend[tf] += 1
             if hi > lo:
                 weekend_moving[tf] += 1
+            if tf == "H1" and weekend_per_pair[pair] < 2:
+                tick = 0.001 if pair.endswith("/JPY") else 0.00001
+                weekend_examples.append({"pair": pair, "opened_utc": iso(opened),
+                                         "range_quote_ticks": round((hi - lo) / tick, 3),
+                                         "source_label": str(source)})
+                weekend_per_pair[pair] += 1
         # Delayed first capture proves hindsight/backfill, not when the bot knew it.
         if seen_at > opened + timedelta(minutes=INTERVALS[tf][0] + 120):
             seen_late[tf] += 1
@@ -169,10 +233,17 @@ def audit(db_path: Path | str | None = None, *, as_of: datetime | None = None) -
         "counts": {"total_rows": len(rows), "analyzed_rows": matched,
                    "by_tf": {tf: by_tf[tf] for tf in _AUDITED_TFS}},
         "source_provenance": {"labels": dict(sources), "ambiguous_rows": ambiguous,
+                              "live_api_response_rows": sum(sources[x] for x in _DIRECT_API_SOURCES),
+                              "live_cache_rows": sum(sources[x] for x in _CACHE_SOURCES),
+                              "historical_api_backfill_rows": sources["Twelve Data"],
+                              "csv_import_unverified_rows": sources["CSV_IMPORT_UNVERIFIED"],
+                              "can_distinguish_api_from_cache_for_labeled_new_rows":
+                                  bool(any(sources[x] for x in _DIRECT_API_SOURCES | _CACHE_SOURCES)),
                               "can_distinguish_api_from_cache": False,
-                              "interpretation": "Поле source фиксирует путь записи, но не доказывает сырое время или источник каждого бара"},
+                              "interpretation": "Новая метка различает транспорт API и кэш в момент первого сохранения, но не удостоверяет происхождение старой истории"},
         "weekend_open_utc": {tf: {"rows": weekend[tf], "nonflat_rows": weekend_moving[tf]}
                              for tf in _AUDITED_TFS},
+        "weekend_h1_sample": weekend_examples,
         "late_first_capture_rows": {tf: seen_late[tf] for tf in _AUDITED_TFS},
         "h1_coverage": {"shared_open_times": len(common), "union_open_times": len(all_stamps),
                         "gaps_by_pair_including_weekends": gaps},

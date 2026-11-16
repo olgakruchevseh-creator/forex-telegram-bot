@@ -106,6 +106,18 @@ TD_URL = "https://api.twelvedata.com/time_series"
 
 # cache[(symbol, tf_key)] = {"ts": float, "candles": list[Candle]}
 CACHE: dict[tuple[str, str], dict] = {}
+
+
+class MarketBasket(dict):
+    """Normal market mapping with per-fetch transport provenance for OHLC OBSERVE_ONLY.
+
+    This is a trace of the source used during *this* fetch, not independent
+    vendor verification or proof that historical values were known in real time.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.source_by_series: dict[tuple[str, str], str] = {}
 SENT_H1: set[str] = set()
 LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 # Serialize complete session briefing deliveries within each chat.
@@ -283,7 +295,7 @@ def _cache_fallback(s: str, tf: dict, now: float) -> list[Candle]:
 
 def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[Candle]]]:
     """symbol -> {tf_key -> candles}. На платном плане — batch по каждому ТФ."""
-    market: dict[str, dict[str, list[Candle]]] = {s: {} for s in cfg.PAIRS}
+    market: dict[str, dict[str, list[Candle]]] = MarketBasket({s: {} for s in cfg.PAIRS})
     now = time.time()
     for tf in cfg.TIMEFRAMES:
         stale = force or any(
@@ -295,6 +307,7 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
         if not stale:
             for s in cfg.PAIRS:
                 market[s][tf["key"]] = CACHE[(s, tf["key"])]["candles"]
+                market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_TTL"
             continue
         try:
             batch = fetch_tf_batch(tf, api_key)
@@ -304,6 +317,7 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                 if candles:
                     CACHE[(s, tf["key"])] = {"ts": ts, "candles": candles}
                     market[s][tf["key"]] = candles
+                    market.source_by_series[(s, tf["key"])] = "BOT_SCAN_API_RESPONSE"
                     continue
                 # The targeted retry may still fail transiently. Preserve a
                 # previously fetched series for this tick instead of dropping
@@ -312,6 +326,7 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                 cached = _cache_fallback(s, tf, time.time())
                 if cached:
                     market[s][tf["key"]] = cached
+                    market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK"
                     log.warning("CACHE_FALLBACK symbol=%s tf=%s", s, tf["key"])
             time.sleep(cfg.REQUEST_PAUSE_SEC)
         except Exception as e:
@@ -320,6 +335,7 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                 cached = _cache_fallback(s, tf, time.time())
                 if cached:
                     market[s][tf["key"]] = cached
+                    market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK"
     return market
 
 

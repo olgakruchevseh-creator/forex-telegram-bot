@@ -31,6 +31,13 @@ INTERVALS = {"M5": (5, "5min", 5), "M15": (15, "15min", 20),
              "D1": (1440, "1day", 180), "W1": (10080, "1week", 360)}
 COLUMNS = ("datetime", "open", "high", "low", "close")
 PROVIDER = "Twelve Data"
+# Provenance of the transport path used when the live scan first stores a bar.
+# Never relabel existing rows, and never treat this as vendor attestation.
+LIVE_CAPTURE_SOURCES = frozenset({
+    "BOT_SCAN_API_RESPONSE",
+    "BOT_SCAN_IN_PROCESS_CACHE_TTL",
+    "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK",
+})
 
 
 def db_default() -> Path:
@@ -340,8 +347,15 @@ def capture_market(market: dict, *, db_path: Path | None = None,
                         current.append({"datetime": iso(ts),
                                         **{key: getattr(bar, key) for key in COLUMNS[1:]}})
                     if current:
+                        # Plain dicts and older callers remain safely marked ambiguous.
+                        # Never allow untrusted/malformed labels into SQLite.
+                        observed_sources = getattr(market, "source_by_series", {})
+                        source = (observed_sources.get((pair, tf))
+                                  if isinstance(observed_sources, dict) else None)
+                        if source not in LIVE_CAPTURE_SOURCES:
+                            source = "BOT_SCAN_TWELVE_DATA_OR_CACHE"
                         result = put_rows(db, pair, tf, current,
-                                          source="BOT_SCAN_TWELVE_DATA_OR_CACHE", as_of=now)
+                                          source=source, as_of=now)
                         stats["inserted"] += result["inserted"]
                         stats["by_tf"][tf]["inserted"] += result["inserted"]
                         stats["series"] += 1
