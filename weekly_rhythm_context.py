@@ -195,7 +195,9 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     confidence, score, penalty = _score_side(raw_side)
     min_conf=int(getattr(cfg,"WEEKLY_RHYTHM_DIRECTION_MIN_CONFIDENCE",68))
     invalidated=bool(raw_side and ((sside and open_side and sside != open_side and penalty >= 18) or confidence < int(getattr(cfg,"WEEKLY_RHYTHM_INVALIDATED_CONFIDENCE",35))))
-    expansion_side=raw_side if raw_side and confidence>=min_conf and not invalidated else 0
+    # A score alone is not a confirmed weekly trend: require actual HTF structure.
+    structure_confirmed = bool(sside == raw_side and sstate in ("CONFIRMED", "SHIFT_CONFIRMED"))
+    expansion_side=raw_side if raw_side and structure_confirmed and confidence>=min_conf and not invalidated else 0
     confidence_state="ПОДТВЕРЖДЕНО" if expansion_side else ("ОТМЕНЕНО" if invalidated else "КАНДИДАТ")
 
     # Weekly rhythm: identify WHEN the current weekly extreme formed.  The weekday is
@@ -518,16 +520,28 @@ def _event_kind(ctx: WeeklyRhythmContext, previous_side: int = 0) -> str:
         return f"СЦЕНАРИЙ_ОТМЕНЁН:{previous_side}"
     if ctx.extreme_confirmed and ctx.expansion_side:
         return f"ЭКСТРЕМУМ_ПОДТВЕРЖДЁН:{ctx.extreme_candidate}:{ctx.expansion_side}"
-    if getattr(ctx,"early_candidate","") and not ctx.extreme_candidate:
-        return f"РАННИЙ_КАНДИДАТ:{ctx.early_candidate}"
+    # Early candidates stay visible in briefing context, never as stand-alone alerts.
     if ctx.phase == "НЕДЕЛЬНАЯ_ЭКСПАНСИЯ" and ctx.expansion_side:
         return f"НЕДЕЛЬНАЯ_ЭКСПАНСИЯ:{ctx.expansion_side}"
     if ctx.phase == "ДВИЖЕНИЕ_РЕАЛИЗОВАНО" and ctx.expansion_side:
         return f"ДВИЖЕНИЕ_РЕАЛИЗОВАНО:{ctx.expansion_side}"
     return ""
 
-def _event_key(symbol: str, kind: str) -> str:
-    return f"{symbol}:{kind}"
+def _event_key(symbol: str, kind: str, week: str = "") -> str:
+    """Scope notifications to the actual ISO week, not the previous week's state."""
+    return f"{week}:{symbol}:{kind}" if week else f"{symbol}:{kind}"
+
+
+def _market_week(by_tf: dict) -> str:
+    """ISO week of the latest available *closed* H4/H1, never wall-clock week."""
+    for tf, minutes in (("H4", 240), ("H1", 60)):
+        bars = closed_candles((by_tf or {}).get(tf) or [], minutes)
+        if bars:
+            date = _dt(getattr(bars[-1], "dt", ""))
+            if date:
+                wk = date.isocalendar()
+                return f"{wk.year}-W{wk.week:02d}"
+    return ""
 
 def _significant(ctx: WeeklyRhythmContext) -> bool:
     """Совместимость тестов: без предыдущего подтверждения отмена остаётся тихой."""
@@ -557,22 +571,31 @@ def format_alert(symbol: str, ctx: WeeklyRhythmContext, previous_side: int = 0) 
              f"Остаточный потенциал до W2: {ctx.projection_remaining_atr:.2f} ATR · глубина: {ctx.projection_depth}",
              f"Вероятное окно развития: {ctx.projection_window} · качество проекции {ctx.projection_quality}/100"] if ctx.projection_w2 is not None else [])),
         f"Математическая полнота: {ctx.math_quality}/100 · штраф за конфликты: {ctx.conflict_penalty}", "Факт: это недельный контекст и вероятностная проекция, а не самостоятельный сигнал на вход.",
-        *(["⚠️ РАННИЙ КАНДИДАТ — НЕ ВХОД. Финальное H4/структурное подтверждение ещё не получено."] if getattr(ctx,"early_candidate","") and not ctx.extreme_candidate else []),
+        *(["Отмена ранее подтверждённого направления: сценарий потерял условия подтверждения; "+
+            f"структура {ctx.structure_state}, оценка {ctx.confidence}/100, штраф {ctx.conflict_penalty}."]
+          if ctx.invalidated and previous_side else []),
+        *(["⚠️ РАННИЙ КАНДИДАТ — НЕ ВХОД. Финальное H4/структурное подтверждение ещё не получено."]
+          if getattr(ctx,"early_candidate","") and not ctx.extreme_candidate and not (ctx.invalidated and previous_side) else []),
     ])
 
 def process_market(market: dict, strength: dict | None = None) -> list[str]:
     state=_load_delivery(); delivered=set(state.get("delivered") or []); last=state.get("last_event") or {}; confirmed=state.get("confirmed_side") or {}
+    confirmed_week = state.get("confirmed_week") or {}
     out=[]
     for symbol, by_tf in (market or {}).items():
+        week = _market_week(by_tf)
+        if not week:
+            continue  # never deduplicate against a guessed wall-clock week
         ctx=analyze_symbol(symbol,by_tf)
         if not ctx: continue
-        previous=int(confirmed.get(symbol,0) or 0)
+        # Legacy unscoped confirmed_side cannot authorize an invalidation in a new week.
+        previous=int(confirmed.get(symbol,0) or 0) if confirmed_week.get(symbol)==week else 0
         kind=_event_kind(ctx,previous)
         if not kind: continue
-        key=_event_key(symbol,kind)
-        if last.get(symbol)==kind or key in delivered: continue
+        key=_event_key(symbol,kind,week)
+        if last.get(symbol)==f"{week}:{kind}" or key in delivered: continue
         text=format_alert(symbol,ctx,previous)
-        _PENDING_CARDS[text]=({"symbol":symbol,"ctx":ctx,"kind":kind,"previous_side":previous},freeze_by_tf(by_tf))
+        _PENDING_CARDS[text]=({"symbol":symbol,"ctx":ctx,"kind":kind,"previous_side":previous,"week":week},freeze_by_tf(by_tf))
         out.append(text)
     return out
 
@@ -606,8 +629,15 @@ def mark_delivered(text: str) -> None:
     card=_PENDING_CARDS.pop(text,None)
     if not card: return
     event=card[0]; symbol=event["symbol"]; ctx=event["ctx"]; kind=event.get("kind") or _event_kind(ctx,event.get("previous_side",0))
-    state=_load_delivery(); delivered=set(state.get("delivered") or []); delivered.add(_event_key(symbol,kind))
-    state["delivered"]=sorted(delivered)[-500:]; state.setdefault("last_event",{})[symbol]=kind
-    if ctx.expansion_side: state.setdefault("confirmed_side",{})[symbol]=int(ctx.expansion_side)
-    elif ctx.invalidated: state.setdefault("confirmed_side",{}).pop(symbol,None)
+    week=event.get("week", "")
+    if not week:
+        return  # never persist an unscoped notification from an older caller
+    state=_load_delivery(); delivered=set(state.get("delivered") or []); delivered.add(_event_key(symbol,kind,week))
+    state["delivered"]=sorted(delivered)[-500:]; state.setdefault("last_event",{})[symbol]=f"{week}:{kind}"
+    if ctx.expansion_side:
+        state.setdefault("confirmed_side",{})[symbol]=int(ctx.expansion_side)
+        state.setdefault("confirmed_week",{})[symbol]=week
+    elif ctx.invalidated and event.get("previous_side"):
+        state.setdefault("confirmed_side",{}).pop(symbol,None)
+        state.setdefault("confirmed_week",{}).pop(symbol,None)
     _save_delivery(state)

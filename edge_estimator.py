@@ -14,6 +14,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import config as cfg
 from analysis import Candle, atr, closed_candles
@@ -98,6 +99,37 @@ def _std(xs: list[float]) -> float:
     return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
 
 
+def _historical_scale(returns: list[float], t: int) -> float:
+    """Causal volatility: data strictly BEFORE sample t, never end-of-fit values."""
+    return _std(returns[max(0, t - 24):t])
+
+
+def _hour_dt(raw: str) -> datetime | None:
+    try:
+        d = datetime.fromisoformat(str(raw).strip().replace('Z', '+00:00'))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _is_next_h1(old: str, new: str) -> bool:
+    a, b = _hour_dt(old), _hour_dt(new)
+    return bool(a and b and b - a == timedelta(hours=1))
+
+
+def _following_closed_bar(bars: list[Candle], old_dt: str) -> Candle | None:
+    """Find the actual adjacent closed H1 even when scheduler missed multiple jobs."""
+    old = _hour_dt(old_dt)
+    if old is None:
+        return None
+    expected = old + timedelta(hours=1)
+    for bar in bars:
+        stamp = _hour_dt(bar.dt)
+        if stamp == expected:
+            return bar
+    return None
+
+
 def fit_edge(returns: list[float], embargo: int, train: int) -> tuple[float, float, float] | None:
     """Оценивает a, b и средний доход holdout для r_{t+1} ~ a + b x_t.
 
@@ -114,8 +146,9 @@ def fit_edge(returns: list[float], embargo: int, train: int) -> tuple[float, flo
     xs: list[float] = []
     ys: list[float] = []
     for t in range(start, end - 1):
-        window = returns[max(0, t - 24):t]
-        scale = _std(window) or _std(returns[start:end]) or 1e-8
+        scale = _historical_scale(returns, t)
+        if scale <= 1e-12 or not math.isfinite(scale):
+            continue  # no informative volatility at this historical instant
         xs.append(returns[t] / scale)
         ys.append(returns[t + 1])
     if len(xs) < 30:
@@ -171,11 +204,21 @@ def paper_snapshot(state: dict) -> tuple[float, float, bool]:
     return equity, dd, muted
 
 
-def _settle(state: dict, symbol: str, last_close: float, last_dt: str) -> None:
+def _settle(state: dict, symbol: str, last_close: float, last_dt: str,
+            bars: list[Candle] | None = None) -> None:
     book = state.setdefault("book", {"equity": 1.0, "peak": 1.0, "open": {}, "muted": False})
     open_trades = book.setdefault("open", {})
     trade = open_trades.get(symbol)
     if not trade or trade.get("dt") == last_dt:
+        return
+    # One-hour evaluation must not silently become a 3-hour evaluation.
+    if bars is not None:
+        actual = _following_closed_bar(bars, str(trade.get("dt", "")))
+        if actual is not None:
+            last_close, last_dt = float(actual.close), str(actual.dt)
+    if not _is_next_h1(str(trade.get("dt", "")), last_dt):
+        book["unresolved_h1_gaps"] = int(book.get("unresolved_h1_gaps", 0)) + 1
+        open_trades.pop(symbol, None)
         return
     entry = float(trade["price"])
     if entry <= 0 or last_close <= 0:
@@ -221,16 +264,19 @@ def _observe_calibration(state: dict, symbol: str, bars: list[Candle]) -> None:
             slot = candidates.setdefault(key, {"recent": [], "open": None})
             old = slot.get("open")
             if isinstance(old, dict) and old.get("dt") != dt:
+                following = _following_closed_bar(bars, str(old.get("dt", "")))
                 entry = float(old.get("price", 0.0))
-                if entry > 0 and price > 0:
-                    actual = math.log(price / entry)
+                if following is None:
+                    slot["n_unresolved_h1_gaps"] = int(slot.get("n_unresolved_h1_gaps", 0)) + 1
+                elif entry > 0 and float(following.close) > 0:
+                    actual = math.log(float(following.close) / entry)
                     pred = float(old.get("expected", 0.0))
                     cost = float(old.get("cost", 0.0))
                     side = 1.0 if pred >= 0 else -1.0
                     net = side * actual - cost
                     rec = slot.setdefault("recent", [])
                     rec.append({
-                        "forecast_dt": old.get("dt"), "settled_dt": dt,
+                        "forecast_dt": old.get("dt"), "settled_dt": following.dt,
                         "expected": pred, "actual": actual, "cost": cost,
                         "net": net, "hit": bool(side * actual > 0),
                     })
@@ -265,8 +311,9 @@ def format_message(view: EdgeView) -> str:
         f"📐 EDGE H1 · {view.symbol} · {view.side}",
         "Оценка следующего часа, не прогноз дня и не ордер.",
         f"Условный сдвиг: {_pct(view.expected)}",
-        f"Издержки: {_pct(view.cost)}",
-        f"Запас после издержек: {_pct(view.edge)}",
+        f"Модельные издержки (условный спред): {_pct(view.cost)}",
+        f"Расчётный запас после издержек: {_pct(view.edge)}",
+        "Запас не подтверждён реальными спредами, проскальзыванием или исполнением.",
         f"Цена закрытия: {_fmt(view.symbol, view.price)}",
         f"Цель часа: {_fmt(view.symbol, view.target)}",
         "Это одна цена на условный сдвиг следующего часа, не TR1–TR3.",
@@ -284,7 +331,7 @@ def analyze_symbol(symbol: str, by_tf: dict, state: dict) -> EdgeView | None:
     min_bars = int(getattr(cfg, "EDGE_MIN_BARS", 140))
     if len(bars) < min_bars:
         return None
-    _settle(state, symbol, bars[-1].close, bars[-1].dt)
+    _settle(state, symbol, bars[-1].close, bars[-1].dt, bars=bars)
     _, _, muted = paper_snapshot(state)
     if muted and not bool(getattr(cfg, "EDGE_ALLOW_WHEN_MUTED", False)):
         return None

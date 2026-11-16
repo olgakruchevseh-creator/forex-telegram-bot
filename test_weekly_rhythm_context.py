@@ -111,7 +111,7 @@ def test_early_candidate_is_observational_only(monkeypatch):
 def test_early_event_is_explicitly_not_confirmed():
     x=w.WeeklyRhythmContext(2,'ВТ',1,1.01,.99,1,.5,'DISCOUNT','DISCOUNT','ПОИСК_ЭКСТРЕМУМА',0,'',False,'','', '',.2,None,'','FORMING','RANGE',40,'КАНДИДАТ',0,False,
         early_candidate='LOW', early_candidate_day='ПН', early_departure_atr=.20, detection_lag_hours=4, missed_move_pct=12)
-    assert w._event_kind(x)=='РАННИЙ_КАНДИДАТ:LOW'
+    assert w._event_kind(x)==''  # early candidate is briefing-only, not a Telegram event
     text=w.format_alert('EUR/USD',x)
     assert 'РАННИЙ КАНДИДАТ — НЕ ВХОД' in text
     assert 'Направление: НАПРАВЛЕНИЕ НЕ ПОДТВЕРЖДЕНО' in text

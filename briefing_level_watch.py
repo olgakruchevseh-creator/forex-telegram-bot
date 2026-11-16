@@ -104,7 +104,12 @@ def register_briefing(session: str, symbol: str, snapshot: dict,
             if row.get("state") in ("пробита", "недействительна"):
                 continue
             ident = hashlib.sha256(f"{session}|{symbol}|{kind}|{low:.7f}|{high:.7f}".encode()).hexdigest()[:24]
-            records.append((ident, label, kind, low, high, str(row.get("status") or ""), str(row.get("tfs_text") or "")))
+            try:
+                current = float(info.get("current_price"))
+            except (ValueError, TypeError):
+                current = float("nan")
+            initially_inside = int(kind == "current" and math.isfinite(current) and low <= current <= high)
+            records.append((ident, label, kind, low, high, str(row.get("status") or ""), str(row.get("tfs_text") or ""), initially_inside))
     if not records or not session or not symbol:
         return 0
     expiry = now + timedelta(hours=max(3, min(48, int(getattr(cfg, "BRIEF_LEVEL_WATCH_HOURS", 18)))))
@@ -117,11 +122,11 @@ def register_briefing(session: str, symbol: str, snapshot: dict,
             return 0
         # Do not send a second stream for stale zones from an earlier briefing.
         conn.execute("UPDATE watched SET active=0 WHERE symbol=? AND active=1", (symbol,))
-        for ident, label, kind, low, high, lifecycle, tfs in records:
+        for ident, label, kind, low, high, lifecycle, tfs, initially_inside in records:
             cur = conn.execute("""INSERT OR IGNORE INTO watched
-                (id, session, symbol, label, kind, low, high, as_of_h1, published_at, expires_at, lifecycle, tfs)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (ident, session, symbol, label, kind, low, high, _stamp(opened), _stamp(now), _stamp(expiry), lifecycle, tfs))
+                (id, session, symbol, label, kind, low, high, as_of_h1, published_at, expires_at, lifecycle, tfs, in_contact)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ident, session, symbol, label, kind, low, high, _stamp(opened), _stamp(now), _stamp(expiry), lifecycle, tfs, initially_inside))
             inserted += max(0, cur.rowcount)
         # Keep finite history, never delete not-yet-delivered reports.
         cutoff = _stamp(now - timedelta(days=30))
@@ -311,45 +316,63 @@ def ack_report(event_id: str, *, path: Path | None = None, sent: bool = True) ->
 
 def claim_short_digests(*, path: Path | None = None, now: datetime | None = None,
                         limit: int = 5) -> list[dict]:
-    """At most one short Telegram report per pair and H1, combining level events.
+    """One compact cross-pair digest per closed H1 (split only for Telegram size).
 
-    The underlying event journal retains individual event facts. A 10-minute
-    lease avoids a flood from concurrent schedulers; ACK follows Telegram.
+    Lease/ACK is still per original event ID: a partially delivered batch only
+    acknowledges successfully sent chunks, so Telegram errors are retriable.
     """
     now = now or _now()
-    max_digests = max(1, min(7, int(limit)))
-    groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    max_chunks = max(1, min(7, int(limit)))
     with _open(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        # Old backlogged events must not surface as if they happened now.
         cutoff = _stamp(now - timedelta(hours=30))
         conn.execute("UPDATE watch_events SET sent_at='expired' WHERE sent_at='' AND h1<?", (cutoff,))
         rows = conn.execute("""SELECT id, watch_id, symbol, h1, event, report
             FROM watch_events WHERE sent_at='' AND (claimed_until='' OR claimed_until<=?)
-            ORDER BY h1, created_at LIMIT 100""", (_stamp(now),)).fetchall()
-        for row in rows:
-            key = (row['symbol'], row['h1'])
-            if key not in groups and len(groups) >= max_digests:
-                break
-            groups.setdefault(key, []).append(row)
+            ORDER BY h1, symbol, created_at LIMIT 100""", (_stamp(now),)).fetchall()
+        if not rows:
+            return []
+        # Do not merge distinct closing H1s; process oldest first, remaining next scan.
+        h1 = rows[0]['h1']
+        closed = _parse_dt(h1)
+        if closed is None:
+            return []
+        heading = ("📍 LEVELS · СОПРОВОЖДЕНИЕ БРИФИНГА\n"
+                   f"Закрытая H1: {(closed + timedelta(hours=1)).strftime('%d.%m.%Y %H:%M')} UTC")
+        footer = "OBSERVE_ONLY · исходные зоны брифинга · не торговый сигнал"
         hold = _stamp(now + timedelta(minutes=10))
         out = []
-        for (symbol, h1), parts in groups.items():
-            selected = parts[:5]
-            lines = [f"📍 LEVELS · {symbol} · сопровождение брифинга",
-                     f"Закрытая H1: {(_parse_dt(h1) + timedelta(hours=1)).strftime('%d.%m.%Y %H:%M')} UTC"]
-            ids=[]
-            for row in selected:
-                body = row['report'].splitlines()
-                source = next((v for v in body if v.startswith('S1 ') or v.startswith('S2 ') or
-                               v.startswith('R1 ') or v.startswith('R2 ') or v.startswith('Z1 ')), '')
-                event = next((v.removeprefix('Событие: ') for v in body if v.startswith('Событие: ')), row['event'])
-                lines.append(f"• {source} · {event}")
-                ids.append(row['id'])
-                conn.execute("UPDATE watch_events SET claimed_until=? WHERE id=? AND sent_at=''", (hold, row['id']))
-            lines.append('OBSERVE_ONLY · исходные зоны брифинга · не торговый сигнал')
-            out.append({'ids': ids, 'symbol': symbol, 'h1': h1, 'report': '\n'.join(lines)})
-    return out
+        lines = [heading]
+        ids = []
+        last_symbol = None
+
+        def flush():
+            nonlocal lines, ids, last_symbol
+            if ids:
+                out.append({'ids': ids, 'symbol': 'ALL', 'h1': h1,
+                            'report': '\n'.join(lines + [footer])})
+            lines, ids, last_symbol = [heading], [], None
+
+        for row in rows:
+            if row['h1'] != h1:
+                break
+            body = row['report'].splitlines()
+            source = next((v for v in body if v.startswith(('S1 ', 'S2 ', 'R1 ', 'R2 ', 'Z1 '))), '')
+            event = next((v.removeprefix('Событие: ') for v in body if v.startswith('Событие: ')), row['event'])
+            newlines = ([row['symbol']] if row['symbol'] != last_symbol else []) + [f"• {source} · {event}"]
+            prospective = '\n'.join(lines + newlines + [footer])
+            if ids and len(prospective) > 3500:
+                flush()
+                if len(out) >= max_chunks:
+                    break
+                newlines = [row['symbol'], f"• {source} · {event}"]
+            lines.extend(newlines)
+            last_symbol = row['symbol']
+            ids.append(row['id'])
+            conn.execute("UPDATE watch_events SET claimed_until=? WHERE id=? AND sent_at=''", (hold, row['id']))
+        if len(out) < max_chunks:
+            flush()
+        return out
 
 
 def ack_digest(ids: list[str], *, path: Path | None = None, sent: bool = True) -> None:

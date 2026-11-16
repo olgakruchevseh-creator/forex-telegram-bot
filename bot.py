@@ -753,7 +753,7 @@ async def _observe_and_send_brief_levels(app: Application, chat_id: int, market:
         return
     try:
         briefing_level_watch.observe_market(market)
-        batch = briefing_level_watch.claim_short_digests(limit=5)
+        batch = briefing_level_watch.claim_short_digests(limit=7)
     except Exception:
         log.exception("BRIEF_LEVEL_WATCH_OBSERVE_FAILED")
         return
@@ -1969,6 +1969,17 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                             log.exception("UNIFIED_INFO_SEND_FAILED source=%s", ruling.source)
                         else:
                             _mark_event_delivered(state, info_id)
+                            if "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in raw:
+                                try:
+                                    weekly_rhythm_context.mark_delivered(raw)
+                                except Exception:
+                                    log.exception("WEEKLY_RHYTHM_INFO_ACK_FAILED")
+                    elif "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in raw:
+                        # Legacy INFO was delivered globally before module ACK existed.
+                        try:
+                            weekly_rhythm_context.mark_delivered(raw)
+                        except Exception:
+                            log.exception("WEEKLY_RHYTHM_INFO_RECONCILE_FAILED")
                 continue
             if ruling.status != "ALLOW":
                 log.info("UNIFIED_SIGNAL_BLOCK source=%s pair=%s side=%s reason=%s",
