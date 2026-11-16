@@ -1590,6 +1590,19 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     summary = compact_status()
                     log.info("OHLC_JOURNAL_COVERAGE %s",
                              json.dumps(summary, ensure_ascii=False))
+                    # Read-only MTF/session audit: separate from live market
+                    # validity and trade decisions; runs at most every 6h.
+                    try:
+                        from ohlc_quality_audit import observe as observe_ohlc_quality
+                        quality = observe_ohlc_quality()
+                        log.info("OHLC_QUALITY_OBSERVE_ONLY grade=%s flags=%s "
+                                    "source_ambiguous=%s/weekend_h1=%s",
+                                    quality["replay_quality_grade"],
+                                    ",".join(quality["flags"]) or "NONE",
+                                    quality["source_provenance"]["ambiguous_rows"],
+                                    quality["weekend_open_utc"]["H1"]["rows"])
+                    except Exception:
+                        log.exception("OHLC_QUALITY_OBSERVE_UNAVAILABLE")
                     _scan_job_impl._ohlc_coverage_at = time.time()
             except Exception:
                 log.exception("OHLC_JOURNAL_SAVE_FAILED")

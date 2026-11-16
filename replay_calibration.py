@@ -218,6 +218,12 @@ def _build_calibration(outcomes):
                       'calibrated_tr1_probability':(round(c['tr1']/c['tr1_known'],3) if mature and c['tr1_known'] else None),
                       'trade_effect':False}
     return {'schema':1,'mode':'OBSERVE_ONLY','updated_utc':datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            # The source/session basis of the existing OHLC archive has not
+            # been independently verified. Keep the numerical observational
+            # statistics but never label them certified trading performance.
+            'data_quality_grade':'UNVERIFIED_SOURCE_AND_SESSION',
+            'verified_profitability_claim':False,
+            'data_quality_note':'OHLC из архива и текущего рынка: сессии, D1/W1 и исходный API/кэш требуют проверки; ретроспективный replay не доказывает исполнение сделки.',
             'note':'Calibration statistics never alter trading decisions automatically.',
             'probability_activation':'DISABLED_UNTIL_DELAYED_RELIABILITY_IS_STABLE',
             'groups':summary,'module_pair_regime_cells':readiness}
@@ -298,6 +304,8 @@ def update(market:dict)->int:
             log.exception('REPLAY_INVALID_SAMPLE decision_id=%s pair=%s', did, pair)
             continue
         if result:
+            result['data_quality_grade'] = 'UNVERIFIED_SOURCE_AND_SESSION'
+            result['verified_execution_claim'] = False
             _append(result)
             try:
                 layer14_adaptive_confidence.ingest(rec, result)
