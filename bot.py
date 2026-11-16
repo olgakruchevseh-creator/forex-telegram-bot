@@ -2248,6 +2248,36 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception:
                 log.exception("Запись этапа MASTER_CONFIRMED пропущена")
+            # LAST-MILE HARD GATE: validate the very Navigator targets that
+            # will accompany this Telegram trade BEFORE any delivery or ACK.
+            # Earlier context may have used another route, and Patterns skip
+            # the general significance gate by design. Neither is an exemption.
+            key = (pair, direct_side)
+            companion = next((
+                (card, navigator_sources[card]) for _p, card in confirmed_alerts
+                if (_alert_pair(card), _direct_signal_side(card)) == key
+            ), None)
+            if not companion:
+                try:
+                    companion = signal_navigator.build_source_companion(source_text, market, strength)
+                except Exception:
+                    log.exception("FINAL_NAVIGATOR_BUILD_FAILED pair=%s", pair)
+                    companion = None
+            final_route_gate = signal_navigator.validate_final_trade_route(source_text, market, companion)
+            if not final_route_gate.get("eligible"):
+                log.warning("FINAL_ROUTE_BLOCK pair=%s side=%s reason=%s", pair, direct_side,
+                            final_route_gate.get("reason"))
+                try:
+                    decision_journal.record_stage(
+                        source_text, market, strength, "BLOCKED",
+                        bundle.get("allies") or [],
+                        {**(bundle.get("ctx") or {}), "final_entry_gate": final_route_gate},
+                        "final_route_" + str(final_route_gate.get("reason") or "unknown"),
+                        master=matching_master,
+                    )
+                except Exception:
+                    log.exception("FINAL_ROUTE_DECISION_JOURNAL_FAILED")
+                continue
             source_event_id = _source_event_id(source_text)
             _enqueue_source(state, source_text, source_ids.get(source_text) or signal_release_guard.infer_source(source_text))
             save_state(state)
@@ -2372,21 +2402,16 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             # targets with Pivot stages. Snapshot it BEFORE recording SENT.
             pair = _alert_pair(text)
             direct_side = _direct_signal_side(text)
-            key = (pair, direct_side)
-            companion = next((
-                (card, navigator_sources[card]) for _p, card in confirmed_alerts
-                if (_alert_pair(card), _direct_signal_side(card)) == key
-            ), None)
-            if not companion and pair and direct_side:
-                try:
-                    companion = signal_navigator.build_source_companion(source_text, market, strength)
-                except Exception:
-                    log.exception("NAVIGATOR_CONTEXT_SKIPPED stage=source_companion pair=%s", pair)
-                    companion = None
+            # The companion was frozen and checked BEFORE the source was sent.
+            # Do not substitute a different route after Telegram delivery.
             matching_master = _master_result_for(pair, direct_side, master_results)
             # Telemetry must never prevent or veto a successfully delivered trade.
             try:
                 journal_ctx = dict(bundle.get("ctx") or {})
+                journal_ctx["final_entry_gate"] = final_route_gate
+                if final_reviews:
+                    journal_ctx["h1_release_close_utc"] = final_reviews[0].h1_closed_at
+                    journal_ctx["source_release_checks"] = list(final_reviews[0].checks)
                 if companion:
                     route = decision_journal.navigator_route_snapshot(companion[0])
                     if route:

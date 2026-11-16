@@ -1127,6 +1127,84 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
     return "\n".join(lines)
 
 
+
+def validate_final_trade_route(source_text: str, market: dict, companion) -> dict:
+    """Mandatory last-mile execution check on the EXACT Navigator card.
+
+    Earlier context and significance gates may use another target ladder. Never
+    let a pattern or an already-active same-side route bypass this check. Only
+    closed H1 candles are used to establish the present price; no live quotes.
+    """
+    def verdict(eligible, reason, **extra):
+        return {"eligible": eligible, "reason": reason, **extra}
+
+    pair, side = _pair(source_text), _side(source_text)
+    if not pair or side not in ("LONG", "SHORT"):
+        return verdict(False, "invalid_source_identity")
+    if not companion or not isinstance(companion, tuple) or not companion[0]:
+        return verdict(False, "no_final_navigator_route")
+    card = companion[0]
+    if _pair(card) != pair or _side(card) != side:
+        return verdict(False, "navigator_identity_mismatch")
+    try:
+        route = _scenario_from_card(card)
+        targets = route.get("targets") or []
+        if not targets:
+            return verdict(False, "final_tr1_missing")
+        prices = [float(item["price"]) for item in targets]
+        anchor = float(route.get("anchor") or 0)
+        h1 = movement_progress._bars((market.get(pair) or {}), "H1")
+        if not h1:
+            return verdict(False, "final_h1_missing")
+        current = float(h1[-1].close)
+    except (ValueError, TypeError, OverflowError, KeyError, IndexError, AttributeError):
+        return verdict(False, "invalid_final_route")
+    if (not math.isfinite(current) or current <= 0 or not math.isfinite(anchor)
+            or anchor <= 0 or not all(math.isfinite(price) and price > 0 for price in prices)):
+        return verdict(False, "invalid_final_route")
+    direction = 1 if side == "LONG" else -1
+    # Check each actual published TR, not the source module's older target.
+    epsilon = max(current * 1e-8, 1e-9)
+    if (prices[0] - current) * direction <= epsilon:
+        return verdict(False, "final_tr1_already_passed", h1_close_price=current, tr1=prices[0])
+    if any((prices[i] - prices[i-1]) * direction <= epsilon for i in range(1, len(prices))):
+        return verdict(False, "final_targets_not_forward", h1_close_price=current, tr1=prices[0])
+    span = (prices[0] - anchor) * direction
+    if span <= epsilon:
+        return verdict(False, "invalid_final_entry_anchor", h1_close_price=current, tr1=prices[0])
+    progress = max(0.0, min(100.0, 100.0 * (current - anchor) * direction / span))
+    # The card may have been constructed from an active route's event price.
+    # Never let its printed progress (which can be newer than the source card)
+    # contradict the observed H1-close entry geometry.
+    printed = _float_line(card, "Путь от старта до TR1 пройден")
+    effective = max(progress, printed)
+    # Human-readable Navigator modes include translated pullback variants.
+    pullback = (route.get("mode") == "PULLBACK" or
+                "ОТКАТ" in _line(card, "Режим").upper())
+    limit = float(getattr(cfg, "CONTEXT_PULLBACK_MAX_PROGRESS_PCT", 25) if pullback else
+                  getattr(cfg, "SIGNAL_INITIAL_MAX_PROGRESS_PCT", 35))
+    evidence = {"h1_close_price": current, "tr1": prices[0],
+                "progress_pct": round(effective, 2), "max_progress_pct": limit,
+                "final_route_targets": [round(v, 8) for v in prices],
+                "h1_open_dt": str(h1[-1].dt)}
+    if effective > limit:
+        return verdict(False, "final_tr1_progress_late", **evidence)
+    # Two source events for the same still-active route are one trading idea,
+    # not two fresh Telegram entries. Lifecycle updates remain independent.
+    active = (_load().get("active") or {}).get(pair) or {}
+    if active.get("status") == "ACTIVE" and active.get("side") == side:
+        try:
+            previous_targets = active.get("targets") or []
+            old_tr1 = float(previous_targets[0]["price"])
+            # Price quantization in cards can be 5 decimals for Forex, 3 for JPY.
+            same_target = abs(old_tr1 - prices[0]) <= (0.000015 if "JPY" not in pair else 0.0015)
+        except (TypeError, KeyError, ValueError, IndexError, OverflowError):
+            same_target = False
+        if same_target:
+            return verdict(False, "existing_active_route_duplicate", **evidence)
+    return verdict(True, "final_route_executable", **evidence)
+
+
 def build_confirmed(master_results: list[dict], market: dict, strength: dict, alerts: list[str]) -> list[tuple[str, list[str]]]:
     """Не публикует сигнал, пока маршрут и Master Direction не совпали."""
     output = []

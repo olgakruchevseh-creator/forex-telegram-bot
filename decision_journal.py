@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib, json, logging, math, os, re
 from collections import deque
 from journal_tail import tail_lines
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import config as cfg
@@ -127,6 +127,33 @@ def _freshness(by_tf):
   except (ValueError,TypeError): pass
   out[tf]={'last_closed':raw,'age_min':round(max(0,(now-dt).total_seconds()/60),1) if dt else None,'close':bars[-1].close}
  return out
+def _ltf_close_evidence(by_tf, direction):
+ """Observed CLOSED lower-timeframe bars, not an invented pattern confirmation.
+
+ A trend-bias vote is neither the identity nor the timestamp of a detector's
+ M15/M5 trigger. Store actual times and bodies to make this distinction auditable.
+ """
+ out={}
+ for tf,mins in (("M15",15),("M5",5)):
+  candles=closed_candles((by_tf or {}).get(tf) or [],mins)
+  if not candles:
+   out[tf]={"available":False,"closed_at_utc":None,"body_aligned":None}
+   continue
+  last=candles[-1]
+  close_utc=None
+  try:
+   stamp=datetime.fromisoformat(str(last.dt).replace('Z','+00:00'))
+   if stamp.tzinfo is None:stamp=stamp.replace(tzinfo=timezone.utc)
+   close_utc=(stamp.astimezone(timezone.utc)+timedelta(minutes=mins)).isoformat()
+  except (TypeError,ValueError,OverflowError):pass
+  try:
+   op,cl=float(last.open),float(last.close)
+   aligned=((cl-op)*direction>0) if all(math.isfinite(v) for v in (op,cl)) and direction else None
+  except (TypeError,ValueError,OverflowError):aligned=None
+  out[tf]={"available":True,"closed_at_utc":close_utc,"body_aligned":aligned}
+ out['interpretation']='OBSERVED_BARS_NOT_DETECTOR_CONFIRMATION'
+ return out
+
 def _families(source_cards):
  # Use the same one-card/one-family classifier that Master employs.
  fam={}
@@ -381,8 +408,11 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(source_cards),
   'master_snapshot':_master_snapshot(master),
   'observed_h1_dt':obs.get('dt') or '','h1_close_price':obs.get('close'),
-  'quality':quality,'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'confirmation_tf':_confirmation_tf(text),'session':_session(local_now),
+  'quality':quality,'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'confirmation_tf':('H1' if (ctx or {}).get('h1_release_close_utc') else _confirmation_tf(text)),'session':_session(local_now),
   'source_tf_contract':inferred_tf,'source_event_close_utc':inferred_close_utc,
+  'verified_h1_close_utc':(ctx or {}).get('h1_release_close_utc'),
+  'final_entry_gate':(ctx or {}).get('final_entry_gate') or {},
+  'ltf_close_evidence':_ltf_close_evidence(by_tf,direction),
   'entry_timing':('late' if 'late_' in str(reason) or (progress is not None and progress > float(getattr(cfg,'SIGNAL_INITIAL_MAX_PROGRESS_PCT',35)) and (ctx or {}).get('mode') != 'PULLBACK') else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
   'residual_potential_pct':(round(max(0.0,100.0-progress),1) if progress is not None else None),
   'confirmation_price':_price(text,['Цена подтверждения','Цена закрытия','Вход']),
