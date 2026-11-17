@@ -1583,6 +1583,29 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     archived["rejected_series"],
                                     json.dumps(issues, ensure_ascii=False))
                         _scan_job_impl._ohlc_last_diagnostics = (signature, time.time())
+                # Observe later provider/cache revisions of ALREADY archived
+                # closed bars. SQLite stays frozen. This tiny read-only comparison
+                # runs in a separate thread so it never delays the H1 scanner.
+                # A bounded JSON report is written to the mounted /data volume.
+                try:
+                    last_close_observe = getattr(_scan_job_impl, "_close_observe_at", 0.0)
+                    observer_task = getattr(_scan_job_impl, "_close_observe_task", None)
+                    if (time.time() - last_close_observe >= 60 and
+                            (observer_task is None or observer_task.done())):
+                        async def _observe_close_revisions(observed_market):
+                            try:
+                                from ohlc_close_revision_observe import observe
+                                result = await asyncio.to_thread(observe, observed_market)
+                                if result["new_unique"]:
+                                    log.warning("OHLC_CLOSE_REVISION_OBSERVE_ONLY %s",
+                                                json.dumps(result, ensure_ascii=False))
+                            except Exception:
+                                log.exception("OHLC_CLOSE_REVISION_OBSERVE_UNAVAILABLE")
+                        _scan_job_impl._close_observe_task = asyncio.create_task(
+                            _observe_close_revisions(market))
+                        _scan_job_impl._close_observe_at = time.time()
+                except Exception:
+                    log.exception("OHLC_CLOSE_REVISION_SCHEDULE_UNAVAILABLE")
                 # Macro surprise versus realized H1: observe only. It uses the
                 # verified pre-release calendar and the persisted H1 archive,
                 # never changes any trade, score or Telegram message. Run at
