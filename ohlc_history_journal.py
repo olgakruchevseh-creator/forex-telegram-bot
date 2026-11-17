@@ -33,6 +33,12 @@ COLUMNS = ("datetime", "open", "high", "low", "close")
 PROVIDER = "Twelve Data"
 # Provenance of the transport path used when the live scan first stores a bar.
 # Never relabel existing rows, and never treat this as vendor attestation.
+# Live evidence showed vendor/cache candle revisions 2-5 min after the
+# theoretical close. Archive only intraday bars with a 5-minute settling lag;
+# this does NOT postpone live H1-close decisions. D1/W1 session timezone is
+# unresolved, so do not apply UTC-day boundary heuristics to those bars.
+ARCHIVE_SETTLING_SECONDS = 300
+INTRADAY_FINALITY_TFS = frozenset(("M5", "M15", "H1", "H4"))
 LIVE_CAPTURE_SOURCES = frozenset({
     "BOT_SCAN_API_RESPONSE",
     "BOT_SCAN_IN_PROCESS_CACHE_TTL",
@@ -316,8 +322,10 @@ def capture_market(market: dict, *, db_path: Path | None = None,
     now = as_of or datetime.now(timezone.utc)
     stats = {"inserted": 0, "pairs": 0, "series": 0, "rejected_series": 0,
              "skipped_open": 0, "skipped_existing": 0,
+             "skipped_settling": 0, "skipped_preclose_snapshot": 0,
              "rejections": [], "by_tf": {tf: {"inserted": 0, "series": 0,
-                 "rejected": 0, "missing": 0} for tf in timeframes}}
+                 "rejected": 0, "missing": 0,
+                 "delayed": 0, "preclose_snapshot": 0} for tf in timeframes}}
     with closing(init_db(db_path or db_default())) as db:
         for pair in cfg.PAIRS:
             series = (market or {}).get(pair) or {}
@@ -341,9 +349,34 @@ def capture_market(market: dict, *, db_path: Path | None = None,
                         if recent and iso(ts) <= recent:
                             stats["skipped_existing"] += 1
                             continue
-                        if ts + timedelta(minutes=INTERVALS[tf][0]) > now:
+                        closed_at = ts + timedelta(minutes=INTERVALS[tf][0])
+                        if closed_at > now:
                             stats["skipped_open"] += 1
                             continue
+                        if tf in INTRADAY_FINALITY_TFS:
+                            # An early response may still carry the provisional
+                            # Close/High/Low. Wait for ordinary scheduled fetches
+                            # rather than freezing the first version in SQLite.
+                            if closed_at + timedelta(seconds=ARCHIVE_SETTLING_SECONDS) > now:
+                                stats["skipped_settling"] += 1
+                                stats["by_tf"][tf]["delayed"] += 1
+                                continue
+                            request_times = getattr(market, "request_started_by_series", None)
+                            if isinstance(request_times, dict):
+                                request_time = request_times.get((pair, tf))
+                                try:
+                                    request_time = float(request_time)
+                                    postclose_fetch = (math.isfinite(request_time) and
+                                                       request_time >= closed_at.timestamp() and
+                                                       request_time <= now.timestamp() + 1)
+                                except (TypeError, ValueError, OverflowError):
+                                    postclose_fetch = False
+                                if not postclose_fetch:
+                                    # TTL/fallback must never promote a snapshot
+                                    # fetched *before* the candle closed.
+                                    stats["skipped_preclose_snapshot"] += 1
+                                    stats["by_tf"][tf]["preclose_snapshot"] += 1
+                                    continue
                         current.append({"datetime": iso(ts),
                                         **{key: getattr(bar, key) for key in COLUMNS[1:]}})
                     if current:

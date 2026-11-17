@@ -118,6 +118,10 @@ class MarketBasket(dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.source_by_series: dict[tuple[str, str], str] = {}
+        # Timestamp when the original provider request *started*. The TTL cache
+        # can outlive a candle's closing boundary; this lets the historical
+        # journal reject a pre-close snapshot without changing live signals.
+        self.request_started_by_series: dict[tuple[str, str], float] = {}
 SENT_H1: set[str] = set()
 LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 # Serialize complete session briefing deliveries within each chat.
@@ -308,16 +312,21 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
             for s in cfg.PAIRS:
                 market[s][tf["key"]] = CACHE[(s, tf["key"])]["candles"]
                 market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_TTL"
+                hit = CACHE[(s, tf["key"])]
+                market.request_started_by_series[(s, tf["key"])] = hit.get("request_started_at", hit.get("ts"))
             continue
         try:
+            request_started_at = time.time()
             batch = fetch_tf_batch(tf, api_key)
             ts = time.time()
             for s in cfg.PAIRS:
                 candles = batch.get(s) or []
                 if candles:
-                    CACHE[(s, tf["key"])] = {"ts": ts, "candles": candles}
+                    CACHE[(s, tf["key"])] = {"ts": ts, "candles": candles,
+                                              "request_started_at": request_started_at}
                     market[s][tf["key"]] = candles
                     market.source_by_series[(s, tf["key"])] = "BOT_SCAN_API_RESPONSE"
+                    market.request_started_by_series[(s, tf["key"])] = request_started_at
                     continue
                 # The targeted retry may still fail transiently. Preserve a
                 # previously fetched series for this tick instead of dropping
@@ -327,6 +336,8 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                 if cached:
                     market[s][tf["key"]] = cached
                     market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK"
+                    hit = CACHE.get((s, tf["key"])) or {}
+                    market.request_started_by_series[(s, tf["key"])] = hit.get("request_started_at", hit.get("ts"))
                     log.warning("CACHE_FALLBACK symbol=%s tf=%s", s, tf["key"])
             time.sleep(cfg.REQUEST_PAUSE_SEC)
         except Exception as e:
@@ -336,6 +347,8 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                 if cached:
                     market[s][tf["key"]] = cached
                     market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK"
+                    hit = CACHE.get((s, tf["key"])) or {}
+                    market.request_started_by_series[(s, tf["key"])] = hit.get("request_started_at", hit.get("ts"))
     return market
 
 
@@ -1571,6 +1584,14 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                              archived["inserted"],
                              {tf: v["inserted"] for tf, v in archived["by_tf"].items()},
                              archived["rejected_series"])
+                if (archived.get("skipped_settling") or archived.get("skipped_preclose_snapshot")):
+                    last_finality = getattr(_scan_job_impl, "_ohlc_finality_log_at", 0.0)
+                    if time.time() - last_finality >= 3600:
+                        log.info("OHLC_CAPTURE_FINALITY_OBSERVE_ONLY settling=%s preclose_snapshot=%s "
+                                 "note=archive_only_no_trade_effect",
+                                 archived.get("skipped_settling", 0),
+                                 archived.get("skipped_preclose_snapshot", 0))
+                        _scan_job_impl._ohlc_finality_log_at = time.time()
                 if archived["rejected_series"]:
                     # Report first change and at most once/hour thereafter.
                     # A persistent copy of the full diagnostics is in SQLite.
