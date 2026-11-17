@@ -7,6 +7,7 @@ import math
 import hashlib
 import asyncio
 import gc
+import memory_runtime
 import logging
 import os
 import re
@@ -2708,6 +2709,12 @@ async def _run_serialized_runtime_job(name: str, impl, context: ContextTypes.DEF
                 "RUNTIME_MEMORY name=%s rss_before_mb=%s rss_after_mb=%s chart_cache_evicted=%s",
                 name, before, after, removed,
             )
+            # Informational memory accounting and an optional, rate-limited
+            # release of already-free glibc pages. Never touches signals.
+            try:
+                memory_runtime.post_job(name, before_mb=before, evicted=removed)
+            except Exception:
+                log.exception("RUNTIME_MEMORY_DETAIL_FAILED")
 
 
 async def briefing_job(context: ContextTypes.DEFAULT_TYPE) -> None:

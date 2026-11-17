@@ -19,7 +19,26 @@ from analysis import Candle, atr, closed_candles
 log = logging.getLogger("fxbot.killer.audit")
 TF_MIN = {"D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
 MAX_BARS = {"D1": 100, "H4": 120, "H1": 120, "M15": 90, "M5": 90}
+# Exactly the same 50k-tail deduplication window as on Railway restart.
+# Previously the process-lifetime set grew without limit despite the disk read
+# already being bounded to 50,000 rows.
 _CACHE: dict[str, set] = {}
+_ORDER: dict[str, deque] = {}
+_MAX_DEDUP_IDS = 50000
+
+
+def _remember_seen(key: str, event_id) -> None:
+    if not isinstance(event_id, (str, int)):
+        return
+    seen = _CACHE.setdefault(key, set())
+    order = _ORDER.setdefault(key, deque())
+    if event_id in seen:
+        return
+    if len(order) >= _MAX_DEDUP_IDS:
+        seen.discard(order.popleft())
+    order.append(event_id)
+    seen.add(event_id)
+
 
 
 def _path(name):
@@ -30,15 +49,15 @@ def _path(name):
 def _seen(path):
     key = str(path)
     if key not in _CACHE:
-        found = set()
+        _CACHE[key] = set()
+        _ORDER[key] = deque()
         if path.is_file():
             try:
                 with path.open(encoding="utf-8", errors="replace") as fh:
-                    for line in deque(fh, maxlen=50000):
-                        try: found.add(json.loads(line).get("id"))
+                    for line in deque(fh, maxlen=_MAX_DEDUP_IDS):
+                        try: _remember_seen(key, json.loads(line).get("id"))
                         except (ValueError, TypeError): pass
             except OSError: log.exception("KILLER_AUDIT_DEDUP_LOAD_FAILED")
-        _CACHE[key] = found
     return _CACHE[key]
 
 
@@ -50,7 +69,7 @@ def _write(name, record):
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n")
-        seen.add(record["id"])
+        _remember_seen(str(p), record["id"])
         return True
     except (OSError, TypeError, ValueError):
         log.exception("KILLER_AUDIT_WRITE_FAILED file=%s", name)
