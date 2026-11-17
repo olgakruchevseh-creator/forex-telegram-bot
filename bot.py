@@ -1619,6 +1619,28 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     quality["weekend_open_utc"]["H1"]["rows"])
                     except Exception:
                         log.exception("OHLC_QUALITY_OBSERVE_UNAVAILABLE")
+                    # One bounded, direct Twelve Data re-query of eight
+                    # historical examples. Runs in a worker thread so a slow
+                    # vendor endpoint NEVER blocks the H1 scanner or briefing.
+                    # No candle values, thresholds or SQLite rows are changed.
+                    try:
+                        from ohlc_vendor_probe import needs_probe, run_probe
+                        current_task = getattr(_scan_job_impl, "_vendor_probe_task", None)
+                        if (current_task is None or current_task.done()) and needs_probe():
+                            async def _run_vendor_observer():
+                                try:
+                                    report = await asyncio.to_thread(run_probe)
+                                    statuses = {}
+                                    for case in report["cases"]:
+                                        status = case["status"]
+                                        statuses[status] = statuses.get(status, 0) + 1
+                                    log.info("OHLC_VENDOR_PROBE_OBSERVE_ONLY cases=%s statuses=%s",
+                                             len(report["cases"]), statuses)
+                                except Exception:
+                                    log.exception("OHLC_VENDOR_PROBE_UNAVAILABLE")
+                            _scan_job_impl._vendor_probe_task = asyncio.create_task(_run_vendor_observer())
+                    except Exception:
+                        log.exception("OHLC_VENDOR_PROBE_SCHEDULE_UNAVAILABLE")
                     _scan_job_impl._ohlc_coverage_at = time.time()
             except Exception:
                 log.exception("OHLC_JOURNAL_SAVE_FAILED")
