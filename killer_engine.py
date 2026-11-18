@@ -6,7 +6,7 @@ into families so FVG/BPR/Imbalance or ZigZag/MSS/BOS cannot inflate the score.
 """
 from __future__ import annotations
 import hashlib, io, json, logging, math, os, re, time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
 
@@ -49,6 +49,7 @@ _PENDING: dict[str, dict] = {}
 _FACT_MEMORY: dict[tuple[str,str,str], dict] = {}
 _MEMORY_LOADED = False
 _LAST_REVIEW_H1 = None
+_LAST_HUNTER_SCAN_H1 = None
 _TF_MIN={"D1":1440,"H4":240,"H1":60,"M15":15,"M5":5}
 
 _TF_FRESH_SECONDS={"D1":36*3600,"H4":12*3600,"H1":4*3600,"M15":90*60,"M5":30*60}
@@ -151,8 +152,9 @@ def _memory_texts(pair,side,now=None):
 
 def reset_memory():
  """Test/maintenance hook; clears RAM and skips reloading a leftover state file."""
- global _MEMORY_LOADED
+ global _MEMORY_LOADED, _LAST_HUNTER_SCAN_H1
  _FACT_MEMORY.clear(); _PENDING.clear(); _MEMORY_LOADED=True
+ _LAST_HUNTER_SCAN_H1=None
 
 _FAMILIES={
  "structure":("ZIGZAG","MSS","BOS","QUASIMODO","DOUBLE TOP","DOUBLE BOTTOM","ДВОЙН","ГОЛОВА И ПЛЕЧИ","1-2-3"),
@@ -187,6 +189,81 @@ def _views(by_tf, direction):
   b=closed_candles((by_tf or {}).get(tf) or [],m)
   out[tf]=analyze_tf(tf,tf,b).bias if len(b)>=20 else 0
  return out
+
+def _utc_open(bar):
+ """Twelve Data opening timestamp; naive Forex timestamps are UTC."""
+ try:
+  d=datetime.fromisoformat(str(bar.dt).strip().replace("Z","+00:00"))
+  return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
+ except (ValueError,TypeError,OverflowError,AttributeError):
+  return None
+
+
+def _h1_scan_anchors(market):
+ anchors=[]
+ for pair,by_tf in (market or {}).items():
+  if not isinstance(pair,str) or "/" not in pair or not isinstance(by_tf,dict):continue
+  h1=closed_candles(by_tf.get("H1") or [],60)
+  if len(h1)<25:continue
+  opened=_utc_open(h1[-1])
+  if opened is not None:anchors.append((pair,opened.isoformat()))
+ return tuple(sorted(anchors))
+
+
+def hunter_scan_due(market):
+ """True only for a new CLOSED-H1 market snapshot; does not mutate state."""
+ return (bool(getattr(cfg,"KILLER_HUNTER_ENABLED",True))
+         and bool(_h1_scan_anchors(market))
+         and _h1_scan_anchors(market)!=_LAST_HUNTER_SCAN_H1)
+
+
+def _ltf_confirmation(by_tf, direction, views=None):
+ """Require both LTF feeds anchored to the new H1 and a directional LTF vote.
+
+ A latest M15/M5 bar may close up to 15 minutes AFTER the H1 close while the
+ H1 release window is still open. Older, unclosed and malformed bars never
+ count. This helper never substitutes LTF for a CLOSED H1 trade decision.
+ """
+ h1=closed_candles((by_tf or {}).get("H1") or [],60)
+ anchor=_utc_open(h1[-1]) if h1 else None
+ if anchor is None:return {"fresh":False,"aligned":False,"reason":"missing_h1_timestamp"}
+ h1_end=anchor+timedelta(hours=1)
+ sides=views if views is not None else _views(by_tf,direction)
+ latest={}
+ for tf,mins in (("M15",15),("M5",5)):
+  bars=closed_candles((by_tf or {}).get(tf) or [],mins)
+  if len(bars)<20:return {"fresh":False,"aligned":False,"reason":f"insufficient_{tf.lower()}"}
+  opened=_utc_open(bars[-1])
+  if opened is None:return {"fresh":False,"aligned":False,"reason":f"invalid_{tf.lower()}_timestamp"}
+  closed=opened+timedelta(minutes=mins)
+  # Tolerate the next (already CLOSED) M15/M5 within the 16-minute H1 gate.
+  if not (h1_end<=closed<=h1_end+timedelta(minutes=15)):
+   return {"fresh":False,"aligned":False,"reason":f"{tf.lower()}_not_on_h1","h1_end":h1_end.isoformat(),"ltf_end":closed.isoformat()}
+  latest[tf]=closed.isoformat()
+ votes={tf:int(sides.get(tf) or 0) for tf in ("M15","M5")}
+ aligned=any(v==direction for v in votes.values())
+ return {"fresh":True,"aligned":aligned,"reason":"confirmed" if aligned else "ltf_direction_unconfirmed","votes":votes,"ltf_end":latest,"h1_end":h1_end.isoformat()}
+
+
+def _shadow_diagnostics(families, fam_best, by_tf, direction, strength, pair):
+ """Partial OBSERVE_ONLY metrics, NOT an execution score/probability."""
+ try:
+  views=_views(by_tf,direction)
+  senior=sum(views[t]==direction for t in ("D1","H4","H1"))
+  junior=sum(views[t]==direction for t in ("M15","M5"))
+  a,b=pair.split("/")
+  gap=(float(strength.get(a,0))-float(strength.get(b,0)))*direction
+  if not math.isfinite(gap):gap=0.0
+  quality=sum(fam_best.values())/max(1,len(fam_best))
+  # Deliberately excludes OHLC, traps, risk, maturity and analog adjustments.
+  partial=sum(_WEIGHTS.get(f,0) for f in families)+min(14,senior*3+junior*1.5)
+  partial+=max(-4,min(6,(quality-70)*.18))+max(-3,min(4,gap*18))
+  return {"shadow_partial_points":max(0,min(100,int(round(partial)))),
+          "shadow_complete":False,"shadow_senior":senior,"shadow_ltf_votes":junior,
+          "shadow_ltf":_ltf_confirmation(by_tf,direction,views)}
+ except (TypeError,ValueError,OverflowError,KeyError,ZeroDivisionError):
+  return {"shadow_complete":False,"shadow_error":"unavailable"}
+
 
 def _news_guard(pair, events=None, now_utc=None):
  """Hard veto for NEW KILLER entries around HIGH-impact news on either pair currency."""
@@ -302,10 +379,17 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
   # FVG/imbalance stays — it is a separate inefficiency confirmation.
   families.discard("blocks")
  if len(families)<int(getattr(cfg,"KILLER_MIN_FAMILIES",5)):
-  return {"eligible":False,"reason":"not_enough_independent_families","families":families,"module_trace":module_trace,"po3_fvg_context":po3_ctx,"precision_entry":precision_ctx,"demand_supply_context":demand_supply_ctx,"trap_review":trap_review}
+  # SHADOW is partial diagnostic evidence only. Do NOT promote 4/5 to trade,
+  # use this number as a probability, or change the original rejection reason.
+  shadow=_shadow_diagnostics(families,fam_best,by_tf,direction,strength or {},pair)
+  return {"eligible":False,"reason":"not_enough_independent_families","families":families,"module_trace":module_trace,"po3_fvg_context":po3_ctx,"precision_entry":precision_ctx,"demand_supply_context":demand_supply_ctx,"trap_review":trap_review,
+          "setup_memory_snapshot":setup_ctx.as_dict() if setup_ctx else None,**shadow}
  h1=closed_candles(by_tf.get("H1") or [],60)
  if len(h1)<25:return {"eligible":False,"reason":"insufficient_h1","families":families,"trap_review":trap_review,"module_trace":module_trace}
  views=_views(by_tf,direction); senior=sum(views[x]==direction for x in ("D1","H4","H1")); junior=sum(views[x]==direction for x in ("H1","M15","M5"))
+ ltf=_ltf_confirmation(by_tf,direction,views)
+ if not ltf["fresh"]:return {"eligible":False,"reason":"ltf_not_fresh","ltf_confirmation":ltf,"families":families,"trap_review":trap_review,"module_trace":module_trace}
+ if not ltf["aligned"]:return {"eligible":False,"reason":"ltf_direction_unconfirmed","ltf_confirmation":ltf,"families":families,"trap_review":trap_review,"module_trace":module_trace}
  try:
   base,quote=pair.split("/"); gap=(float(strength.get(base,0))-float(strength.get(quote,0)))*direction
  except Exception: gap=0.0
@@ -375,10 +459,12 @@ def process_candidates(alerts, market, strength):
  keeps fresh event-memory. Execution remains unchanged: >= configured independent
  families, OHLC, late-entry, residual, TF alignment and score threshold.
  """
+ global _LAST_HUNTER_SCAN_H1
  _PENDING.clear(); grouped=defaultdict(list)
+ calendar_ready=True
  try: events=newsmod.load_events()
  except Exception:
-  log.exception("KILLER_NEWS_CALENDAR_FAILED"); events=[]
+  log.exception("KILLER_NEWS_CALENDAR_FAILED"); events=[]; calendar_ready=False
  now_utc=datetime.now(timezone.utc)
  _remember_alerts(alerts)
  for t in alerts:
@@ -398,9 +484,13 @@ def process_candidates(alerts, market, strength):
  for pair,side in sorted(keys):
   texts=_memory_texts(pair,side)
   meta=evaluate(pair,side,texts,market,strength,events=events,now_utc=now_utc)
+  # Calendar outage is not the same as "no news". This veto applies to
+  # KILLER's own publication path even if Master is disabled/unavailable.
+  if not calendar_ready and meta.get("eligible"):
+   meta={**meta,"eligible":False,"reason":"news_calendar_unavailable"}
   _diag(pair,side,meta)
   try:
-   killer_audit.record_attempt(pair,side,meta,(market or {}).get(pair) or {},strength,texts,events,now_utc)
+   killer_audit.record_attempt(pair,side,meta,(market or {}).get(pair) or {},strength,texts,events,now_utc,market=market)
   except Exception:
    log.exception("KILLER_AUDIT_RECORD_FAILED pair=%s side=%s",pair,side)
   fams=sorted(meta.get("families") or [])
@@ -437,6 +527,9 @@ def process_candidates(alerts, market, strength):
    killer_audit.review_outcomes(market,limit=20)
   except Exception:
    log.exception("KILLER_RECHECK_FAILED")
+ # A new market H1 gets one autonomous audit scan. New module alerts still
+ # trigger live evaluations at any permitted time in the same hour.
+ _LAST_HUNTER_SCAN_H1=_h1_scan_anchors(market)
  return out
 
 def event_id_for_alert(text):
@@ -468,11 +561,15 @@ def _diag(pair, side, meta):
    "not_enough_independent_families":"families", "insufficient_h1":"ohlc",
    "late_entry":"late_entry", "late_impulse":"late_entry", "ohlc_contradiction":"ohlc",
    "erl_residual_exhausted":"residual", "critical_tf_contradiction":"htf_ltf",
-   "score_below_threshold":"score", "high_impact_news_veto":"news_guard","invalid_price_or_atr":"mathematics",
+   "score_below_threshold":"score", "high_impact_news_veto":"news_guard",
+   "news_calendar_unavailable":"news_guard", "ltf_not_fresh":"ltf_freshness",
+   "ltf_direction_unconfirmed":"ltf_confirmation", "invalid_price_or_atr":"mathematics",
   }.get(reason,"telegram_ready" if meta.get("eligible") else reason)
   if reason.startswith("trap_"):stage="trap_guard"
   rec={"utc":datetime.now(timezone.utc).isoformat(timespec="seconds"),"pair":pair,"side":side,
        "stage":stage,"reason":reason,"eligible":bool(meta.get("eligible")),"score":meta.get("score"),
+       "shadow_partial_points":meta.get("shadow_partial_points"),"shadow_complete":meta.get("shadow_complete"),
+       "ltf_confirmation":meta.get("ltf_confirmation") or meta.get("shadow_ltf") or {},
        "families":sorted(meta.get("families") or []),"family_count":len(meta.get("families") or []),"trap_review":meta.get("trap_review") or {}}
   path.parent.mkdir(parents=True,exist_ok=True)
   with path.open("a",encoding="utf-8") as f:f.write(json.dumps(rec,ensure_ascii=False,separators=(",",":"))+"\n")

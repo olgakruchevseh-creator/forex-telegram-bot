@@ -10,6 +10,11 @@ import logging
 import math
 import os
 from collections import deque
+from contextlib import contextmanager
+from copy import deepcopy
+import divergence_context
+import baskerville_context
+import setup_memory
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -107,7 +112,7 @@ def _event_snapshot(events):
             for e in (events or [])][:100]
 
 
-def record_attempt(pair, side, meta, by_tf, strength, texts, events, now_utc):
+def record_attempt(pair, side, meta, by_tf, strength, texts, events, now_utc, *, market=None):
     """One record per *distinct verdict* per closed H1; never one per poll/tick."""
     if not getattr(cfg, "KILLER_AUDIT_ENABLED", True): return
     snap = _closed_snapshot(by_tf)
@@ -126,14 +131,43 @@ def record_attempt(pair, side, meta, by_tf, strength, texts, events, now_utc):
     projection = ({"entry": px, "invalidation": px-direction*risk,
                    "tr1": px+direction*av, "tr2": px+direction*av*1.75,
                    "tr3": px+direction*av*2.5} if px is not None and risk else {})
+    # Store ONLY causally available peer H1 candles needed by SMT. These are
+    # taken at decision time, never reconstructed from the later replay market.
+    peers = {}
+    try:
+        cutoff = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
+        if cutoff.tzinfo is None: cutoff = cutoff.replace(tzinfo=timezone.utc)
+        cutoff = cutoff.astimezone(timezone.utc)
+        for peer, _rel in divergence_context.SMT_PEERS.get(pair, ()):
+            rows = _closed_snapshot(((market or {}).get(peer) or {})).get("H1", [])
+            old = []
+            for item in rows:
+                at = datetime.fromisoformat(item["dt"].replace("Z", "+00:00"))
+                if at.tzinfo is None: at = at.replace(tzinfo=timezone.utc)
+                if at.astimezone(timezone.utc) <= cutoff: old.append(item)
+            if old: peers[peer] = old[-12:]
+    except (ValueError, TypeError, OverflowError):
+        log.warning("KILLER_PEER_SNAPSHOT_UNAVAILABLE pair=%s", pair)
+    # If the verdict carried its original Setup Memory context, keep it frozen.
+    # For legacy/early-return rows record an explicit missing value instead of
+    # reading a changed live decision journal during replay.
+    setup_context = (meta.get("setup_memory_snapshot") or
+                     getattr(meta.get("setup_memory"), "as_dict", lambda: None)())
     payload = {"id": key, "recorded_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                "pair": pair, "side": side, "h1_dt": anchor,
                "status": "CANDIDATE" if meta.get("eligible") else "REJECTED",
-               "reason": reason, "score": _finite(meta.get("score")), "min_score": int(getattr(cfg, "KILLER_SCORE_THRESHOLD", 84)),
+               "reason": reason, "score": _finite(meta.get("score")),
+               "shadow_partial_points": _finite(meta.get("shadow_partial_points")),
+               "shadow_complete": bool(meta.get("shadow_complete", False)),
+               "shadow_ltf": meta.get("shadow_ltf") or {},
+               "ltf_confirmation": meta.get("ltf_confirmation") or {},
+               "min_score": int(getattr(cfg, "KILLER_SCORE_THRESHOLD", 84)),
                "family_count": len(family_names), "min_families": int(getattr(cfg, "KILLER_MIN_FAMILIES", 5)),
                "families": family_names, "trap_review": meta.get("trap_review") or {},
                "module_trace": meta.get("module_trace") or {},
                "projection_observe_only": projection, "snapshot": snap,
+               "smt_peer_h1": peers, "smt_peer_snapshot_version": 1 if market is not None else 0,
+               "setup_memory_snapshot": setup_context,
                "strength": {str(k): _finite(v) for k,v in (strength or {}).items()},
                "source_fact_hashes": [hashlib.sha256(t.encode()).hexdigest()[:18] for t in texts],
                "source_facts": list(texts)[:35],  # reproducibility: no private tokens/headers
@@ -149,6 +183,18 @@ def _tail(path, limit=180):
     except (OSError, ValueError):
         log.exception("KILLER_AUDIT_READ_FAILED file=%s", path)
         return []
+
+
+@contextmanager
+def _isolated_replay_state():
+    """A forensic replay may not change the live Baskerville state machine."""
+    saved = deepcopy(baskerville_context._STATE)
+    try:
+        baskerville_context._STATE.clear()
+        yield
+    finally:
+        baskerville_context._STATE.clear()
+        baskerville_context._STATE.update(saved)
 
 
 def review_rejections(market, evaluator, *, limit=6):
@@ -180,15 +226,33 @@ def review_rejections(market, evaluator, *, limit=6):
             for data in row.get("events", []):
                 try: events.append(SimpleNamespace(**{**data,"dt_utc":datetime.fromisoformat(data["dt_utc"])}))
                 except (KeyError, TypeError, ValueError): pass
-            checked = evaluator(pair, side, row.get("source_facts") or [], {pair: frozen},
-                                row.get("strength") or {}, events=events, now_utc=now)
+            frozen_market = {pair: frozen}
+            for peer, peer_h1 in (row.get("smt_peer_h1") or {}).items():
+                if isinstance(peer_h1, list):
+                    frozen_market[peer] = restore({"H1": peer_h1})
+            with _isolated_replay_state(), setup_memory.frozen_replay(row.get("setup_memory_snapshot")):
+                checked = evaluator(pair, side, row.get("source_facts") or [], frozen_market,
+                                    row.get("strength") or {}, events=events, now_utc=now)
             old, new = row.get("reason"), checked.get("reason") or "eligible"
-            verdict = "REPRODUCED" if old == new and bool(checked.get("eligible")) is False else "REPLAY_DIFFERENCE"
+            raw_verdict = "REPRODUCED" if old == new and not checked.get("eligible") else "REPLAY_DIFFERENCE"
+            # Setup Memory is based on a LIVE journal not frozen at decision time.
+            # Until the journal is snapshotted, a mismatch is NOT a proved bug.
+            peers_needed = [p for p, _ in divergence_context.SMT_PEERS.get(pair, ())]
+            missing_peers = [p for p in peers_needed if p not in frozen_market]
+            incomplete = bool(missing_peers or row.get("smt_peer_snapshot_version") != 1
+                              or row.get("setup_memory_snapshot") is None)
+            verdict = ("PARTIAL_CONTEXT_MISMATCH" if incomplete and raw_verdict == "REPLAY_DIFFERENCE"
+                       else raw_verdict)
             # Distinguish a reproducibility mismatch from quality of a trade.
             detail = {"id": f"{row_id}:replay", "utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                       "candidate_id": row_id, "pair": pair, "side": side, "h1_dt": row.get("h1_dt"),
                       "type": "FROZEN_REPLAY", "verdict": verdict, "original_reason": old,
                       "replayed_reason": new, "replayed_score": _finite(checked.get("score")),
+                      "peer_snapshot_complete": not bool(missing_peers),
+                      "replay_is_fully_reproducible": False,
+                      "missing_smt_peers": missing_peers,
+                      "setup_memory_snapshot_complete": row.get("setup_memory_snapshot") is not None,
+                      "context_note": "Replay использует замороженный Setup Memory или пометку об отсутствии; прочие контексты могут отличаться",
                       "note": "Никакого возобновления старого входа; нужен новый H1 и все защитные фильтры"}
             if _write("killer_reviews.jsonl", detail): completed += 1
         except Exception:
@@ -267,7 +331,10 @@ def daily_digest(day):
            "critical_tf_contradiction":"конфликт таймфреймов",
            "ohlc_contradiction":"противоречие свечей",
            "erl_residual_exhausted":"исчерпан маршрут",
-           "invalid_price_or_atr":"ошибка цены/ATR"}
+           "invalid_price_or_atr":"ошибка цены/ATR",
+           "ltf_not_fresh":"M15/M5 недостаточно свежие",
+           "ltf_direction_unconfirmed":"M15/M5 не подтверждают направление",
+           "news_calendar_unavailable":"календарь новостей недоступен"}
     top = ", ".join(f"{names.get(name,name)} {n}" for name,n in reasons.most_common(3)) or "—"
     ids={r.get("id") for r in rows}
     reviews=[r for r in _tail(_path("killer_reviews.jsonl"),5000) if r.get("candidate_id") in ids]

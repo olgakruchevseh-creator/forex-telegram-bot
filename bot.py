@@ -2139,8 +2139,10 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         mandatory_level_breakouts = [text for text in mandatory_level_breakouts if text in allowed_texts]
         mandatory_pdh_pdl = [text for text in mandatory_pdh_pdl if text in allowed_texts]
         raw_alerts = [text for _priority, text in source_alerts]
-        # Killer consumes only facts that already passed the shared H1/trap gate.
-        if getattr(cfg, "KILLER_ENABLED", True) and raw_alerts:
+        # A Hunter-only scan is due once per NEW closed H1 even with no admitted
+        # detector card. All Killer cards still pass the SAME shared and Master
+        # delivery gates; a bare memory fact cannot bypass them.
+        if getattr(cfg, "KILLER_ENABLED", True) and (raw_alerts or killer_engine.hunter_scan_due(market)):
             try:
                 for text in killer_engine.process_candidates(raw_alerts, market, strength):
                     source_ids[text] = "killer_engine"

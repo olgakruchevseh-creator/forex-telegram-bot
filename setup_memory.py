@@ -1,5 +1,7 @@
 """Historical analog context from mature Decision Journal records. No synthetic history."""
 from dataclasses import dataclass, asdict
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import decision_journal
 from journal_tail import tail_jsonl_fields
@@ -8,7 +10,26 @@ class SetupAnalog:
     available:bool=False; samples:int=0; favorable:int=0; unfavorable:int=0; effectiveness:float|None=None; alignment:int=0; reason:str=''
     family:str='SETUP_MEMORY'
     def as_dict(self):return asdict(self)
+_FROZEN_REPLAY = ContextVar("setup_memory_frozen_replay", default=None)
+
+@contextmanager
+def frozen_replay(snapshot):
+    """Frozen journal-derived observation; never read today's journal in replay."""
+    token=_FROZEN_REPLAY.set({"active":True,"snapshot":snapshot})
+    try:
+        yield
+    finally:
+        _FROZEN_REPLAY.reset(token)
+
+
 def analyze(symbol,direction,regime='',session='',min_samples=5):
+    replay=_FROZEN_REPLAY.get()
+    if replay is not None:
+        raw=replay.get("snapshot")
+        if isinstance(raw,dict):
+            try:return SetupAnalog(**{k:v for k,v in raw.items() if k in SetupAnalog.__dataclass_fields__})
+            except (TypeError,ValueError):pass
+        return SetupAnalog(reason='replay_journal_snapshot_missing')
     path=decision_journal._path()
     if not path.exists():return SetupAnalog(reason='journal_missing')
     side='LONG' if direction in (1,'LONG') else 'SHORT'
