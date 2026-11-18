@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import config as cfg
 import structural_break_guard
+from journal_tail import tail_lines
 
 
 def _root():
@@ -21,7 +22,7 @@ def _output(): return _root()/'robustness_audit.json'
 def _read_jsonl(path, limit=12000):
     if not path.exists(): return []
     out=[]
-    for line in path.read_text(encoding='utf-8',errors='replace').splitlines()[-limit:]:
+    for line in tail_lines(path, limit):
         try: out.append(json.loads(line))
         except Exception: pass
     return out

@@ -8,6 +8,7 @@ import hashlib
 import asyncio
 import gc
 import memory_runtime
+import memory_scan_stage8
 import logging
 import os
 import re
@@ -1574,6 +1575,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         market = fetch_market(env("TWELVE_DATA_API_KEY"))
+        memory_scan_stage8.mark("fetch_market")
         # Optional OHLC archive of ACTUALLY OBSERVED closed candles. No new API
         # requests; an archive failure cannot veto a trade or change signals.
         if os.getenv("OHLC_JOURNAL_ENABLED", "0").strip() == "1":
@@ -1689,6 +1691,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     _scan_job_impl._ohlc_coverage_at = time.time()
             except Exception:
                 log.exception("OHLC_JOURNAL_SAVE_FAILED")
+        memory_scan_stage8.mark("ohlc_archive")
         # Closed-H1 Livermore Market Key: isolated OBSERVE_ONLY. Never veto signals.
         try:
             from livermore_observer import observe_market
@@ -1704,6 +1707,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.exception("Replay/Calibration update skipped")
         # Journals must continue maturing and scheduled summaries must still be
         # delivered even when a market-data gap blocks live trading.
+        memory_scan_stage8.mark("replay_robustness")
         if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True):
             try:
                 signal_journal.update_market(market)
@@ -1716,6 +1720,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Monitor each available pair independently even when another pair's
         # quotes are incomplete. This is read-only, not a way around signal gates.
         await _observe_and_send_brief_levels(context.application, int(chat_id), market)
+        memory_scan_stage8.mark("reports_levels")
         if not coverage["complete"]:
             log.warning(
                 "MARKET_INCOMPLETE present=%s/%s missing=%s short_h1=%s",
@@ -1758,6 +1763,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         # часового рейтинга обычных кандидатов.
         mandatory_amd_alerts: list[str] = []
 
+        memory_scan_stage8.mark("pre_scanners")
         if getattr(cfg, "DISBALANCE_ENABLED", True):
             try:
                 for text in disbalance.process_market(market, strength):
@@ -1766,6 +1772,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("disbalance"); log.exception("Ошибка модуля дисбаланса")
 
+        memory_scan_stage8.mark("disbalance")
         if getattr(cfg, "IMBALANCE_ENABLED", True):
             try:
                 for text in imbalance.process_market(market, strength):
@@ -1774,6 +1781,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("imbalance"); log.exception("Ошибка модуля Imbalance/FVG")
 
+        memory_scan_stage8.mark("imbalance")
         if getattr(cfg, "BPR_ENABLED", True):
             try:
                 for text in bpr.process_market(market, strength):
@@ -1782,6 +1790,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("bpr"); log.exception("Ошибка модуля BPR")
 
+        memory_scan_stage8.mark("bpr")
         if getattr(cfg, "QUASIMODO_ENABLED", True):
             try:
                 for text in quasimodo_engine.process_market(market, strength):
@@ -1790,6 +1799,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("quasimodo"); log.exception("Ошибка модуля Quasimodo")
 
+        memory_scan_stage8.mark("quasimodo")
         if getattr(cfg, "CONSOLIDATION_ZONE_ENABLED", True):
             try:
                 for text in consolidation_zone.process_market(market, strength):
@@ -1798,6 +1808,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("consolidation_zone"); log.exception("Ошибка модуля Consolidation Zone")
 
+        memory_scan_stage8.mark("consolidation")
         if getattr(cfg, "ACCUMULATION_DISTRIBUTION_ENABLED", True):
             try:
                 for text in accumulation_distribution.process_market(market, strength):
@@ -1806,6 +1817,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("accumulation_distribution"); log.exception("Ошибка модуля накопления/распределения")
 
+        memory_scan_stage8.mark("accumulation")
         if getattr(cfg, "AMD_POWER_OF_THREE_ENABLED", True):
             try:
                 for text in amd_power_of_three.process_market(market, strength):
@@ -1814,6 +1826,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("amd"); log.exception("Ошибка модуля AMD / Power of Three")
 
+        memory_scan_stage8.mark("amd")
         if getattr(cfg, "WEEKLY_RHYTHM_ENABLED", True):
             try:
                 for text in weekly_rhythm_context.process_market(market, strength):
@@ -1822,6 +1835,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("weekly_rhythm"); log.exception("Ошибка модуля Ритм недели")
 
+        memory_scan_stage8.mark("weekly_rhythm")
         if getattr(cfg, "CRT_CANDLE_RANGE_ENABLED", True):
             try:
                 for text in crt_candle_range.process_market(market, strength):
@@ -1830,6 +1844,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("crt"); log.exception("Ошибка модуля CRT / Candle Range Theory")
 
+        memory_scan_stage8.mark("crt")
         if getattr(cfg, "LIQUIDITY_SWEEP_ENABLED", True):
             try:
                 for text in liquidity_sweep.process_market(market, strength):
@@ -1838,6 +1853,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("liquidity_sweep"); log.exception("Ошибка модуля снятия ликвидности")
 
+        memory_scan_stage8.mark("liquidity")
         if getattr(cfg, "POC_ENABLED", True):
             try:
                 for text in poc_profile.process_market(market, strength):
@@ -1847,6 +1863,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 scan_stats.note_fail("poc"); log.exception("Ошибка модуля POC")
 
         invalidated_order_blocks = []
+        memory_scan_stage8.mark("poc")
         if getattr(cfg, "ORDER_BLOCK_ENABLED", True):
             try:
                 for text in order_block.process_market(market, strength):
@@ -1856,6 +1873,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("order_block"); log.exception("Ошибка модуля Order Block")
 
+        memory_scan_stage8.mark("order_block")
         if getattr(cfg, "BREAKER_BLOCK_ENABLED", True):
             try:
                 for text in breaker_block.process_market(market, strength, invalidated_order_blocks):
@@ -1864,6 +1882,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("breaker_block"); log.exception("Ошибка модуля Breaker Block")
 
+        memory_scan_stage8.mark("breaker_block")
         if getattr(cfg, "SMART_MONEY_62_26_ENABLED", True):
             try:
                 for text in smart_money_62_26.process_market(market, strength):
@@ -1872,6 +1891,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("smart_money"); log.exception("Ошибка модуля Smart Money 62-26")
 
+        memory_scan_stage8.mark("smart_money")
         if getattr(cfg, "SILVER_BULLET_ENABLED", True):
             try:
                 try:
@@ -1887,6 +1907,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("silver_bullet"); log.exception("Ошибка модуля ICT Silver Bullet")
 
+        memory_scan_stage8.mark("silver_bullet")
         if getattr(cfg, "DAILY_HIGH_LOW_ENABLED", True):
             try:
                 for text in daily_high_low.process_market(market, strength):
@@ -1902,6 +1923,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("daily_high_low"); log.exception("Ошибка модуля дневного максимума/минимума")
 
+        memory_scan_stage8.mark("daily_high_low")
         if getattr(cfg, "CHAIN_ENTRIES_ENABLED", True):
             try:
                 for text in chain_entries.process_market(market, strength):
@@ -1910,6 +1932,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("chain_entries"); log.exception("Ошибка модуля Chain Entries")
 
+        memory_scan_stage8.mark("chain_entries")
         if getattr(cfg, "RETEST_CONFIRMATION_ENABLED", True):
             try:
                 for text in retest_confirmation.process_market(market, strength):
@@ -1918,6 +1941,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("retest"); log.exception("Ошибка модуля структурного ретеста")
 
+        memory_scan_stage8.mark("retest")
         if getattr(cfg, "FIBONACCI_ENABLED", True):
             try:
                 for text in fibonacci_grid.process_market(market, strength):
@@ -1926,6 +1950,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("fibonacci"); log.exception("Ошибка модуля сетки Фибоначчи")
 
+        memory_scan_stage8.mark("fibonacci")
         if getattr(cfg, "ATS_REVERSAL_ENABLED", True):
             try:
                 for text in ats_reversal_point.process_market(market, strength):
@@ -1934,6 +1959,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("ats"); log.exception("Ошибка модуля ATS Reversal Point")
 
+        memory_scan_stage8.mark("ats_reversal")
         if getattr(cfg, "FIB_SMC_ENABLED", True):
             try:
                 try:
@@ -1950,6 +1976,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 scan_stats.note_fail("fib_smc"); log.exception("Ошибка модуля Fib+SMC")
 
         mandatory_level_breakouts: list[str] = []
+        memory_scan_stage8.mark("fib_smc")
         if getattr(cfg, "LEVELS_ENABLED", True):
             try:
                 try:
@@ -1968,6 +1995,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("levels"); log.exception("Ошибка модуля уровней")
 
+        memory_scan_stage8.mark("levels")
         if getattr(cfg, "ZIGZAG_SCANNER_ENABLED", True):
             try:
                 for text in zigzag_scanner.process_market(market, strength):
@@ -1976,6 +2004,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("zigzag"); log.exception("Ошибка отдельного ZigZag-сканера")
 
+        memory_scan_stage8.mark("zigzag")
         if getattr(cfg, "EDGE_ESTIMATOR_ENABLED", True):
             try:
                 for text in edge_estimator.process_market(market, strength):
@@ -1984,6 +2013,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("edge"); log.exception("Ошибка модуля короткого преимущества")
 
+        memory_scan_stage8.mark("edge_estimator")
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
                 for text in patterns.process_market(market, strength):
@@ -1996,6 +2026,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 scan_stats.note_fail("patterns"); log.exception("Ошибка сканера паттернов")
 
+        memory_scan_stage8.mark("patterns")
         # One admission route for ALL 26 detector sources, including mandatory
         # AMD / Levels / PDH and older retry cards. Unconfirmed M5/M15 cards
         # survive until the next CLOSED H1; stale cards never get a free retry.
@@ -2269,6 +2300,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                         significance.get("efficiency"),
                     )
             delivery_alerts = significant_alerts
+        memory_scan_stage8.mark("admission_and_gates")
         bundles, dropped_facts = _prepare_context_fail_closed(delivery_alerts, market, strength)
         for reason, raw in dropped_facts:
             log.info(
@@ -2597,6 +2629,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("SESSION_REPORT_SCAN_FAILED")
 
+        memory_scan_stage8.mark("delivery_and_lifecycle")
         save_state(state)
         log.info(
             "Скан %s OK top=%s scanners_failed=%s/%s",
@@ -2699,9 +2732,19 @@ async def _run_serialized_runtime_job(name: str, impl, context: ContextTypes.DEF
         return
     async with lock:
         before = _current_rss_mb()
+        if name == "scan_job":
+            try:
+                memory_scan_stage8.begin_scan()
+            except Exception:
+                log.exception("RUNTIME_SCAN_STAGE8_BEGIN_FAILED")
         try:
             await impl(context)
         finally:
+            if name == "scan_job":
+                try:
+                    memory_scan_stage8.finish_scan()
+                except Exception:
+                    log.exception("RUNTIME_SCAN_STAGE8_END_FAILED")
             removed = _trim_runtime_chart_caches()
             gc.collect()
             after = _current_rss_mb()
