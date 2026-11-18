@@ -2,7 +2,7 @@
 from dataclasses import dataclass, asdict
 import json
 import decision_journal
-from journal_tail import tail_lines
+from journal_tail import tail_jsonl_fields
 @dataclass(frozen=True)
 class SetupAnalog:
     available:bool=False; samples:int=0; favorable:int=0; unfavorable:int=0; effectiveness:float|None=None; alignment:int=0; reason:str=''
@@ -14,9 +14,9 @@ def analyze(symbol,direction,regime='',session='',min_samples=5):
     side='LONG' if direction in (1,'LONG') else 'SHORT'
     rows=[]
     try:
-        for line in tail_lines(path, 4000):
-            try:r=json.loads(line)
-            except Exception:continue
+        for r in tail_jsonl_fields(path, 4000, (
+                'pair', 'side', 'status', 'session', 'market_state',
+                'mfe_atr', 'mae_atr', 'replay')):
             if r.get('pair')!=symbol or r.get('side')!=side or r.get('status') not in ('SENT','REPLAY'):continue
             ms=r.get('market_state') or {}; rn=((ms.get('regime') or {}).get('name') if isinstance(ms.get('regime'),dict) else '')
             if regime and rn and rn!=regime:continue

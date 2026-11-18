@@ -6,7 +6,7 @@ verdicts, routing, or Telegram delivery.
 from __future__ import annotations
 import json, logging, os, sqlite3, time
 from collections import defaultdict
-from journal_tail import tail_jsonl
+from journal_tail import tail_jsonl, tail_jsonl_fields
 import math
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -52,8 +52,14 @@ def _records(limit=4000):
     # Memory and I/O safe even when /data/decision_journal.jsonl exceeds 1 GB.
     # The separate SENT history protects delivered trades from being crowded out
     # by thousands of later BLOCKED candidates before the 8H horizon matures.
-    recent=tail_jsonl(_journal(),limit)
-    sent=tail_jsonl(_journal().with_name('decision_sent_history.jsonl'),10000)
+    fields = (
+        'event_id', 'pair', 'side', 'status', 'reason', 'session', 'timeframe',
+        'source', 'quality', 'probability', 'market_state', 'observed_h1_dt',
+        'recorded_utc', 'confirmation_price', 'h1_close_price', 'trigger_price',
+        'targets', 'calibration', 'character_features',
+    )
+    recent=tail_jsonl_fields(_journal(),limit,fields)
+    sent=tail_jsonl_fields(_journal().with_name('decision_sent_history.jsonl'),10000,fields)
     by_id={}
     for rec in recent+sent:
         key=rec.get('event_id')

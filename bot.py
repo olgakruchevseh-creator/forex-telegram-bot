@@ -1702,7 +1702,9 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         # It cannot veto, rerank or modify any live signal.
         try:
             replay_calibration.update(market)
+            memory_scan_stage8.mark("replay_calibration_done")
             robustness_audit.update()
+            memory_scan_stage8.mark("robustness_audit_done")
         except Exception:
             log.exception("Replay/Calibration update skipped")
         # Journals must continue maturing and scheduled summaries must still be
@@ -2070,6 +2072,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         # or still-forming detector MUST NOT vote for another module.
         baseline = {raw: signal_release_guard.review(raw, market, (), source_ids, cache=trap_cache)
                     for _priority, raw in source_alerts}
+        memory_scan_stage8.mark("admission_baseline_done")
         peers = [raw for raw, verdict in baseline.items() if verdict.status == "ALLOW"]
         admitted = []
         allowed_texts = set()
@@ -2119,6 +2122,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             admitted.append((priority, raw))
             allowed_texts.add(raw)
+        memory_scan_stage8.mark("admission_unified_done")
         save_state(state)
         source_alerts = admitted
         module_alerts = [(priority, text) for priority, text in module_alerts if text in allowed_texts]
@@ -2150,6 +2154,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 scan_stats.note_fail("killer"); log.exception("Ошибка KILLER meta-engine")
         # Historical remembered candidates remain research-only; they must NOT
         # revive yesterday's setup or bypass today's H1/trap validation.
+        memory_scan_stage8.mark("admission_killer_done")
         signal_navigator.remember_candidates(raw_alerts, closed_dt)
         candidate_alerts = list(raw_alerts)
         navigator_sources: dict[str, list[str]] = {}
@@ -2210,6 +2215,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                     navigator_sources[text] = sources
                     signal_navigator.register_card(text, sources, closed_dt)
 
+        memory_scan_stage8.mark("admission_master_done")
         # Часовой лимит считает исходные торговые события. Навигатор является
         # обязательным сопровождением выбранного события и этот лимит не тратит.
         # AMD уже будет отправлен обязательным потоком ниже, поэтому повторно

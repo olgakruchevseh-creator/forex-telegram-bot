@@ -7,7 +7,7 @@ module never sends Telegram messages or changes a scanner verdict.
 from __future__ import annotations
 import hashlib, json, logging, math, os, re
 from collections import deque
-from journal_tail import tail_lines
+from journal_tail import tail_jsonl_fields
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -216,10 +216,10 @@ def _ensure_seen_ids(path):
   return
  _SEEN_PATH=key; _SEEN_EVENT_IDS=set(); _SEEN_EVENT_ORDER=deque()
  try:
-  for line in tail_lines(path,_MAX_SEEN_EVENT_IDS):
+  for record in tail_jsonl_fields(path, _MAX_SEEN_EVENT_IDS, ('event_id',)):
    try:
-    _remember_event(json.loads(line).get('event_id'))
-   except (TypeError, ValueError, AttributeError):
+    _remember_event(record.get('event_id'))
+   except (TypeError, ValueError):
     continue
  except Exception:
   log.exception('DECISION_JOURNAL_DEDUP_LOAD_SKIPPED')
