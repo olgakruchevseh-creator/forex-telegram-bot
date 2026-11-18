@@ -118,7 +118,41 @@ def build():
             'correlated_voting_audit':correlated_voting(journal),
             'external_methods_reserved_for_validation':['PSR/DSR','PBO/CSCV','purge+embargo','placebo/permutation','parameter plateau']}
 
+# Both historical inputs are append-only under normal operation. A scan with
+# no new decision/replay records cannot change this OBSERVE_ONLY report.
+_LAST_VALIDATED_INPUTS = None
+_LAST_VALIDATED_OUTPUT = None
+
+
+def _validation_file_signature(path):
+    try:
+        st = path.stat()
+        return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    except FileNotFoundError:
+        return (str(path), None)
+
+
+def _validation_inputs_signature():
+    root = _root()
+    return (_validation_file_signature(root / 'decision_replay.jsonl'),
+            _validation_file_signature(root / 'decision_journal.jsonl'))
+
+
 def update():
-    if not getattr(cfg,'SYSTEM_VALIDATION_BRAIN_ENABLED',True):return None
-    report=build(); p=_root()/'system_validation_report.json'; tmp=p.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8'); tmp.replace(p); return report
+    global _LAST_VALIDATED_INPUTS, _LAST_VALIDATED_OUTPUT
+    if not getattr(cfg,'SYSTEM_VALIDATION_BRAIN_ENABLED',True): return None
+    inputs = _validation_inputs_signature()
+    p = _root() / 'system_validation_report.json'
+    output = _validation_file_signature(p)
+    if inputs == _LAST_VALIDATED_INPUTS and output == _LAST_VALIDATED_OUTPUT:
+        return None
+    report = build()
+    tmp = p.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    tmp.replace(p)
+    if _validation_inputs_signature() == inputs:
+        _LAST_VALIDATED_INPUTS = inputs
+        _LAST_VALIDATED_OUTPUT = _validation_file_signature(p)
+    else:
+        _LAST_VALIDATED_INPUTS = _LAST_VALIDATED_OUTPUT = None
+    return report

@@ -224,6 +224,44 @@ def _ensure_seen_ids(path):
  except Exception:
   log.exception('DECISION_JOURNAL_DEDUP_LOAD_SKIPPED')
 
+def _stage_event_id(text, market, status, reason):
+ """Compute exactly the journal's stable event identity, without telemetry.
+
+ This precheck can skip expensive OBSERVE_ONLY snapshots for a row already
+ written during an earlier minute of the *same closed H1*. The full _base()
+ remains authoritative for new rows, including SENT decisions.
+ """
+ import signal_context
+ pair = signal_context.pair_of(text)
+ side = signal_context.side_of(text)
+ source = signal_context.source_name(text)
+ by_tf = (market or {}).get(pair) or {}
+ observed = _observed_h1(by_tf)
+ basis = '|'.join([pair, side, source, observed.get('dt') or '',
+                   signal_context.event_fingerprint(text)])
+ scenario_id = hashlib.sha256(basis.encode()).hexdigest()[:24]
+ return hashlib.sha256(f'{scenario_id}|{status}|{reason}'.encode()).hexdigest()[:24]
+
+
+def _already_written_stage(text, market, status, reason):
+ """Conservative, fail-open dedup *before* costly journal-only analysis.
+
+ At an hour boundary the last closed bar may change between the lightweight
+ check and the full snapshot. Keep the original slow path during this window.
+ """
+ try:
+  now = _now()
+  if (now.minute == 59 and now.second >= 50) or (now.minute == 0 and now.second < 10):
+   return False
+  path = _path()
+  _ensure_seen_ids(path)
+  event_id = _stage_event_id(text, market, status, reason)
+  return event_id in _SEEN_EVENT_IDS
+ except Exception:
+  # A diagnostics optimization must not suppress records on unexpected input.
+  return False
+
+
 def _character_snapshot(pair, by_tf, strength, ctx):
  # Frozen at signal time; these diagnostics never influence the verdict.
  if not pair:
@@ -426,6 +464,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   'strength_snapshot':{k:strength.get(k) for k in pair.split('/') if k in (strength or {})} if pair else {}}
 def record_decision(text,market,strength,status,reason='',allies=None,ctx=None):
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
+ if _already_written_stage(text,market,status,reason): return
  _append(_base(text,market,strength,status,reason,allies,ctx))
 def _killer_gate_observation(text, reason, market):
  # Audit-only: delivery verdicts from Master / ZigZag / significance / Telegram.
@@ -440,6 +479,11 @@ def _killer_gate_observation(text, reason, market):
 def record_sent(text,market,strength=None,allies=None,ctx=None,master=None):
  """Record delivery while preserving the Signal Context bundle."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
+ # Duplicate SENT rows were previously built in full and then discarded
+ # by _append; preserve the Killer delivery-gate observation on that path.
+ if _already_written_stage(text,market,'SENT','telegram_delivered'):
+  _killer_gate_observation(text,'telegram_delivered',market)
+  return
  rec=_base(text,market,strength or {},'SENT','telegram_delivered',allies,ctx,master)
  rec['delivery']=True
  if _append(rec):
@@ -456,5 +500,6 @@ def record_sent(text,market,strength=None,allies=None,ctx=None,master=None):
 def record_stage(text,market,strength,status,allies=None,ctx=None,reason='',master=None):
  """Passive funnel marker; never participates in a trading verdict."""
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
- _append(_base(text,market,strength or {},status,reason,allies,ctx,master))
+ if not _already_written_stage(text,market,status,reason):
+  _append(_base(text,market,strength or {},status,reason,allies,ctx,master))
  _killer_gate_observation(text,f"{status}:{reason}",market)

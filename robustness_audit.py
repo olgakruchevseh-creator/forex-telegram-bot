@@ -108,10 +108,61 @@ def build(rows):
       'live_effect':'NONE','overall':_metrics(sent),'rolling_oos':_rolling_oos(sent),
       'monte_carlo':_monte_carlo(sent,iterations),'by_pair':_groups(sent,'pair'),'by_source':_groups(sent,'source'),'by_regime':_groups(sent,'regime')}
 
+# The replay file grows only when new decisions mature. Running 1,000 Monte
+# Carlo resamples on every one-minute scan without new outcomes repeats the
+# *same* OBSERVE_ONLY calculation. Keep only tiny file/config signatures.
+_LAST_INPUT_SIGNATURE = None
+_LAST_OUTPUT_SIGNATURE = None
+
+
+def _file_signature(path):
+    try:
+        st = path.stat()
+        return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    except FileNotFoundError:
+        return (str(path), None)
+
+
+def _audit_signature():
+    settings = (
+        int(getattr(cfg, 'ROBUSTNESS_REPLAY_LIMIT', 12000)),
+        int(getattr(cfg, 'ROBUSTNESS_MONTE_CARLO_ITERATIONS', 1000)),
+        bool(getattr(cfg, 'STRUCTURAL_BREAK_GUARD_ENABLED', True)),
+        int(getattr(cfg, 'STRUCTURAL_BREAK_WINDOW', 8)),
+        int(getattr(cfg, 'STRUCTURAL_BREAK_MIN_HISTORY', 24)),
+        float(getattr(cfg, 'STRUCTURAL_BREAK_Z_WARN', -1.5)),
+        float(getattr(cfg, 'STRUCTURAL_BREAK_Z_CONFIRM', -2.25)),
+        int(getattr(cfg, 'STRUCTURAL_BREAK_CONFIRM_WINDOWS', 2)),
+        int(getattr(cfg, 'STRUCTURAL_BREAK_RECOVERY_WINDOWS', 2)),
+        int(getattr(cfg, 'STRUCTURAL_BREAK_COOLDOWN_WINDOWS', 1)),
+    )
+    return (_file_signature(_replay()), settings)
+
+
 def update():
-    if not getattr(cfg,'ROBUSTNESS_AUDIT_ENABLED',True): return None
-    report=build(_read_jsonl(_replay(),int(getattr(cfg,'ROBUSTNESS_REPLAY_LIMIT',12000))))
-    _save(report); return report
+    """Rebuild on new replay outcomes/settings; otherwise reuse the saved report.
+
+    No decisions consume this report, and this never skips outcome evaluation:
+    replay_calibration.update() still runs normally before this observer.
+    """
+    global _LAST_INPUT_SIGNATURE, _LAST_OUTPUT_SIGNATURE
+    if not getattr(cfg, 'ROBUSTNESS_AUDIT_ENABLED', True):
+        return None
+    before = _audit_signature()
+    output = _file_signature(_output())
+    if before == _LAST_INPUT_SIGNATURE and output == _LAST_OUTPUT_SIGNATURE:
+        return None
+    report = build(_read_jsonl(_replay(), before[1][0]))
+    _save(report)
+    # Do not cache a signature if replay changed while the report was built.
+    # The next scan will retry with the new outcome history.
+    if _audit_signature() == before:
+        _LAST_INPUT_SIGNATURE = before
+        _LAST_OUTPUT_SIGNATURE = _file_signature(_output())
+    else:
+        _LAST_INPUT_SIGNATURE = None
+        _LAST_OUTPUT_SIGNATURE = None
+    return report
 
 # --- Foreign-repository robustness extensions (OBSERVE_ONLY) ---
 def _proxy_values(rows):
