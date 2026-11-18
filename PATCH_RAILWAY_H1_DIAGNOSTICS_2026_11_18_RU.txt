@@ -1,0 +1,46 @@
+МАЛЕНЬКИЙ ПАТЧ: ДИАГНОСТИКА RAILWAY / H1 / DXY (18.11.2026)
+
+Применять только к последней базе forex-telegram-bot-main (1).zip из этого диалога.
+В ZIP только четыре файла, все расположены в корне репозитория:
+
+bot.py
+briefing.py
+test_railway_h1_log_diagnostics_20261118.py
+PATCH_RAILWAY_H1_DIAGNOSTICS_2026_11_18_RU.txt
+
+ИЗМЕНЕНИЯ
+1. bot.py: направляет стандартные Python logging INFO/WARNING/ERROR в stdout, чтобы Railway
+   не трактовал любые INFO как ERROR только из-за stderr. Уровни сообщений сохранены.
+2. bot.py: дописывает h1_closed_at в журнал UNIFIED_SIGNAL_BLOCK — легче искать причину.
+3. briefing.py: исправляет возраст DXY_CACHE_USED в журнале: считает от ЗАКРЫТИЯ
+   H1, а не от её времени открытия (метки Twelve Data). Валидация DXY и кеша не изменена.
+4. test_railway_h1_log_diagnostics_20261118.py: четыре регрессионных теста.
+
+ЧЕГО НЕ МЕНЯЛИ
+• Порог UNIFIED_H1_RELEASE_WINDOW_MINUTES=16;
+• подтверждение сигнала только закрытой H1;
+• алгоритмы Forex, стратегии, риск-менеджмент, пересылку Telegram;
+• TTL котировок, алгоритм допуска кеша DXY, API и ключи, Railway Variables.
+
+ПРОВЕРКА В ЭТОЙ СЕССИИ
+python -m pytest -q test_railway_h1_log_diagnostics_20261118.py test_unified_signal_guard.py test_briefing.py
+96 passed
+python -m pytest -q test_memory_runtime_20261117.py test_stage9_repeated_work_20261118.py test_briefing_mid_session_events.py
+21 passed
+
+В среде локального аудита нет пакета python-telegram-bot.
+Поэтому ВСЮ тестовую базу здесь не запускали. После загрузки файла в GitHub
+дождитесь GitHub Actions и пришлите итог прохождения полного набора тестов.
+
+КАК УСТАНОВИТЬ
+В GitHub репозитории откройте Code -> Add file -> Upload files, выберите
+три .py файла из этого ZIP и подтвердите замену существующих bot.py и briefing.py.
+Не загружайте файл README, если он не нужен; он лишь пояснение.
+Перед подтверждением проверьте, что меняются только указанные файлы.
+Сохраните (Commit changes) и проверьте зелёный прогон GitHub Actions,
+затем успешный Railway Deployment и наличие h1_closed_at в новых логах.
+
+ВНИМАНИЕ
+Строка h1_not_fresh не обязательно является ошибкой данных. После 16 минут
+она ПРАВИЛЬНО блокирует поздний вход. Для выяснения, почему не было сигналов
+до истечения окна, нужны логи сканирования за первые 16 минут после H1-close.

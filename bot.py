@@ -11,6 +11,7 @@ import memory_runtime
 import memory_scan_stage8
 import logging
 import os
+import sys
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -87,7 +88,7 @@ except ImportError:
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
 # httpx logs full request URLs at INFO level; Telegram embeds the bot token in
 # that URL. Keep transport chatter out of production logs so secrets are not
 # copied into Railway Log Explorer.
@@ -2112,8 +2113,9 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                             log.exception("WEEKLY_RHYTHM_INFO_RECONCILE_FAILED")
                 continue
             if ruling.status != "ALLOW":
-                log.info("UNIFIED_SIGNAL_BLOCK source=%s pair=%s side=%s reason=%s",
-                         ruling.source, ruling.pair, ruling.side, ruling.reason)
+                log.info("UNIFIED_SIGNAL_BLOCK source=%s pair=%s side=%s reason=%s h1_closed_at=%s",
+                         ruling.source, ruling.pair, ruling.side, ruling.reason,
+                         ruling.h1_closed_at or "unknown")
                 try:
                     decision_journal.record_stage(raw, market, strength, "BLOCKED",
                                                   reason="unified_" + ruling.reason)

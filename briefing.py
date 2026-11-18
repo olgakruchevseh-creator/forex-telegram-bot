@@ -1505,11 +1505,17 @@ def normalize_h1_ts(raw: str) -> str:
 
 
 def _h1_age_hours(closed_h1: str) -> float:
+    """Time elapsed since the H1 *closed*, not since its opening timestamp.
+
+    Twelve Data labels an H1 bar by its opening UTC timestamp, and the DXY
+    cache key retains that timestamp for exact-bar alignment. This helper is
+    diagnostic only; it does not change cache eligibility or trading decisions.
+    """
     ts = parse_h1_dt(closed_h1)
     if not ts:
         return -1.0
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    return (now - ts).total_seconds() / 3600.0
+    return (now - (ts + timedelta(hours=1))).total_seconds() / 3600.0
 
 
 def dxy_matches_h1(view: Optional[IndexView], h1_dt: str) -> bool:
