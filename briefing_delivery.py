@@ -76,6 +76,14 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
                           "H1 повышается", "H1 снижается", "Текущая зона:", "Поддержка:",
                           "Сопротивление:", "Пробой/проверка:")
     chart_selected: list[str] = []
+    # Pattern rows have priority over generic chart metadata. Each TF remains
+    # visible in the same compact per-pair caption, within Telegram's UTF-16 cap.
+    for line in chart_lines:
+        if (line.startswith("🧩 ") and "· ПАТТЕРНЫ ·" in line) or line.startswith((
+                "W1:", "D1:", "H4:", "H1:", "M15:", "M5 (подтв.):",
+                "Главная фигура:", "Есть конфликт", "Подтверждённых фигур")):
+            if line not in chart_selected:
+                chart_selected.append(line)
     for line in chart_lines:
         if line.startswith("Пара:"):
             continue

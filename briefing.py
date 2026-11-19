@@ -1253,6 +1253,18 @@ def build_briefing_text(
         lines.extend(format_board(briefs))
     except Exception:
         log.exception("доска пар")
+    # Full text command keeps every distinct confirmed pattern name per TF;
+    # compact session photo captions show two per TF due to Telegram's 1024 limit.
+    # Strictly read-only: no new signals, no queue/sent mutations.
+    if getattr(cfg, "PATTERNS_ENABLED", True):
+        try:
+            import patterns_mtf
+            lines.extend(["", "🧩 МУЛЬТИТАЙМФРЕЙМОВЫЕ ПАТТЕРНЫ · OBSERVE_ONLY"])
+            for b in briefs:
+                observation = patterns_mtf.observe(b.symbol, (market or {}).get(b.symbol) or {})
+                lines.extend(["", patterns_mtf.format_observation(observation, max_per_tf=None)])
+        except Exception:
+            log.exception("PATTERN_MTF_FULL_BRIEFING_FAILED")
     try:
         lines.extend(format_leaders(leaders, briefs_have_market(briefs), briefs))
     except Exception:

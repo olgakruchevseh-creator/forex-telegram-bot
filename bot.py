@@ -1441,6 +1441,15 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
                 pair_text += "\n" + livermore_compact(livermore) + " (OBSERVE_ONLY)"
         except Exception:
             log.exception("LIVERMORE_FOREX_BRIEFING_FAILED symbol=%s", symbol)
+        # Read-only independent W1/D1/H4/H1/M15/M5 pattern overview.
+        # This does not enqueue M15/M5 trading alerts or change any signal gate.
+        mtf_patterns_text = ""
+        if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
+            try:
+                import patterns_mtf
+                mtf_patterns_text = patterns_mtf.briefing_summary(symbol, (market or {}).get(symbol) or {})
+            except Exception:
+                log.exception("PATTERN_MTF_BRIEFING_FAILED pair=%s", symbol)
         pair_text = localize_telegram(pair_text)
         card = None
         if patterns is not None and getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
@@ -1452,14 +1461,14 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
             try:
                 card["image"].seek(0)
                 caption = briefing_delivery.compact_pair_caption(
-                    pair_text, localize_telegram(card.get("caption") or "")
+                    pair_text, localize_telegram("\n".join(filter(None, (mtf_patterns_text, card.get("caption") or ""))))
                 )
                 outgoing.append(("photo", card["image"], caption, symbol))
                 continue
             except Exception:
                 log.exception("PATTERN_BRIEFING_CAPTION_FAILED pair=%s", symbol)
         # No image: one compact text card, not a disconnected photo + long essay.
-        outgoing.append(("text", briefing_delivery.compact_pair_caption(pair_text)))
+        outgoing.append(("text", briefing_delivery.compact_pair_caption(pair_text, localize_telegram(mtf_patterns_text))))
 
     try:
         pause = max(0.0, min(2.0, float(getattr(cfg, "BRIEFING_SEND_PAUSE_SEC", 0.6))))
