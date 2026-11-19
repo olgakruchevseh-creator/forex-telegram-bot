@@ -204,7 +204,7 @@ def analyze_for_side(symbol: str, by_tf: dict, strength: dict[str, float], side:
         return None
     progress = max(0.0, min(100.0, abs(current-anchor) / total * 100.0))
     return {
-        "key": f"{symbol}|{side}|{anchor_swing.dt}", "symbol": symbol, "side": side,
+        "key": f"{symbol}|{side}|{h1[anchor_swing.index].dt}", "symbol": symbol, "side": side,
         "anchor": anchor, "target": target, "target_tf": target_tf, "targets": targets,
         "current": current, "progress": int(round(progress)),
         "remaining": int(round(100-progress)),
