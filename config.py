@@ -626,6 +626,9 @@ HARMONIC_RATIOS = {
 ABCD_TIME_SYM = 0.45
 PATTERN_MAIN_TFS = ["W1", "D1", "H4", "H1"]
 PATTERN_CONFIRM_TFS = ["M15", "M5"]
+# Technical lifetime/cache bounds only; do NOT change trade admission limits.
+PATTERN_PENDING_TTL_SECONDS = 900  # Matches UNIFIED_OUTBOX_TTL_SECONDS.
+PATTERN_ANALYSIS_CACHE_MAX_SYMBOLS = 8  # Signatures + pattern summaries only.
 PATTERN_CHART_IMAGES_ENABLED = True
 PATTERN_CHART_LOOKBACK = 55
 PATTERN_CHART_HISTORY = {"W1": 100, "D1": 120, "H4": 80, "H1": 60, "M15": 48, "M5": 42}

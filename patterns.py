@@ -7,6 +7,8 @@ import io
 import hashlib
 import logging
 import os
+import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +36,10 @@ CANDLE_PATTERN_NAMES = {
 # Карточки рендерятся из замороженных свечей. Для PENDING-событий кэш
 # восстанавливается на каждом скане, чтобы отложенная доставка не теряла картинку.
 _PENDING_CARDS: dict[str, tuple[str, Pattern, dict]] = {}
+# Only raw, already-closed OHLC analysis is cached. Never cache news, currency
+# strength, Telegram delivery decisions, or partially formed candle values.
+# One small entry per currency pair avoids retaining historical market arrays.
+_ANALYSIS_CACHE: OrderedDict[str, tuple[bytes, str, tuple[Pattern, ...], tuple[dict, ...]]] = OrderedDict()
 
 
 @dataclass
@@ -691,6 +697,47 @@ def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
     return sorted(found, key=lambda p: (p.quality, p.confidence), reverse=True)
 
 
+def _closed_market_signature(by_tf: dict) -> bytes | None:
+    """Hash all OHLC used by the detector, including historical revisions.
+
+    A changed open candle does not invalidate the result until it is closed.
+    A corrected closed historical bar DOES invalidate the result. Holding only
+    the digest (not candle arrays) keeps memory bounded.
+    """
+    fingerprint = hashlib.blake2b(digest_size=20)
+    populated = False
+    for tf in cfg.PATTERN_MAIN_TFS:
+        if tf not in TF_MINUTES:
+            return None
+        bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+        bars = bars[-cfg.PATTERN_LOOKBACK.get(tf, 160):]
+        fingerprint.update(f"{tf}:{len(bars)}|".encode("ascii"))
+        populated |= bool(bars)
+        for bar in bars:
+            fingerprint.update((f"{bar.dt}|{bar.open!r}|{bar.high!r}|"
+                                f"{bar.low!r}|{bar.close!r};").encode("utf-8"))
+    return fingerprint.digest() if populated else None
+
+
+def _cached_analysis(symbol: str, by_tf: dict) -> tuple[str, list[Pattern], list[dict], bool]:
+    """Reuse deterministic detection while CLOSED candles remain unchanged."""
+    signature = _closed_market_signature(by_tf)
+    entry = _ANALYSIS_CACHE.get(symbol) if signature is not None else None
+    if entry is not None and entry[0] == signature:
+        _ANALYSIS_CACHE.move_to_end(symbol)
+        return entry[1], list(entry[2]), [dict(item) for item in entry[3]], True
+    context = _market_context_side(by_tf)
+    patterns_found = scan_symbol(symbol, by_tf)
+    lifecycle = pattern_123_states(by_tf)
+    if signature is not None:
+        _ANALYSIS_CACHE[symbol] = (signature, context, tuple(patterns_found), tuple(lifecycle))
+        _ANALYSIS_CACHE.move_to_end(symbol)
+        capacity = max(1, int(getattr(cfg, "PATTERN_ANALYSIS_CACHE_MAX_SYMBOLS", 8)))
+        while len(_ANALYSIS_CACHE) > capacity:
+            _ANALYSIS_CACHE.popitem(last=False)
+    return context, patterns_found, lifecycle, False
+
+
 def _market_context_side(by_tf: dict) -> str:
     """Основное направление по большинству закрытых D1/H4/H1."""
     biases = []
@@ -725,6 +772,54 @@ def _pattern_close_dt(pattern: Pattern) -> datetime | None:
         return opened + timedelta(minutes=TF_MINUTES[pattern.tf])
     except (TypeError, ValueError, KeyError):
         return None
+
+
+def _pending_ttl_seconds() -> int:
+    # Align with the central source outbox; do not increase the H1 signal window.
+    return max(60, int(getattr(cfg, "PATTERN_PENDING_TTL_SECONDS", 900)))
+
+
+def _pending_event_closed_at(item: dict) -> datetime | None:
+    key = str(item.get("key") or "")
+    fields = key.split("|", 3)
+    tf = fields[1] if len(fields) > 1 else ""
+    if tf not in TF_MINUTES:
+        return None
+    return _pattern_close_dt(Pattern("", "", tf, 0, 0, "", 0.0, str(item.get("dt") or "")))
+
+
+def _pending_created_at(item: dict) -> datetime | None:
+    """Pre-patch pending items use event close as their creation time."""
+    raw = item.get("created_at")
+    if raw:
+        try:
+            created = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created.astimezone(timezone.utc)
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return _pending_event_closed_at(item)
+
+
+def _pending_is_expired(item: dict, now_utc: datetime) -> bool:
+    created = _pending_created_at(item)
+    closed_at = _pending_event_closed_at(item)
+    # A recent retry must NEVER re-activate a stale original event; both
+    # original candle close and queue creation must be inside the TTL.
+    ttl = _pending_ttl_seconds()
+    return (created is None or closed_at is None or
+            not (0 <= (now_utc - created).total_seconds() <= ttl) or
+            not (0 <= (now_utc - closed_at).total_seconds() <= ttl))
+
+
+def _discard_pending_chart(digest: str) -> None:
+    # Pending IDs normally are 20 hexadecimal SHA-256 characters. Never let
+    # malformed persisted state become an arbitrary relative file path.
+    if len(digest) != 20 or any(char not in "0123456789abcdef" for char in digest):
+        return
+    try:
+        (_chart_cache_dir() / f"{digest}.png").unlink(missing_ok=True)
+    except OSError:
+        log.exception("Не удалось удалить устаревшую картинку паттерна")
 
 
 def _pattern_origin(pattern: Pattern, bars: list[Candle]) -> float:
@@ -1027,20 +1122,38 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     Никакой дополнительной M15/M5 свечи после уже завершённого паттерна не ждём:
     это устраняет запаздывание. Незавершённые фигуры остаются внутренними и наружу не идут.
     """
+    started = time.monotonic()
     _PENDING_CARDS.clear()
     state = _load()
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
     pending = state.setdefault("pending", {})
     observed = state.setdefault("observed", {})
+    expired_ledger = state.setdefault("expired", {})
     messages: list[str] = []
+    now_utc = datetime.now(timezone.utc)
+    expired = 0
+    old_events_skipped = 0
+    cache_hits = 0
+    cache_misses = 0
     for digest, item in list(pending.items()):
-        if not isinstance(item, dict) or item.get("key") in sent or not item.get("text"):
-            pending.pop(digest, None); continue
+        invalid = not isinstance(item, dict) or not item.get("key") or not item.get("text")
+        already_sent = isinstance(item, dict) and item.get("key") in sent
+        stale = not invalid and _pending_is_expired(item, now_utc)
+        if invalid or already_sent or stale:
+            if stale:
+                # Consumed means "do not re-open the same old geometry"; a
+                # stale card is not silently treated as a delivered trade.
+                sent[item["key"]] = item.get("dt") or item["key"]
+                expired_ledger[item["key"]] = {"reason": "expired_pending", "dt": item.get("dt"),
+                                               "at": now_utc.isoformat()}
+                expired += 1
+            pending.pop(digest, None)
+            _discard_pending_chart(digest)
+            continue
         messages.append(item["text"])
     pending_keys = {item.get("key") for item in pending.values() if isinstance(item, dict)}
     strength = strength or {}
-    now_utc = datetime.now(timezone.utc)
     try:
         pattern_events = newsmod.load_events()
     except Exception:
@@ -1049,8 +1162,11 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
-            context_side = _market_context_side(by_tf)
-            candidates = scan_symbol(symbol, by_tf)
+            context_side, candidates, lifecycle, cache_hit = _cached_analysis(symbol, by_tf)
+            if cache_hit:
+                cache_hits += 1
+            else:
+                cache_misses += 1
             candidates = [
                 p for p in candidates
                 if not p.name.startswith("Гармонический")
@@ -1081,7 +1197,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     {"name": p.name, "side": p.side, "tf": p.tf, "dt": p.dt, "level": p.level}
                     for p in candidates[:8]
                 ],
-                "pattern_123_lifecycle": pattern_123_states(by_tf),
+                "pattern_123_lifecycle": lifecycle,
             }
             if first:
                 for p in candidates:
@@ -1092,6 +1208,16 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             for p in candidates:
                 key = _pattern_key(symbol, p)
                 if key in sent:
+                    continue
+                close_at = _pattern_close_dt(p)
+                if (close_at is None or close_at > now_utc or
+                        (now_utc - close_at).total_seconds() > _pending_ttl_seconds()):
+                    # The unified H1 gate would reject the stale event anyway;
+                    # consume it here to prevent repeated work and log spam.
+                    sent[key] = p.dt
+                    expired_ledger[key] = {"reason": "event_too_old_for_new_alert", "dt": p.dt,
+                                           "at": now_utc.isoformat()}
+                    old_events_skipped += 1
                     continue
                 if key in pending_keys:
                     # PENDING survives between scan cycles / Railway restarts, while the
@@ -1120,7 +1246,8 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 text = _fmt(symbol, p, context_side, news_note, by_tf)
                 digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                 if digest not in pending:
-                    pending[digest] = {"key": key, "dt": p.dt, "text": text}
+                    pending[digest] = {"key": key, "dt": p.dt, "text": text,
+                                       "created_at": now_utc.isoformat()}
                     pending_keys.add(key)
                 messages.append(text)
                 frozen = freeze_by_tf(by_tf)
@@ -1132,10 +1259,16 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     state["bootstrapped"] = True
     if len(sent) > 1500:
         state["sent"] = dict(list(sent.items())[-1200:])
+    if len(expired_ledger) > 300:
+        state["expired"] = dict(list(expired_ledger.items())[-250:])
     # Старое ожидание следующей свечи больше не используется.
     state.pop("pending_confirmation", None)
     state["observed"] = observed
     _save(state)
+    log.info("PATTERNS_CYCLE duration_ms=%d analysis_reused=%d analysis_fresh=%d "
+             "pending_expired=%d old_events_skipped=%d pending_active=%d cards_in_memory=%d",
+             int((time.monotonic() - started) * 1000), cache_hits, cache_misses,
+             expired, old_events_skipped, len(pending), len(_PENDING_CARDS))
     return messages
 
 
@@ -1148,7 +1281,8 @@ def briefing_htf_card(symbol: str, by_tf: dict):
     if not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
         return None
     priority = {"W1": 0, "D1": 1, "H4": 2, "H1": 3}
-    found = [p for p in scan_symbol(symbol, by_tf) if p.tf in priority]
+    _, candidates, _, _ = _cached_analysis(symbol, by_tf)
+    found = [p for p in candidates if p.tf in priority]
     if not found:
         return None
     found.sort(key=lambda p: (priority[p.tf], -p.quality, -p.confidence))
