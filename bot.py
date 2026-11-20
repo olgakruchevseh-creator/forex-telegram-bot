@@ -720,12 +720,16 @@ async def cmd_ohlc_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text('Формат: /ohlc_verify EUR/USD (план без API). '
                                         'Для реальных запросов: /ohlc_verify EUR/USD ПОДТВЕРЖДАЮ')
         return
+    phase = 'IMPORT_WORKFLOW'
     try:
         from ohlc_conflict_verify_workflow import plan, execute, format_plan
+        phase = 'READ_H1_CACHE'
         hit = CACHE.get((raw, 'H1')) or {}
         observed = list(hit.get('candles') or [])
+        phase = 'PLAN_READ_ONLY'
         preview = await asyncio.to_thread(plan, raw, cache=observed)
         if not confirmed:
+            phase = 'SEND_PREVIEW'
             await update.message.reply_text(format_plan(preview) +
                 '\nДля выполнения отправь /ohlc_verify ' + raw + ' ПОДТВЕРЖДАЮ'
                 '\nКоманда может израсходовать до трёх запросов Twelve Data.')
@@ -753,6 +757,7 @@ async def cmd_ohlc_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             # Re-evaluate the selection inside the lock, to avoid needless
             # repeat verification following another completed command.
+            phase = 'EXECUTE_APPROVED_VENDOR_CHECK'
             result = await asyncio.to_thread(
                 execute, raw, cache=observed, approve_api_requests=True, api_key=key)
             checked = result['result']
@@ -764,12 +769,20 @@ async def cmd_ohlc_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             lines.append(f'Сохранено сопоставлений за разные запуски: {checked["saved_comparisons"]}.')
             lines.append('Теперь повтори /ohlc_conflicts ' + raw +
                          ' — там будет видно, к какой версии ближе поздний API.')
+            phase = 'SEND_VENDOR_REPORT'
             await update.message.reply_text('\n'.join(lines))
-    except Exception:
-        log.exception('OHLC_VERIFY_COMMAND_FAILED pair=%s', raw)
-        await update.message.reply_text('Ручная сверка недоступна. '
-                                        'Статус запросов проверь в /ohlc_conflicts; '
-                                        'ошибка не изменяет торговые данные.')
+    except Exception as exc:
+        # Keep the diagnostic in ONE log line: searching this marker in Railway
+        # often hides the multi-line traceback. Never log exception messages,
+        # URLs or API keys, which can contain credentials.
+        error_type = type(exc).__name__
+        log.error('OHLC_VERIFY_COMMAND_FAILED pair=%s phase=%s error_type=%s',
+                  raw, phase, error_type, exc_info=True)
+        # No raw exception text in Telegram: it may include confidential paths.
+        await update.message.reply_text(
+            'Ручная сверка недоступна. Запросы API не подтверждены как выполненные.\n'
+            f'Диагностика: этап {phase}; тип {error_type}.\n'
+            'Передай эту строку для исправления; торговые данные не меняются.')
 
 
 async def cmd_patterns_formation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

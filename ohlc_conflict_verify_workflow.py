@@ -11,7 +11,8 @@ import json
 
 from ohlc_conflict_trace import inspect
 from ohlc_history_journal import db_default
-from ohlc_conflict_vendor_manual import check
+# The vendor client is needed only for explicitly confirmed requests.
+# Import it lazily so /ohlc_verify PREVIEW works without the API runtime.
 
 MAX_BATCH = 3
 FAILED_RETRY_HOURS = 6
@@ -88,6 +89,7 @@ def execute(pair: str, *, cache: list | None = None, db_path: Path | None = None
         raise ValueError('не найдено новых конфликтов для проверки')
     if not api_key.strip():
         raise ValueError('ключ Twelve Data не настроен')
+    from ohlc_conflict_vendor_manual import check
     out = check(pair=pair, timestamps=[row['opened_utc'] for row in preview['selected']],
                 db_path=Path(db_path or db_default()), execute=True,
                 approve_api_requests=True, api_key=api_key,
