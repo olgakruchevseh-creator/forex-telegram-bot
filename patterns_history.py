@@ -19,6 +19,8 @@ import config as cfg
 import patterns
 from analysis import Candle, atr, closed_candles
 from patterns_history_integrity import audit_h1, missing_core_hours, HOUR
+from patterns_history_sources import (archive_metadata, overlap_diagnostics,
+                                      report_lines, choose_replay_h1)
 
 TFS = ("W1", "D1", "H4", "H1", "M15", "M5")
 # Conservative default: an explicit Telegram command only, never scan_job.
@@ -368,34 +370,45 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
     # Inspect the incoming live H1 BEFORE archive merge, which otherwise could
     # mask duplicate or disordered source records by de-duplicating timestamps.
     original_h1 = (by_tf or {}).get('H1') or []
-    # The vendor cache may legitimately include the currently forming final
-    # candle. Inspect only closed input, just as the replay engine does.
-    original_audit = audit_h1(closed_candles(original_h1, 60))
+    # The provider's last H1 may be unfinished; never use it in replay.
+    cache_h1 = closed_candles(original_h1, 60)
+    original_audit = audit_h1(cache_h1)
+    archive_h1 = _archive_h1(symbol) if use_archive else []
+    archive_audit = audit_h1(archive_h1)
     merge_diagnostics: dict[str, int] = {}
     by_tf, archival_count = _with_optional_h1_archive(
         symbol, by_tf, use_archive=use_archive, diagnostics=merge_diagnostics)
-    merged_audit = audit_h1(closed_candles((by_tf or {}).get('H1') or [], 60))
+    merged_h1 = closed_candles((by_tf or {}).get('H1') or [], 60)
+    merged_audit = audit_h1(merged_h1)
     h1 = _usable_bars(by_tf, 'H1')
     lines.append(merged_audit.describe())
-    conflicts = merge_diagnostics.get('archive_live_price_conflicts', 0)
+    metadata = archive_metadata(symbol) if use_archive and archive_h1 else {}
+    source_info = overlap_diagnostics(symbol, archive_h1, cache_h1, metadata=metadata)
+    lines.extend(report_lines(source_info, original_audit, archive_audit))
+    conflicts = source_info['conflict_count']
     if conflicts:
         lines.append(f'H1_КОНФЛИКТ_АРХИВА_И_КЕША: {conflicts} свечей с различными OHLC; '
-                     'архив сохранён без изменений, исходы требуют проверки.')
-    # Do not silently turn dubious weekend/duplicate H1 into "historical wins".
-    # Keep source records untouched for investigation; no live signal changes.
-    if (original_audit.blocks_replay or merged_audit.blocks_replay
-            or conflicts or (not h1 and merged_audit.rows)):
-        lines.append('ВНИМАНИЕ: H1_ЦЕЛОСТНОСТЬ_НЕ_ПОДТВЕРЖДЕНА. '
-                     'Исходы по H1 заблокированы, архив не изменён. '
-                     'Проверьте часовые метки и происхождение OHLC.')
-        by_tf = dict(by_tf)
-        by_tf['H1'] = []  # observation-only: fail closed for this command
-        h1 = []
+                     'архив сохранён без изменений, спорные метки исключены из проверки.')
+    # A contaminated source is wholly quarantined. Only independently clean
+    # source(s) can be used; disputed timestamps are always excluded. Replay
+    # itself checks gaps before ATR, within formation and in the outcome window.
+    selected, selection, excluded = choose_replay_h1(
+        cache_h1, archive_h1, merged_h1, source_info['conflict_stamps'])
+    if original_audit.blocks_replay or archive_audit.blocks_replay or conflicts or merged_audit.blocks_replay:
+        lines.append('ВНИМАНИЕ: H1_ЦЕЛОСТНОСТЬ_НЕ_ПОДТВЕРЖДЕНА для полного набора. '
+                     'Исходы допускаются только на изолированных проверенных участках; '
+                     'архив не изменён.')
+    lines.append(f'H1 изоляция для replay: {selection}; безопасных H1 {len(selected)}; '
+                 f'исключено спорных меток {excluded}.')
+    by_tf = dict(by_tf)
+    by_tf['H1'] = selected
+    h1 = _usable_bars(by_tf, 'H1')
     if h1:
         first_h1, last_h1 = _dt(h1[0].dt), _dt(h1[-1].dt)
         lines.append(f"Покрытие H1: {len(h1)} закрытых свечей; "
                      f"{first_h1:%d.%m.%Y %H:%M}—{(last_h1 + timedelta(hours=1)):%d.%m.%Y %H:%M} UTC; "
-                     f"из исторического журнала добавлено: {archival_count}.")
+                     f"в объединённый набор добавлено из журнала: {archival_count} "
+                     f"(число допущенных H1 указано выше).")
     else:
         lines.append('Покрытие H1: нет достоверных закрытых свечей; исходы проверить нельзя.')
     lines.append('Архив при наличии читается локально, без запросов API; ретроспективные OHLC не доказывают данные, видимые боту в прошлом.')
