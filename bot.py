@@ -661,6 +661,27 @@ async def cmd_patterns_history(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("Историческая проверка сейчас недоступна: ошибка расчёта или источника данных.")
 
 
+async def cmd_ohlc_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only source diagnosis; no Twelve Data calls and no trade effects."""
+    _remember_effective_chat(update)
+    raw = "".join(getattr(context, "args", [])).upper().replace(" ", "")
+    if "/" not in raw and len(raw) == 6:
+        raw = raw[:3] + "/" + raw[3:]
+    if raw not in cfg.PAIRS:
+        await update.message.reply_text("Укажи валютную пару: /ohlc_sources EUR/USD")
+        return
+    try:
+        from ohlc_origin_report import format_report
+        # Read existing in-process RAM cache, never initiate a vendor request.
+        hit = CACHE.get((raw, "H1")) or {}
+        observed = list(hit.get("candles") or [])
+        report = await asyncio.to_thread(format_report, raw, cache=observed)
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception:
+        log.exception("OHLC_SOURCES_COMMAND_FAILED pair=%s", raw)
+        await update.message.reply_text("Диагностика источников OHLC временно недоступна.")
+
+
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _remember_effective_chat(update)
     try:
@@ -2844,6 +2865,7 @@ def main() -> None:
     app.add_handler(CommandHandler("briefing", cmd_briefing))
     app.add_handler(CommandHandler("briefing_full", cmd_briefing))
     app.add_handler(CommandHandler("patterns_history", cmd_patterns_history))
+    app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)
     log.info("Бот запущен.")
