@@ -399,7 +399,16 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
                      'Исходы допускаются только на изолированных проверенных участках; '
                      'архив не изменён.')
     lines.append(f'H1 изоляция для replay: {selection}; безопасных H1 {len(selected)}; '
-                 f'исключено спорных меток {excluded}.')
+                 f'исключено H1 (выходные/спорные метки) {excluded}.')
+    if selected and (original_audit.weekend or archive_audit.weekend or conflicts):
+        lines.append('ВНИМАНИЕ: структурно допустимые H1 — только предварительный '
+                     'ретроспективный набор. Происхождение и соответствие API '
+                     'не подтверждены; результаты не являются независимым бэктестом.')
+    selected_audit = audit_h1(selected)
+    if selected_audit.missing_core:
+        lines.append(f'H1 разрывы в отобранном наборе: {selected_audit.missing_core} '
+                     f'торговых H1 в {selected_audit.gap_intervals} участках; '
+                     'сценарии через эти разрывы не оцениваются.')
     by_tf = dict(by_tf)
     by_tf['H1'] = selected
     h1 = _usable_bars(by_tf, 'H1')
@@ -444,13 +453,19 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
                          f"откаты (медиана) {_median(c.pullbacks_h1 for c in mature)}; "+
                          f"до исхода/горизонта (медиана) {_median(c.outcome_after_h1 for c in mature)} H1; "+
                          f"нет H1 {sum(c.outcome=='NO_H1' for c in group)}")
-            if len(resolved) >= MIN_HISTORY_FOR_RATE:
+            # A raw source containing weekend rows or contested prices has
+            # not passed independent provenance verification. Never publish
+            # success percentages from that provisional retrospective subset.
+            provisional = bool(original_audit.weekend or archive_audit.weekend or conflicts)
+            if len(resolved) >= MIN_HISTORY_FOR_RATE and not provisional:
                 lines.append(f"    +1 ATR раньше −0,75 ATR: {wins}/{len(resolved)} ({wins/len(resolved):.0%}) "
                              f"среди однозначно разрешённых; неоднозначно "
                              f"{sum(c.outcome=='AMBIGUOUS' for c in mature)}; "
                              f"по времени {sum(c.outcome=='TIME' for c in mature)}")
             else:
-                lines.append(f"    Для доли исходов выборка недостаточна "
+                why = ("источник не подтверждён" if provisional and len(resolved) >= MIN_HISTORY_FOR_RATE
+                       else "выборка недостаточна")
+                lines.append(f"    Для доли исходов {why} "
                              f"({len(resolved)}/{MIN_HISTORY_FOR_RATE} однозначных); "
                              f"неоднозначно {sum(c.outcome=='AMBIGUOUS' for c in mature)}")
     lines.append("\nГраницы: только доступная история; LTF неполный H1 пропущен. "

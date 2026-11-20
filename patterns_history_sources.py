@@ -14,7 +14,7 @@ import sqlite3
 import statistics
 
 from analysis import Candle
-from patterns_history_integrity import audit_h1, H1Integrity
+from patterns_history_integrity import audit_h1, H1Integrity, definitely_closed_fx
 
 MAX_META_ROWS = 12000
 MAX_EXAMPLES = 3
@@ -77,6 +77,15 @@ def overlap_diagnostics(symbol: str, archive: list[Candle],
             different.add(ts)
     details.sort(reverse=True)
     src = Counter((v.get('source') or 'UNKNOWN') for v in metadata.values())
+    weekend_examples = []
+    seen_labels = set()
+    for ts in sorted(old):
+        if definitely_closed_fx(ts):
+            meta = metadata.get(ts, {})
+            label = meta.get('source') or 'UNKNOWN'
+            if label not in seen_labels and len(weekend_examples) < MAX_EXAMPLES:
+                weekend_examples.append((ts, label, meta.get('first_seen', 'н/д')))
+                seen_labels.add(label)
     return {'conflict_stamps': different, 'conflict_count': len(different),
             'overlap_count': len(old.keys() & newer.keys()),
             'median_diff_pips': (statistics.median(d[0] for d in details)
@@ -85,7 +94,13 @@ def overlap_diagnostics(symbol: str, archive: list[Candle],
             'examples': [(ts, a_close, l_close, diff, metadata.get(ts, {}))
                          for diff, ts, a_close, l_close in details[:MAX_EXAMPLES]],
             'sources': src, 'archive_rows': len(archive),
-            'cache_rows': len(current)}
+            'cache_rows': len(current),
+            'archive_weekend_by_source': Counter(
+                (metadata.get(t, {}).get('source') or 'UNKNOWN')
+                for t in old if definitely_closed_fx(t)),
+            'cache_weekend_first': min((t for t in newer if definitely_closed_fx(t)), default=None),
+            'archive_weekend_first': min((t for t in old if definitely_closed_fx(t)), default=None),
+            'archive_weekend_examples': weekend_examples}
 
 
 def report_lines(info: dict, live_audit: H1Integrity,
@@ -101,6 +116,20 @@ def report_lines(info: dict, live_audit: H1Integrity,
                      + '; '.join(f'{k}={v}' for k, v in info['sources'].most_common(5)))
     elif info['archive_rows']:
         lines.append('H1 происхождение архива: метаданные недоступны; источник не подтверждён.')
+    if info.get('archive_weekend_by_source'):
+        lines.append('H1 выходные в SQLite по транспортной метке: ' + '; '.join(
+            f'{k}={v}' for k, v in info['archive_weekend_by_source'].most_common(5)) +
+            '. Это НЕ подтверждение происхождения исходных котировок.')
+    if info.get('archive_weekend_examples'):
+        lines.append('H1 примеры выходных из SQLite (первая метка по типу транспорта): ' + '; '.join(
+            f'{ts:%d.%m %H:%M} UTC {label} впервые {first}'
+            for ts, label, first in info['archive_weekend_examples']))
+    if info.get('cache_weekend_first') or info.get('archive_weekend_first'):
+        cf = info.get('cache_weekend_first')
+        af = info.get('archive_weekend_first')
+        lines.append('H1 первое выходное открытие: кеш ' +
+                     (f'{cf:%d.%m.%Y %H:%M} UTC' if cf else 'нет') +
+                     '; SQLite ' + (f'{af:%d.%m.%Y %H:%M} UTC' if af else 'нет') + '.')
     if info['conflict_count']:
         median = info['median_diff_pips']
         biggest = info['max_diff_pips']
@@ -121,21 +150,29 @@ def report_lines(info: dict, live_audit: H1Integrity,
     return lines
 
 
+def _hard_issues(report: H1Integrity) -> bool:
+    """Weekend-only contamination can be quarantined; corrupt grids cannot."""
+    return any((report.invalid_time, report.off_grid, report.duplicate,
+                report.unordered, report.invalid_ohlc, report.unclosed))
+
+
 def choose_replay_h1(cache: list[Candle], archive: list[Candle],
                      merged: list[Candle], conflicts: set[datetime],
                      *, as_of: datetime | None = None) -> tuple[list[Candle], str, int]:
-    """Safely select intact source(s), then quarantine ALL conflicting opens.
+    """Select structurally eligible H1, quarantining weekend and disputed opens.
 
-    Source with weekend/corrupt/duplicate bars cannot be used as a whole;
-    don't silently delete its weekend anomalies and claim remaining bars valid.
-    If both source sequences pass their *own* independent checks, union may be
-    used only with conflicting timestamps removed. Missing H1 are not bridged:
-    existing replay coverage checks reject affected windows independently.
+    A source with invalid timestamps, grid, order, prices, duplicates or unclosed
+    candles is not accepted. If both sources have *only* weekend contamination,
+    the individually valid hours can still be evaluated retrospectively, but
+    only windows that have unbroken core trading-hour coverage may count. This
+    is NOT vendor authentication and NEVER mutates the stored journal.
     """
     if not archive and not cache:
         return [], 'H1_ИСТОЧНИКОВ_НЕТ', 0
-    cache_ok = bool(cache) and not audit_h1(cache, as_of=as_of).blocks_replay
-    archive_ok = bool(archive) and not audit_h1(archive, as_of=as_of).blocks_replay
+    cache_audit = audit_h1(cache, as_of=as_of)
+    archive_audit = audit_h1(archive, as_of=as_of)
+    cache_ok = bool(cache) and not cache_audit.blocks_replay
+    archive_ok = bool(archive) and not archive_audit.blocks_replay
     if cache_ok and archive_ok:
         source, series = 'КЕШ_И_АРХИВ', merged
     elif cache_ok:
@@ -143,11 +180,36 @@ def choose_replay_h1(cache: list[Candle], archive: list[Candle],
     elif archive_ok:
         source, series = 'ТОЛЬКО_АРХИВ', archive
     else:
-        return [], 'НЕТ_НАДЁЖНОГО_ИСТОЧНИКА', 0
-    # Even if one source is structurally invalid, a price disagreement on a
-    # common time has not been adjudicated. Never pick the winning version.
-    clean = [bar for bar in series if _time(bar.dt) not in conflicts]
-    clean.sort(key=lambda b: _time(b.dt) or datetime.min.replace(tzinfo=timezone.utc))
+        # Do not throw out hundreds of structurally sound midweek H1 merely
+        # because the same source also contains non-trading Saturday candles.
+        # Severe anomalies still invalidate their entire individual source.
+        usable_cache = cache if not _hard_issues(cache_audit) else []
+        usable_archive = archive if not _hard_issues(archive_audit) else []
+        if not usable_cache and not usable_archive:
+            return [], 'НЕТ_НАДЁЖНОГО_ИСТОЧНИКА', 0
+        rows = {}
+        for bar in usable_archive:
+            stamp = _time(bar.dt)
+            if stamp is not None:
+                rows[stamp] = bar
+        for bar in usable_cache:
+            stamp = _time(bar.dt)
+            if stamp is not None:
+                rows[stamp] = bar
+        if not rows:
+            return [], 'НЕТ_НАДЁЖНОГО_ИСТОЧНИКА', 0
+        series = list(rows.values())
+        source = ('СТРУКТУРНЫЕ_УЧАСТКИ_ОБОИХ_ИСТОЧНИКОВ' if usable_cache and usable_archive
+                  else 'СТРУКТУРНЫЕ_УЧАСТКИ_КЕША' if usable_cache
+                  else 'СТРУКТУРНЫЕ_УЧАСТКИ_АРХИВА')
+    # Neither source wins a disputed OHLC timestamp. Weekend hours are not
+    # Forex core trading observations. Do not repair, shift or interpolate.
+    clean = [bar for bar in series
+             if (ts := _time(bar.dt)) is not None
+             and ts not in conflicts and not definitely_closed_fx(ts)]
+    clean.sort(key=lambda b: _time(b.dt))
+    if not clean:
+        return [], 'НЕТ_НАДЁЖНОГО_ИСТОЧНИКА', len(series)
     if audit_h1(clean, as_of=as_of).blocks_replay:
         return [], 'ИЗОЛЯЦИЯ_НЕ_УДАЛАСЬ', len(series)-len(clean)
     return clean, source, len(series)-len(clean)

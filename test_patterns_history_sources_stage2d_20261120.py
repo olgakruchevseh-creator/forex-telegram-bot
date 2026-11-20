@@ -26,7 +26,7 @@ def test_both_contaminated_sources_remain_blocked():
                                                   as_of=datetime(2026, 11, 20, tzinfo=UTC))
     assert selected == []
     assert status == 'НЕТ_НАДЁЖНОГО_ИСТОЧНИКА'
-    assert removed == 0
+    assert removed == 30  # all observations are weekend hours; no eligible H1
 
 
 def test_clean_cache_isolated_from_contaminated_archive():
@@ -125,5 +125,6 @@ def test_history_report_both_weekend_sources_cannot_reenable_percent(monkeypatch
     monkeypatch.setattr(ph, '_with_optional_h1_archive', lambda symbol, by_tf, use_archive, diagnostics=None:
                         ({**by_tf, 'H1': rows}, 0))
     report = ph.format_report('EUR/USD', {'H1': rows}, use_archive=True, detectors=(), max_steps=1)
-    assert 'НЕТ_НАДЁЖНОГО_ИСТОЧНИКА' in report
-    assert 'нет достоверных закрытых свечей' in report
+    assert 'СТРУКТУРНЫЕ_УЧАСТКИ_ОБОИХ_ИСТОЧНИКОВ' in report
+    assert 'только предварительный' in report
+    assert 'не являются независимым бэктестом' in report
