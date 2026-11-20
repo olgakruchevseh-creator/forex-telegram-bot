@@ -702,6 +702,76 @@ async def cmd_ohlc_conflicts(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Диагностика отдельных H1 сейчас недоступна.")
 
 
+_OHLC_VERIFY_COMMAND_LOCK = asyncio.Lock()
+
+
+async def cmd_ohlc_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explicit, owner-only, max-three H1 same-vendor rechecks; never automatic.
+
+    /ohlc_verify EUR/USD -> local dry run, zero requests.
+    /ohlc_verify EUR/USD ПОДТВЕРЖДАЮ -> at most three billable requests.
+    """
+    args = list(getattr(context, 'args', []) or [])
+    raw = str(args[0]).upper().replace(' ', '') if args else ''
+    if '/' not in raw and len(raw) == 6:
+        raw = raw[:3] + '/' + raw[3:]
+    confirmed = len(args) == 2 and str(args[1]).upper() == 'ПОДТВЕРЖДАЮ'
+    if raw not in cfg.PAIRS or len(args) not in (1, 2) or (len(args) == 2 and not confirmed):
+        await update.message.reply_text('Формат: /ohlc_verify EUR/USD (план без API). '
+                                        'Для реальных запросов: /ohlc_verify EUR/USD ПОДТВЕРЖДАЮ')
+        return
+    try:
+        from ohlc_conflict_verify_workflow import plan, execute, format_plan
+        hit = CACHE.get((raw, 'H1')) or {}
+        observed = list(hit.get('candles') or [])
+        preview = await asyncio.to_thread(plan, raw, cache=observed)
+        if not confirmed:
+            await update.message.reply_text(format_plan(preview) +
+                '\nДля выполнения отправь /ohlc_verify ' + raw + ' ПОДТВЕРЖДАЮ'
+                '\nКоманда может израсходовать до трёх запросов Twelve Data.')
+            return
+        # A Telegram group participant or an arbitrary /start must not be able
+        # to spend the owner's Twelve Data credits. The owner chat is pinned
+        # to an explicit environment variable, NOT mutable state.json.
+        owner = os.getenv('TELEGRAM_CHAT_ID', '').strip()
+        chat = update.effective_chat
+        if not owner or str(getattr(chat, 'id', '')) != owner or getattr(chat, 'type', '') != 'private':
+            await update.message.reply_text(
+                'Ручная проверка API разрешена только из личного Telegram-чата, '
+                'совпадающего с TELEGRAM_CHAT_ID в Railway. Запросы не выполнены.')
+            return
+        if _OHLC_VERIFY_COMMAND_LOCK.locked():
+            await update.message.reply_text('Проверка уже идёт. Повторные запросы не запущены.')
+            return
+        async with _OHLC_VERIFY_COMMAND_LOCK:
+            if preview.get('state') != 'OK' or not preview.get('selected'):
+                await update.message.reply_text('Нет непроверенных конфликтов в текущем кеше; запросы не выполнены.')
+                return
+            key = os.getenv('TWELVE_DATA_API_KEY', '').strip()
+            if not key:
+                await update.message.reply_text('TWELVE_DATA_API_KEY не задан. Запросы не выполнены.')
+                return
+            # Re-evaluate the selection inside the lock, to avoid needless
+            # repeat verification following another completed command.
+            result = await asyncio.to_thread(
+                execute, raw, cache=observed, approve_api_requests=True, api_key=key)
+            checked = result['result']
+            lines = ['🔬 H1 · РУЧНАЯ СВЕРКА ЗАВЕРШЕНА · ' + raw,
+                     f'Новых запросов: {checked["new_requests"]} из максимума {checked["max_api_requests"]}.',
+                     'Исходные OHLC, сигналы и торговые параметры не изменены.']
+            for item in checked['statuses']:
+                lines.append(item['utc'] + ' · ' + item['status'])
+            lines.append(f'Сохранено сопоставлений за разные запуски: {checked["saved_comparisons"]}.')
+            lines.append('Теперь повтори /ohlc_conflicts ' + raw +
+                         ' — там будет видно, к какой версии ближе поздний API.')
+            await update.message.reply_text('\n'.join(lines))
+    except Exception:
+        log.exception('OHLC_VERIFY_COMMAND_FAILED pair=%s', raw)
+        await update.message.reply_text('Ручная сверка недоступна. '
+                                        'Статус запросов проверь в /ohlc_conflicts; '
+                                        'ошибка не изменяет торговые данные.')
+
+
 async def cmd_patterns_formation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Bounded read-only per-pattern formation audit using existing RAM cache."""
     _remember_effective_chat(update)
@@ -2912,6 +2982,7 @@ def main() -> None:
     app.add_handler(CommandHandler("patterns_history", cmd_patterns_history))
     app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
     app.add_handler(CommandHandler("ohlc_conflicts", cmd_ohlc_conflicts))
+    app.add_handler(CommandHandler("ohlc_verify", cmd_ohlc_verify))
     app.add_handler(CommandHandler("patterns_formation", cmd_patterns_formation))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)

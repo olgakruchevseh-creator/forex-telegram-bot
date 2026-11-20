@@ -15,10 +15,11 @@ import sys
 
 import config as cfg
 from ohlc_history_journal import db_default
-from ohlc_vendor_probe import run_probe
+from ohlc_vendor_probe import audit_once
 
 MAX_REQUESTS=3
 REPORT_NAME='ohlc_vendor_conflicts_manual_observe.json'
+MAX_SAVED_CASES=128
 
 
 def _label(value: str, now: datetime) -> str:
@@ -61,13 +62,48 @@ def check(*, pair: str, timestamps: list[str], db_path: Path,
     if not api_key.strip():
         raise ValueError('TWELVE_DATA_API_KEY не указан')
     cases=tuple((pair,'H1',t,'MANUAL_CONFLICT_RECHECK') for t in normalized)
-    doc=run_probe(db_path=archive, out_path=out_path or archive.with_name(REPORT_NAME),
-                  api_key=api_key, now=now, session=session, cases=cases)
+    created_session=False
+    if session is None:
+        import requests
+        session=requests.Session()
+        created_session=True
+    try:
+        doc=audit_once(db_path=archive, session=session, api_key=api_key, now=now, cases=cases)
+    finally:
+        if created_session:
+            session.close()
+    # Retain prior per-hour checks across batches. The old implementation
+    # replaced the complete report every time, losing evidence from earlier
+    # explicit runs. Keep the latest observation per pair/TF/hour, bounded.
+    dest=Path(out_path or archive.with_name(REPORT_NAME))
+    history={}
+    try:
+        if dest.is_file() and dest.stat().st_size <= 250_000:
+            old_doc=json.loads(dest.read_text(encoding='utf-8'))
+            if isinstance(old_doc,dict) and old_doc.get('mode')=='OBSERVE_ONLY':
+                for x in old_doc.get('cases',[]):
+                    if isinstance(x,dict) and all(x.get(k) for k in ('pair','tf','archive_label_utc')):
+                        key=(x['pair'],x['tf'],x['archive_label_utc'])
+                        history[key]=x
+    except (OSError,ValueError,TypeError,UnicodeError):
+        history={}
+    for item in doc['cases']:
+        item=dict(item)
+        item['checked_utc']=doc['requested_utc']
+        history[(item['pair'],item['tf'],item['archive_label_utc'])]=item
+    merged={**doc,'cases':list(history.values())[-MAX_SAVED_CASES:],
+            'last_batch_size':len(doc['cases']),
+            'note':'Каждая запись — последняя повторная проверка часа; старые OHLC не переписаны.'}
+    dest.parent.mkdir(parents=True,exist_ok=True)
+    staging=dest.with_name(dest.name+'.tmp')
+    staging.write_text(json.dumps(merged,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+    os.replace(staging,dest)
     return {'mode':'EXECUTED','pair':pair,'timestamps':normalized,
             'max_api_requests':len(cases),'new_requests':sum(x['status'] not in
                ('ARCHIVE_BAR_MISSING','BAR_NOT_YET_CLOSED') for x in doc['cases']),
             'statuses':[{'utc':x['archive_label_utc'],'status':x['status']}
-                        for x in doc['cases']], 'changes_to_trading':False}
+                        for x in doc['cases']], 'changes_to_trading':False,
+            'saved_comparisons':len(merged['cases'])}
 
 
 def main(argv=None)->int:
