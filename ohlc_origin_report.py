@@ -15,8 +15,9 @@ import sqlite3
 
 import config as cfg
 from ohlc_history_journal import db_default
-from patterns_history_integrity import audit_h1, definitely_closed_fx
+from patterns_history_integrity import audit_h1, definitely_closed_fx, definitely_trading_fx
 from patterns_history_sources import overlap_diagnostics
+from ohlc_calendar_profiles import format_calendar_lines
 
 MAX_ROWS = 12000
 MAX_VENDOR_REPORT_BYTES = 250000
@@ -148,6 +149,12 @@ def analyze(pair: str, *, db_path: Path | None = None,
             live.append(bar)
     live.sort(key=lambda c: _utc(c.dt))
     source = overlap_diagnostics(pair, older, live, metadata=metadata)
+    contested = source['conflict_stamps']
+    disputed_calendar = Counter(
+        'ВНЕ_ОБЫЧНОЙ_СЕССИИ' if definitely_closed_fx(t) else
+        'ОСНОВНЫЕ_ТОРГОВЫЕ_ЧАСЫ' if definitely_trading_fx(t) else 'ПОГРАНИЧНЫЕ_ЧАСЫ'
+        for t in contested
+    )
     return {'pair': pair, 'state': 'OK', 'archive_rows': total,
             'archive_read': len(raw), 'archive_first': _utc(raw[-1][0]) if raw else None,
             'archive_last': _utc(raw[0][0]) if raw else None,
@@ -156,11 +163,13 @@ def analyze(pair: str, *, db_path: Path | None = None,
             'weekend_by_source': weekends, 'first_weekend': first_weekend,
             'cache_rows': len(live), 'cache_weekends': audit_h1(live, as_of=now).weekend,
             'conflict_count': source['conflict_count'],
+            'disputed_calendar': disputed_calendar,
             'overlap_count': source['overlap_count'],
             'max_diff_pips': source['max_diff_pips'],
             'conflict_examples': source['examples'][:3],
             'revisions': revisions, 'invalid_rows_skipped': nonfinite,
-            'probe': _read_recent_vendor_probe(path, pair)}
+            'probe': _read_recent_vendor_probe(path, pair),
+            'calendar_lines': format_calendar_lines(live, older)}
 
 
 def format_report(pair: str, *, db_path: Path | None = None,
@@ -184,7 +193,7 @@ def format_report(pair: str, *, db_path: Path | None = None,
         f'{k}={v}' for k, v in data['source_counts'].most_common(4)) or 'нет'))
     lines.append('Время первого наблюдения относительно закрытия H1: ' +
                  ('; '.join(f'{k}={v}' for k, v in data['first_seen_lag'].most_common()) or 'нет'))
-    lines.append('Свечи в закрытые часы Forex: ' + ('; '.join(
+    lines.append('Свечи вне обычной торговой сессии Forex (не обязательно ошибка поставщика): ' + ('; '.join(
         f'{k}={v}' for k, v in data['weekend_by_source'].most_common()) or '0'))
     weekend = data['first_weekend']
     if weekend:
@@ -200,6 +209,11 @@ def format_report(pair: str, *, db_path: Path | None = None,
     for stamp, a_close, c_close, difference, meta in data['conflict_examples'][:2]:
         lines.append(f'  {stamp:%d.%m %H:%M} UTC: архив C={a_close:.6f}; '
                      f'кеш C={c_close:.6f}; макс. Δ={difference:.2f} п.')
+    lines.append('H1 конфликтные метки по торговому календарю: ' +
+                 ('; '.join(f'{label}={count}' for label, count in
+                            data['disputed_calendar'].most_common()) or '0') +
+                 '. Причина изменения цены не установлена.')
+    lines.extend(data.get('calendar_lines', []))
     lines.append(f'Записей пересмотров в SQLite: {data["revisions"] if data["revisions"] is not None else "н/д"}; '
                  f'неверных архивных записей пропущено: {data["invalid_rows_skipped"]}.')
     probe = data['probe']

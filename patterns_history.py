@@ -382,6 +382,10 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
     merged_audit = audit_h1(merged_h1)
     h1 = _usable_bars(by_tf, 'H1')
     lines.append(merged_audit.describe())
+    lines.append('Календари: исходный поток Twelve Data может содержать выходные H1; '
+                 'торговое историческое наблюдение консервативно исключает часы '
+                 'обычного закрытия Forex. Наличие котировки не доказывает '
+                 'возможность сделки у брокера.')
     metadata = archive_metadata(symbol) if use_archive and archive_h1 else {}
     source_info = overlap_diagnostics(symbol, archive_h1, cache_h1, metadata=metadata)
     lines.extend(report_lines(source_info, original_audit, archive_audit))
