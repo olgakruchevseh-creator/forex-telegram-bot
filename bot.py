@@ -623,6 +623,44 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(localize_telegram(format_pair_now(stack)))
 
 
+_PATTERN_HISTORY_COMMAND_LOCK = asyncio.Lock()
+
+
+async def cmd_patterns_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run explicit, bounded OBSERVE_ONLY OHLC replay for one pair.
+
+    It is intentionally never called by scan_job or session briefing, so
+    historical detection cannot overload every minute's production cycle.
+    """
+    _remember_effective_chat(update)
+    raw = "".join(getattr(context, "args", [])).upper().replace(" ", "")
+    if "/" not in raw and len(raw) == 6:
+        raw = raw[:3] + "/" + raw[3:]
+    if raw not in cfg.PAIRS:
+        await update.message.reply_text("Укажи валютную пару: /patterns_history EUR/USD")
+        return
+    if _PATTERN_HISTORY_COMMAND_LOCK.locked():
+        await update.message.reply_text("Историческая проверка уже выполняется. Повтори команду после её завершения.")
+        return
+    async with _PATTERN_HISTORY_COMMAND_LOCK:
+        await update.message.reply_text(f"Проверяю доступную историю закрытых свечей {raw} (наблюдение)…")
+        try:
+            from patterns_history import format_report
+            # Fetch via the existing synchronous cache path, avoiding a
+            # concurrent cache writer while scan_job is using the same source.
+            # Only the pure CPU replay is offloaded from the polling loop.
+            market = fetch_market(env("TWELVE_DATA_API_KEY"))
+            rows = (market or {}).get(raw) or {}
+            if not rows.get("H1"):
+                await update.message.reply_text("Историческая проверка недоступна: нет H1 в данных Twelve Data.")
+                return
+            report = await asyncio.to_thread(format_report, raw, rows)
+            await _send_parts(context.application, int(update.effective_chat.id), report)
+        except Exception:
+            log.exception("PATTERNS_HISTORY_COMMAND_FAILED pair=%s", raw)
+            await update.message.reply_text("Историческая проверка сейчас недоступна: ошибка расчёта или источника данных.")
+
+
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _remember_effective_chat(update)
     try:
@@ -2805,6 +2843,7 @@ def main() -> None:
     app.add_handler(CommandHandler("pair", cmd_pair))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
     app.add_handler(CommandHandler("briefing_full", cmd_briefing))
+    app.add_handler(CommandHandler("patterns_history", cmd_patterns_history))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)
     log.info("Бот запущен.")
