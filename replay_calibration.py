@@ -132,9 +132,25 @@ def _evaluate(rec,h1):
                    for k in ('open', 'high', 'low', 'close'))
            for b in prior[-30:] + future[:max(HORIZONS)]):
         return None
+    # Diagnostic provenance only. Do not change the historical ATR/entry or any
+    # execution threshold: the daily report needs to distinguish ATR based on
+    # actual prior H1 from the legacy insufficient-history fallback.
+    atr_source = 'prior_closed_h1' if len(prior) >= 14 else 'insufficient_history_fallback'
+    entry_source = 'future_open_fallback'
+    for field in ('confirmation_price', 'h1_close_price', 'trigger_price'):
+        try:
+            value = float(rec.get(field) or 0)
+            if (math.isfinite(value) and value > 0 and
+                abs(value-entry) <= max(1e-9, abs(entry)*1e-12)):
+                entry_source = field
+                break
+        except (TypeError, ValueError, OverflowError):
+            continue
     a=atr(prior[-30:]) if len(prior)>=14 else max(abs(entry)*0.001,1e-6)
     if a is None or not math.isfinite(float(a)) or float(a) <= 0:
         return None
+    entry_gap_atr = (round(abs(entry-float(prior[-1].close))/a, 4)
+                     if prior and math.isfinite(float(prior[-1].close)) else None)
     horizons={}
     for n in HORIZONS:
         sample=future[:n]
@@ -179,6 +195,8 @@ def _evaluate(rec,h1):
       'character_features':rec.get('character_features') or {},
       'observed_h1_dt':rec.get('observed_h1_dt') or '',
       'replay_anchor':'observed_h1' if observed else 'legacy_recorded_utc',
+      'entry_source':entry_source, 'atr_source':atr_source,
+      'entry_gap_atr':entry_gap_atr,
       'horizons_h1':horizons,'manipulation_projection_observations':projection_obs,'targets_hit_8h':hit,'target_hit_time':hit_time,'target_hit_minutes':hit_minutes,'efficiency_3h':round(efficiency,3),'timing_class':timing}
 
 def _build_calibration(outcomes):

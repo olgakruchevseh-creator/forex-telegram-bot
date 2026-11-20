@@ -325,6 +325,18 @@ def daily_digest(day):
     if not rows: return ""
     status = Counter(r.get("status") or "?" for r in rows)
     reasons = Counter(r.get("reason") or "?" for r in rows if r.get("status")=="REJECTED")
+    # An active Hunter tries both sides even when no scanner emitted a card.
+    # A distinct verdict/score/family combination may be journaled again in
+    # the SAME H1, so rows are not independent market opportunities.
+    cohorts = {(r.get('pair'), r.get('side'), r.get('h1_dt'))
+               for r in rows if r.get('pair') and r.get('side') and r.get('h1_dt')}
+    facts_unknown = sum('source_fact_hashes' not in r for r in rows)
+    hunter_without_facts = sum(('source_fact_hashes' in r and
+                                not r.get('source_fact_hashes')) for r in rows)
+    family_rejects = [r for r in rows if r.get('reason') == 'not_enough_independent_families']
+    missing_family_counts = Counter(int(r.get('family_count') or 0)
+                                    for r in family_rejects)
+    family_hist = ', '.join(f'{k} сем.: {v}' for k, v in sorted(missing_family_counts.items())) or '—'
     names={"not_enough_independent_families":"мало независимых семейств",
            "score_below_threshold":"недостаточный балл",
            "high_impact_news_veto":"важные новости",
@@ -347,6 +359,10 @@ def daily_digest(day):
     return ("🏹 KILLER · ОТДЕЛЬНЫЙ ЖУРНАЛ (OBSERVE_ONLY)\n"
             f"Кандидаты: {len(rows)} · отклонено {status['REJECTED']} · прошли Killer {status['CANDIDATE']}\n"
             f"Основные причины: {top}\n"
+            f"Проверок-вердиктов {len(rows)}, различных пара/направление/H1 {len(cohorts)} · "
+            f"без исходных карт сканеров {hunter_without_facts}"
+            + (f" · неизвестно {facts_unknown}" if facts_unknown else "") + "\n"
+            f"Отказы по семействам: {family_hist} (порог {getattr(cfg, 'KILLER_MIN_FAMILIES', 5)})\n"
             f"Повторный расчёт: совпал {replays['REPRODUCED']} · расхождение {replays['REPLAY_DIFFERENCE']} · ожидание {replay_pending} · итог 6H1 {outcomes}\n"
             f"Финальные отказы после Killer: {sum(final_blocks.values())} · отдельных записей {len(gates)}\n"
             "Исторически удачная отклонённая сделка НЕ возобновляется автоматически.")

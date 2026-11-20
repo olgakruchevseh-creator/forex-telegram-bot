@@ -186,11 +186,35 @@ def _report(day):
         timing[d.get('entry_timing') or o.get('timing_class') or 'unknown']+=1
         for key,val in ((by_pair,d.get('pair') or '—'),(by_src,d.get('source') or '—'),(by_tf,d.get('timeframe') or '—'),(by_reg,o.get('regime') or '—'),(by_session,d.get('session') or '—')): key[val].append(o)
     pending=len(sent)-len(sent_out)
+    # Reveal the inputs behind extreme MAE without inferring a trade loss.
+    mae_peak = None
+    for d in sent:
+        out = outcomes.get(d.get('event_id')) or {}
+        h = (out.get('horizons_h1') or {}).get('8') or (out.get('horizons_h1') or {}).get('3') or {}
+        if not h: continue
+        try:
+            value = float(h.get('mae_atr'))
+        except (ValueError, TypeError): continue
+        if not (value >= 0 and value < float('inf')): continue
+        if mae_peak is None or value > mae_peak[0]: mae_peak = value, d, out
     target_coverage=Counter(t for r in sent for t in (r.get('targets') or {}) if t in ('TR1','TR2','TR3'))
     residual=[float(r['residual_potential_pct']) for r in sent if r.get('residual_potential_pct') is not None]
     blocks=[r for r in decisions if r.get('status')=='BLOCKED']
     final_block_count=sum(str(r.get('reason') or '').startswith('final_') for r in blocks)
     useful=wrong=ambiguous=block_pending=0; block_reasons=Counter(); wrong_reasons=Counter()
+    # Time-expired or not-closed H1 is a mandatory safety gate. Favorable
+    # subsequent excursion does NOT prove an actionable missed trade.
+    h1_guard_reasons = {
+        'unified_h1_not_fresh', 'unified_h1_not_closed',
+        'unified_h1_insufficient', 'unified_h1_time_invalid',
+    }
+    h1_guard_total = sum(str(r.get('reason') or '') in h1_guard_reasons for r in blocks)
+    h1_guard_proxy_favorable = 0
+    # Coarse *situations*, not independent detector events; multiple real
+    # setups per pair/source/H1 are intentionally merged only for diagnostics.
+    block_cohorts = {(r.get('pair'), r.get('side'), r.get('source'), r.get('observed_h1_dt'))
+                     for r in blocks if r.get('pair') and r.get('side') and
+                     r.get('source') and r.get('observed_h1_dt')}
     for d in blocks:
         block_reasons[d.get('reason') or 'unknown']+=1
         o=outcomes.get(d.get('event_id'))
@@ -202,6 +226,8 @@ def _report(day):
         if mf < .35 or ma > mf: useful+=1
         elif mf >= .75 and mf > ma:
             wrong+=1; wrong_reasons[d.get('reason') or 'unknown']+=1
+            if str(d.get('reason') or '') in h1_guard_reasons:
+                h1_guard_proxy_favorable += 1
         else: ambiguous+=1
     def group_line(name, groups):
         scored=[]
@@ -259,10 +285,18 @@ def _report(day):
       f"Наблюдение проекций: ≥1 закрытой H1 {manip.get('eligible',0)}/{manip.get('setups',0)} · ≥8 H1 {manip.get('matured',0)} · без последующей H1 {manip.get('unobserved',0)}",
       f"MFE (до 8 закрытых H1): {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
       f"MFE/MAE (первые 3 H1): {sum(mfe3)/len(mfe3):.2f} / {sum(mae3)/len(mae3):.2f} ATR · n={len(mfe3)}" if mfe3 else 'MFE/MAE (первые 3 H1): —',
+      (f"Пик MAE (replay): {mae_peak[0]:.2f} ATR · {mae_peak[1].get('pair') or '—'} · "
+       f"ATR={mae_peak[2].get('atr_h1','—')} · вход={mae_peak[2].get('entry','—')} · "
+       f"ATR={mae_peak[2].get('atr_source') or 'СТАРЫЙ_ФОРМАТ'} · "
+       f"вход={mae_peak[2].get('entry_source') or 'СТАРЫЙ_ФОРМАТ'} · "
+       f"|вход−H1|={mae_peak[2].get('entry_gap_atr') if mae_peak[2].get('entry_gap_atr') is not None else '—'} ATR"
+       if mae_peak else 'Пик MAE: —'),
       f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']} · неизвестно {sent_timing['unknown']}" + (f" · residual avg {sum(residual)/len(residual):.0f}%" if residual else ''),'',
       group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Режим',by_reg),group_line('Сессии',by_session),'',
       f'Блокировки (уникальные, 3H excursion proxy): полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
       f'Ошибочные блокировки (3H proxy) по причинам: {_top(wrong_reasons)}',
+      (f"Аудит H1: запретов по возрасту/закрытию {h1_guard_total}; из proxy-благоприятных "
+       f"{h1_guard_proxy_favorable} — НЕ доказанные ошибки; групп пара/сторона/модуль/H1 {len(block_cohorts)}"),
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
       f'Master ranges: {master_ranges}',f'KILLER ranges: {killer_ranges}',
       f'Progress ranges: {progress_ranges}',f'Strength ranges: {strength_ranges}',
@@ -271,6 +305,7 @@ def _report(day):
       f'Снимки целей: Navigator {sum(r.get("target_source")=="navigator_snapshot" for r in sent)}/{len(sent)} · источник/контекст {sum(r.get("target_source")=="source_or_context" for r in sent)}/{len(sent)} · неопубликованы/старый формат {sum(r.get("target_source") not in ("navigator_snapshot","source_or_context") for r in sent)}/{len(sent)}',
       f'Таймфрейм события неизвестен: {missing_tf}/{len(sent)}',
       f"Контроль: {'; '.join(problems)}",'',
+      'Proxy-благоприятный отказ не является доказанной ошибкой фильтра. Количество stage-решений не равно числу сделок.',
       'Подтверждения модулей и семейства Master — разные измерения; неизвестный TF не приравнивается к D1/H4.',
       'OBSERVE_ONLY: отчёт ничего автоматически не меняет в торговой логике, порогах, ЛОНГ/ШОРТ или Navigator.'
     ])
@@ -278,10 +313,11 @@ def _report(day):
         import killer_audit
         killer_section = killer_audit.daily_digest(day)
         if killer_section:
-            # Preserve Telegram's 4096 character message limit; don't sacrifice
-            # the main report just to append the optional KILLER section.
-            if len(report) + len(killer_section) + 2 <= 3950:
-                report += '\n\n' + killer_section
+            # The caller _send_parts() uses briefing.split_telegram(), so
+            # keeping the separate KILLER audit is safe even when the combined
+            # text exceeds 4096 characters. Previously this silently dropped
+            # the complete KILLER section on high-volume market days.
+            report += '\n\n' + killer_section
     except Exception:
         log.exception('KILLER_DAILY_REPORT_SKIPPED')
     return report
