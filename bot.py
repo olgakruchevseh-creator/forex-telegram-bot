@@ -682,6 +682,51 @@ async def cmd_ohlc_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("Диагностика источников OHLC временно недоступна.")
 
 
+async def cmd_ohlc_conflicts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only per-hour H1 conflict trail; no new API call."""
+    _remember_effective_chat(update)
+    raw = "".join(getattr(context, "args", [])).upper().replace(" ", "")
+    if "/" not in raw and len(raw) == 6:
+        raw = raw[:3] + "/" + raw[3:]
+    if raw not in cfg.PAIRS:
+        await update.message.reply_text("Укажи валютную пару: /ohlc_conflicts EUR/USD")
+        return
+    try:
+        from ohlc_conflict_trace import format_report
+        hit = CACHE.get((raw, "H1")) or {}
+        observed = list(hit.get("candles") or [])
+        report = await asyncio.to_thread(format_report, raw, cache=observed)
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception:
+        log.exception("OHLC_CONFLICTS_COMMAND_FAILED pair=%s", raw)
+        await update.message.reply_text("Диагностика отдельных H1 сейчас недоступна.")
+
+
+async def cmd_patterns_formation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Bounded read-only per-pattern formation audit using existing RAM cache."""
+    _remember_effective_chat(update)
+    args = list(getattr(context, 'args', []) or [])
+    if len(args) != 2:
+        await update.message.reply_text('Формат: /patterns_formation EUR/USD D1')
+        return
+    raw = str(args[0]).upper().replace(' ', '')
+    if '/' not in raw and len(raw) == 6:
+        raw = raw[:3] + '/' + raw[3:]
+    tf = str(args[1]).upper()
+    if raw not in cfg.PAIRS or tf not in ('W1', 'D1', 'H4', 'H1', 'M15', 'M5'):
+        await update.message.reply_text('Формат: /patterns_formation EUR/USD D1')
+        return
+    try:
+        from patterns_history import format_formation_trace
+        observed = {t: list((CACHE.get((raw, t)) or {}).get('candles') or [])
+                    for t in ('H1', tf)}
+        report = await asyncio.to_thread(format_formation_trace, raw, observed, tf=tf)
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception:
+        log.exception('PATTERNS_FORMATION_COMMAND_FAILED pair=%s tf=%s', raw, tf)
+        await update.message.reply_text('Диагностика формирования сейчас недоступна.')
+
+
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _remember_effective_chat(update)
     try:
@@ -2866,6 +2911,8 @@ def main() -> None:
     app.add_handler(CommandHandler("briefing_full", cmd_briefing))
     app.add_handler(CommandHandler("patterns_history", cmd_patterns_history))
     app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
+    app.add_handler(CommandHandler("ohlc_conflicts", cmd_ohlc_conflicts))
+    app.add_handler(CommandHandler("patterns_formation", cmd_patterns_formation))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)
     log.info("Бот запущен.")

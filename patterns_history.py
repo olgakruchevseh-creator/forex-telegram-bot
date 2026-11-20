@@ -11,7 +11,7 @@ import math
 import sqlite3
 import statistics
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -58,6 +58,10 @@ class HistoryCase:
     mfe_atr: float | None
     mae_atr: float | None
     coverage_reason: str = ""
+    formation_start_at: datetime | None = None
+    formation_calendar_hours: int | None = None
+    formation_expected_core_h1: int | None = None
+    formation_observed_core_h1: int | None = None
 
 
 def _dt(raw: str) -> datetime | None:
@@ -360,9 +364,96 @@ def replay_tf(symbol: str, by_tf: dict, tf: str, *, max_steps: int = REPLAY_MAX_
                 started_at = _dt(window[start_i].dt) if start_i is not None else None
                 f_bars = (len(window) - start_i) if start_i is not None else None
                 f_h1, complete = _actual_closed_h1_count(h1, started_at, closed_at)
-                cases.append(_evaluate(p, closed_at, h1, last.close, f_bars,
-                                       f_h1, complete, horizon=horizon))
+                case = _evaluate(p, closed_at, h1, last.close, f_bars,
+                                 f_h1, complete, horizon=horizon)
+                # Trace the exact formation interval, not an inferred 24×D1.
+                # Only count core hours when both boundaries lie on the UTC H1
+                # grid; D1/W1 source session anchoring remains unverified.
+                hours = None
+                expected = observed = None
+                if started_at is not None and started_at <= closed_at:
+                    span = closed_at - started_at
+                    if (started_at.minute == started_at.second == started_at.microsecond == 0
+                            and closed_at.minute == closed_at.second == closed_at.microsecond == 0
+                            and span % HOUR == timedelta(0) and span <= timedelta(days=370)):
+                        hours = int(span / HOUR)
+                        expected = sum(definitely_trading_fx(started_at + k * HOUR)
+                                       for k in range(hours))
+                        observed = sum(1 for bar in h1 if
+                                       (op := _dt(bar.dt)) is not None
+                                       and started_at <= op < closed_at
+                                       and op + HOUR <= closed_at and definitely_trading_fx(op))
+                cases.append(replace(case, formation_start_at=started_at,
+                                     formation_calendar_hours=hours,
+                                     formation_expected_core_h1=expected,
+                                     formation_observed_core_h1=observed))
     return tuple(cases)
+
+
+
+def format_formation_trace(symbol: str, by_tf: dict, *, tf: str = 'D1',
+                           max_steps: int = REPLAY_MAX_STEPS, detectors=None,
+                           use_archive: bool = True, max_cases: int = 12) -> str:
+    """Bounded, read-only explanation of historical formation arithmetic.
+
+    Dates and observed counts are calculated from the exact closed-prefix
+    detector results, never from future candles or a fabricated D1 UTC anchor.
+    This command is NOT a trade decision or backtest.
+    """
+    if symbol not in cfg.PAIRS or tf not in TFS:
+        raise ValueError('неверная пара или TF')
+    now_h1 = closed_candles((by_tf or {}).get('H1') or [], 60)
+    archived = _archive_h1(symbol) if use_archive else []
+    from patterns_history_sources import overlap_diagnostics, choose_replay_h1
+    conflicts = overlap_diagnostics(symbol, archived, now_h1)['conflict_stamps']
+    effective, _ = _with_optional_h1_archive(symbol, by_tf, use_archive=use_archive)
+    merged = closed_candles(effective.get('H1') or [], 60)
+    selected, state, excluded = choose_replay_h1(now_h1, archived, merged, conflicts)
+    effective = dict(effective)
+    effective['H1'] = selected
+    cases = replay_tf(symbol, effective, tf, max_steps=max_steps, detectors=detectors)
+    lines = [f'🧮 PATTERNS 2.0 · {symbol} · ФОРМИРОВАНИЕ {tf} (НАБЛЮДЕНИЕ)',
+             'Только сохранённые OHLC и RAM-кеш; новых запросов Twelve Data нет.',
+             f'H1: {state}; допущено {len(selected)}, исключено {excluded}; '
+             f'разногласий архива и кеша {len(conflicts)}.',
+             'Календарные часы — разница меток начала и конца фигуры; '
+             'торговые H1 — консервативные основные часы Forex, не точное расписание AvaTrade.',
+             'D1/W1: граница сессии поставщика не подтверждена; '
+             'эти сравнения предварительные.']
+    if not (by_tf or {}).get(tf):
+        lines.append(f'Нет закрытой истории {tf} в текущем кеше; потребуется очередной обычный скан.')
+        return '\n'.join(lines)
+    known = [c for c in cases if c.formation_start_at is not None]
+    lines.append(f'Найдено фигур {len(cases)}; определено начало {len(known)}; '
+                 f'полное покрытие H1 {sum(c.formation_h1_complete for c in known)}.')
+    # Show suspicious cases first: low core-hours in multi-day patterns,
+    # or a claimed complete formation with an H1/core mismatch.
+    def rank(c):
+        unusual = (c.formation_bars is not None and c.formation_bars >= 2 and
+                   c.formation_calendar_hours is not None and
+                   c.formation_expected_core_h1 is not None and
+                   c.formation_expected_core_h1 < c.formation_calendar_hours // 2)
+        mismatch = (c.formation_h1_complete and c.formation_expected_core_h1 is not None
+                    and c.formation_observed_core_h1 != c.formation_expected_core_h1)
+        return (not mismatch, not unusual, c.confirmed_at)
+    for c in sorted(known, key=rank)[:max(1, min(20, int(max_cases)))]:
+        start = c.formation_start_at
+        end = c.confirmed_at
+        complete = 'ДА' if c.formation_h1_complete else 'НЕТ'
+        counter = str(c.formation_h1) if c.formation_h1 is not None else 'н/д'
+        core = (f'{c.formation_observed_core_h1}/{c.formation_expected_core_h1}'
+                if c.formation_expected_core_h1 is not None else 'н/д')
+        span = str(c.formation_calendar_hours) if c.formation_calendar_hours is not None else 'н/д'
+        lines.append(f'  {c.name} · {"ЛОНГ" if c.side == "LONG" else "ШОРТ"} '
+                     f'· закрыто {end:%d.%m %H:%M} UTC; '
+                     f'от {start:%d.%m %H:%M} UTC; TF-свечей {c.formation_bars}; '
+                     f'календарных часов {span}; H1 формирования {counter}; '
+                     f'основных H1 {core}; полное покрытие {complete}.')
+    if len(known) > max_cases:
+        lines.append(f'Показано до {max_cases} примеров из {len(known)}, без выгрузки всей истории.')
+    lines.append('Мало H1 за несколько D1 не обязательно ошибка: возможны выходные. '
+                 'Сначала сверяем даты, ожидаемые торговые часы и границы D1.')
+    return '\n'.join(lines)
 
 
 def _median(nums) -> str:
