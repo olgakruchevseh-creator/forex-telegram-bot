@@ -54,7 +54,9 @@ def test_formation_h1_count_uses_real_candles_not_calendar_division():
     h1 = _h1(6, start)
     h1.pop(2)
     count, complete = ph._actual_closed_h1_count(h1, start, start+timedelta(hours=6))
-    assert (count, complete) == (5, True)
+    # A missing weekday candle invalidates the claim that formation coverage
+    # is complete; five observed bars are not six consecutive trading hours.
+    assert (count, complete) == (None, False)
     count, complete = ph._actual_closed_h1_count(h1, start-timedelta(hours=1), start+timedelta(hours=6))
     assert count is None and not complete
 

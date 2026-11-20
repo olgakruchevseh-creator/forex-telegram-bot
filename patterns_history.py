@@ -18,6 +18,7 @@ from pathlib import Path
 import config as cfg
 import patterns
 from analysis import Candle, atr, closed_candles
+from patterns_history_integrity import audit_h1, missing_core_hours, HOUR
 
 TFS = ("W1", "D1", "H4", "H1", "M15", "M5")
 # Conservative default: an explicit Telegram command only, never scan_job.
@@ -126,12 +127,19 @@ def _actual_closed_h1_count(h1: list[Candle], start: datetime | None, end: datet
     last_open = _dt(h1[-1].dt)
     if first_open is None or last_open is None or first_open > start or last_open + timedelta(hours=1) < end:
         return None, False
-    total = 0
-    for bar in h1:
-        opened = _dt(bar.dt)
-        if opened is not None and start < opened + timedelta(hours=1) <= end:
-            total += 1
-    return total, True
+    # Count recorded bars, but do not call the coverage "complete" when an
+    # expected weekday hour disappeared between two archived H1 stamps.
+    # Normal FX weekend closure does not count as missing trading candles.
+    selected = [_dt(bar.dt) for bar in h1
+                if (opened := _dt(bar.dt)) is not None
+                and start < opened + HOUR <= end]
+    if any(missing_core_hours(a, b) for a, b in zip(selected, selected[1:])):
+        return None, False
+    if selected:
+        # Examine boundaries too: otherwise a missing first/last hour is hidden.
+        if missing_core_hours(start - HOUR, selected[0]) or missing_core_hours(selected[-1], end):
+            return None, False
+    return len(selected), True
 
 
 def _archive_h1(symbol: str, *, limit: int = MAX_ARCHIVED_H1) -> list[Candle]:
@@ -162,7 +170,8 @@ def _archive_h1(symbol: str, *, limit: int = MAX_ARCHIVED_H1) -> list[Candle]:
             for t, o, h, l, c in reversed(rows)]
 
 
-def _with_optional_h1_archive(symbol: str, by_tf: dict, *, use_archive: bool) -> tuple[dict, int]:
+def _with_optional_h1_archive(symbol: str, by_tf: dict, *, use_archive: bool,
+                              diagnostics: dict | None = None) -> tuple[dict, int]:
     """Merge only H1 for requested pair, bounded, preserving live overlapping OHLC."""
     if not use_archive:
         return by_tf, 0
@@ -175,10 +184,20 @@ def _with_optional_h1_archive(symbol: str, by_tf: dict, *, use_archive: bool) ->
         when = _dt(bar.dt)
         if when is not None:
             rows[when] = bar
+    conflicts = 0
     for bar in current:  # live cache wins for matching candle times
         when = _dt(bar.dt)
         if when is not None:
+            old = rows.get(when)
+            if old is not None and any(
+                not math.isclose(float(getattr(old, col)), float(getattr(bar, col)),
+                                 rel_tol=1e-10, abs_tol=1e-10)
+                for col in ('open', 'high', 'low', 'close')
+            ):
+                conflicts += 1
             rows[when] = bar
+    if diagnostics is not None:
+        diagnostics['archive_live_price_conflicts'] = conflicts
     ordered = [rows[k] for k in sorted(rows)][-MAX_ARCHIVED_H1:]
     effective = dict(by_tf)
     effective['H1'] = ordered
@@ -205,8 +224,13 @@ def _h1_atr_coverage_reason(h1: list[Candle], confirmed_at: datetime, entry: flo
                     if (t := _dt(bar.dt)) is not None and t + timedelta(hours=1) <= confirmed_at]
     if len(prior_closes) < 15:
         return 'H1_МЕНЬШЕ_15_ДЛЯ_ATR'
-    if confirmed_at - prior_closes[-1] > MAX_H1_CONTINUITY_GAP:
+    if missing_core_hours(prior_closes[-1] - HOUR, confirmed_at - HOUR):
         return 'H1_ПРОБЕЛ_ПЕРЕД_ПОДТВЕРЖДЕНИЕМ'
+    # ATR should not be calculated across missing core weekday sessions.
+    atr_opens = [_dt(b.dt) for b in h1 if (t := _dt(b.dt)) is not None
+                 and t + HOUR <= confirmed_at][-30:]
+    if any(missing_core_hours(a, b) for a, b in zip(atr_opens, atr_opens[1:])):
+        return 'H1_ПРОБЕЛ_В_ОКНЕ_ATR'
     return ''
 
 def _h1_atr_at_confirmation(h1: list[Candle], confirmed_at: datetime) -> float | None:
@@ -232,7 +256,7 @@ def _evaluate(p: patterns.Pattern, confirmed_at: datetime, h1: list[Candle],
     # The H1 overlapping confirmation is excluded. Only fully subsequent
     # candles can be used for both outcomes and drawdown observations.
     future = [bar for bar in h1 if (op := _dt(bar.dt)) is not None and op >= confirmed_at]
-    if future and _dt(future[0].dt) - confirmed_at > MAX_H1_CONTINUITY_GAP:
+    if future and missing_core_hours(confirmed_at - HOUR, _dt(future[0].dt)):
         return HistoryCase(p.name, p.side, p.tf, confirmed_at, formation_bars,
                            formation_h1, h1_complete, 'NO_H1', None, None, None, None, None,
                            'H1_ПРОБЕЛ_ПОСЛЕ_ПОДТВЕРЖДЕНИЯ')
@@ -246,7 +270,7 @@ def _evaluate(p: patterns.Pattern, confirmed_at: datetime, h1: list[Candle],
     previous_open = None
     for i, b in enumerate(future[:max(1, horizon)], 1):
         opened = _dt(b.dt)
-        if previous_open is not None and opened - previous_open > MAX_H1_CONTINUITY_GAP:
+        if previous_open is not None and missing_core_hours(previous_open, opened):
             detail = 'H1_РАЗРЫВ_В_ГОРИЗОНТЕ'
             break
         previous_open = opened
@@ -341,8 +365,32 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
     lines = [f"📚 PATTERNS 2.0 · {symbol} · ИСТОРИЯ (НАБЛЮДЕНИЕ)",
              "Проверка: +1 ATR раньше −0,75 ATR; до 8 ПОЛНЫХ H1 после фигуры.",
              "Это НЕ торговые TR1/TR2/TR3 и НЕ вероятность будущего движения."]
-    by_tf, archival_count = _with_optional_h1_archive(symbol, by_tf, use_archive=use_archive)
+    # Inspect the incoming live H1 BEFORE archive merge, which otherwise could
+    # mask duplicate or disordered source records by de-duplicating timestamps.
+    original_h1 = (by_tf or {}).get('H1') or []
+    # The vendor cache may legitimately include the currently forming final
+    # candle. Inspect only closed input, just as the replay engine does.
+    original_audit = audit_h1(closed_candles(original_h1, 60))
+    merge_diagnostics: dict[str, int] = {}
+    by_tf, archival_count = _with_optional_h1_archive(
+        symbol, by_tf, use_archive=use_archive, diagnostics=merge_diagnostics)
+    merged_audit = audit_h1(closed_candles((by_tf or {}).get('H1') or [], 60))
     h1 = _usable_bars(by_tf, 'H1')
+    lines.append(merged_audit.describe())
+    conflicts = merge_diagnostics.get('archive_live_price_conflicts', 0)
+    if conflicts:
+        lines.append(f'H1_КОНФЛИКТ_АРХИВА_И_КЕША: {conflicts} свечей с различными OHLC; '
+                     'архив сохранён без изменений, исходы требуют проверки.')
+    # Do not silently turn dubious weekend/duplicate H1 into "historical wins".
+    # Keep source records untouched for investigation; no live signal changes.
+    if (original_audit.blocks_replay or merged_audit.blocks_replay
+            or conflicts or (not h1 and merged_audit.rows)):
+        lines.append('ВНИМАНИЕ: H1_ЦЕЛОСТНОСТЬ_НЕ_ПОДТВЕРЖДЕНА. '
+                     'Исходы по H1 заблокированы, архив не изменён. '
+                     'Проверьте часовые метки и происхождение OHLC.')
+        by_tf = dict(by_tf)
+        by_tf['H1'] = []  # observation-only: fail closed for this command
+        h1 = []
     if h1:
         first_h1, last_h1 = _dt(h1[0].dt), _dt(h1[-1].dt)
         lines.append(f"Покрытие H1: {len(h1)} закрытых свечей; "
@@ -379,6 +427,7 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
             lines.append(f"  {name} · {labels[side]}: n={len(group)}, созрели={len(mature)}, "+
                          f"формирование {_median(c.formation_bars for c in group)} {tf}; "+
                          f"H1 формирования {_median(c.formation_h1 for c in group)}; "+
+                         f"неполное формирование H1 {sum(not c.formation_h1_complete for c in group)}; "+
                          f"откаты (медиана) {_median(c.pullbacks_h1 for c in mature)}; "+
                          f"до исхода/горизонта (медиана) {_median(c.outcome_after_h1 for c in mature)} H1; "+
                          f"нет H1 {sum(c.outcome=='NO_H1' for c in group)}")
@@ -394,7 +443,8 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
     lines.append("\nГраницы: только доступная история; LTF неполный H1 пропущен. "
                  "H1 формирования = реальные закрытия H1 (0 может быть верным для M5/M15), "
                  "не календарное число часов. Откаты и длительность — медианы по доступным случаям; "
-                 "периоды без H1 не заполняются искусственно. "
+                 "периоды без H1 не заполняются искусственно; при пропуске торговых H1 "
+                 "полнота формирования не подтверждается. "
                  "Время до исхода — не срок будущего тренда. "
                  "Н/д означает недостаток временных или структурных данных.")
     return "\n".join(lines)
