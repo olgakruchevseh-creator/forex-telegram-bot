@@ -30,8 +30,10 @@ def plan(*, start: date, end: date, db_path: Path, as_of: datetime | None = None
         raise ValueError('разрешено не более 7 завершённых календарных дней в прошлом')
     beginning=datetime.combine(start, datetime.min.time(),tzinfo=timezone.utc)
     end_exclusive=datetime.combine(end+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc)
-    expected=sum(definitely_trading_fx(beginning+timedelta(hours=i))
-                 for i in range(int((end_exclusive-beginning)/timedelta(hours=1))))
+    expected_stamps={iso(beginning+timedelta(hours=i))
+                     for i in range(int((end_exclusive-beginning)/timedelta(hours=1)))
+                     if definitely_trading_fx(beginning+timedelta(hours=i))}
+    expected=len(expected_stamps)
     if not expected:
         raise ValueError('пилот только для окон с основными торговыми часами')
     if not Path(db_path).is_file():
@@ -40,10 +42,20 @@ def plan(*, start: date, end: date, db_path: Path, as_of: datetime | None = None
     with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+'?mode=ro',uri=True,timeout=3)) as db:
         db.execute('PRAGMA query_only=ON')
         db.execute('SELECT opened_utc FROM candles LIMIT 1').fetchone()
+        preflight={}
+        for pair in cfg.PAIRS:
+            existing={stamp for (stamp,) in db.execute(
+                'SELECT opened_utc FROM candles WHERE pair=? AND tf=? '
+                'AND opened_utc>=? AND opened_utc<?',
+                (pair, 'H1', iso(beginning), iso(end_exclusive)))}
+            preflight[pair]={'already_present_core':len(expected_stamps & existing),
+                             'missing_core':len(expected_stamps - existing)}
     return {'start':start.isoformat(),'end':end.isoformat(), 'days':(end-start).days+1,
             'pair_count':len(cfg.PAIRS), 'max_api_requests':len(cfg.PAIRS),
             'expected_core_hours_per_pair':expected,
-            'mode':'PLAN_ONLY', 'trade_effect':False, 'overwrites':False}
+            'preflight_core_coverage_by_pair':preflight,
+            'mode':'PLAN_ONLY', 'trade_effect':False, 'overwrites':False,
+            'api_availability_verified':False, 'cost_verified':False}
 
 
 def run(*, start:date, end:date, db_path:Path, session=None,

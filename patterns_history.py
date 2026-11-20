@@ -18,7 +18,7 @@ from pathlib import Path
 import config as cfg
 import patterns
 from analysis import Candle, atr, closed_candles
-from patterns_history_integrity import audit_h1, missing_core_hours, definitely_trading_fx, HOUR
+from patterns_history_integrity import audit_h1, missing_core_hours, definitely_trading_fx, definitely_closed_fx, HOUR
 from patterns_history_sources import (archive_metadata, overlap_diagnostics,
                                       report_lines, choose_replay_h1)
 
@@ -62,6 +62,9 @@ class HistoryCase:
     formation_calendar_hours: int | None = None
     formation_expected_core_h1: int | None = None
     formation_observed_core_h1: int | None = None
+    formation_observed_edge_h1: int | None = None
+    formation_closed_market_hours: int | None = None
+    formation_tf_weekend_opens: int | None = None
 
 
 def _dt(raw: str) -> datetime | None:
@@ -370,7 +373,7 @@ def replay_tf(symbol: str, by_tf: dict, tf: str, *, max_steps: int = REPLAY_MAX_
                 # Only count core hours when both boundaries lie on the UTC H1
                 # grid; D1/W1 source session anchoring remains unverified.
                 hours = None
-                expected = observed = None
+                expected = observed = edge = closed_hours = weekend_tf = None
                 if started_at is not None and started_at <= closed_at:
                     span = closed_at - started_at
                     if (started_at.minute == started_at.second == started_at.microsecond == 0
@@ -383,10 +386,27 @@ def replay_tf(symbol: str, by_tf: dict, tf: str, *, max_steps: int = REPLAY_MAX_
                                        (op := _dt(bar.dt)) is not None
                                        and started_at <= op < closed_at
                                        and op + HOUR <= closed_at and definitely_trading_fx(op))
+                        edge = sum(1 for bar in h1 if
+                                   (op := _dt(bar.dt)) is not None
+                                   and started_at <= op < closed_at
+                                   and op + HOUR <= closed_at
+                                   and not definitely_trading_fx(op)
+                                   and not definitely_closed_fx(op))
+                        closed_hours = sum(definitely_closed_fx(started_at + k * HOUR)
+                                           for k in range(hours))
+                        if tf in ('D1', 'W1') and start_i is not None:
+                            # Vendor-date/session base for these TF is unverified.
+                            # Weekend labels are evidence, not grounds to delete.
+                            weekend_tf = sum(1 for b in window[start_i:]
+                                             if (_dt(b.dt) is not None
+                                                 and definitely_closed_fx(_dt(b.dt))))
                 cases.append(replace(case, formation_start_at=started_at,
                                      formation_calendar_hours=hours,
                                      formation_expected_core_h1=expected,
-                                     formation_observed_core_h1=observed))
+                                     formation_observed_core_h1=observed,
+                                     formation_observed_edge_h1=edge,
+                                     formation_closed_market_hours=closed_hours,
+                                     formation_tf_weekend_opens=weekend_tf))
     return tuple(cases)
 
 
@@ -425,7 +445,13 @@ def format_formation_trace(symbol: str, by_tf: dict, *, tf: str = 'D1',
         return '\n'.join(lines)
     known = [c for c in cases if c.formation_start_at is not None]
     lines.append(f'Найдено фигур {len(cases)}; определено начало {len(known)}; '
-                 f'полное покрытие H1 {sum(c.formation_h1_complete for c in known)}.')
+                 f'полное покрытие по текущей H1-сетке '
+                 f'{sum(c.formation_h1_complete for c in known)} '
+                 '(не подтверждение границ D1/W1).')
+    if tf in ('D1', 'W1'):
+        lines.append('ВНИМАНИЕ: начало/конец сессии D1/W1 независимо не подтверждены; '
+                     '«полное H1-покрытие» условное. Нельзя объявлять '
+                     'временную основу этих фигур проверенной.')
     # Show suspicious cases first: low core-hours in multi-day patterns,
     # or a claimed complete formation with an H1/core mismatch.
     def rank(c):
@@ -439,16 +465,22 @@ def format_formation_trace(symbol: str, by_tf: dict, *, tf: str = 'D1',
     for c in sorted(known, key=rank)[:max(1, min(20, int(max_cases)))]:
         start = c.formation_start_at
         end = c.confirmed_at
-        complete = 'ДА' if c.formation_h1_complete else 'НЕТ'
+        complete = ('УСЛОВНО_ДА' if c.formation_h1_complete else 'НЕТ') if tf in ('D1','W1') else ('ДА' if c.formation_h1_complete else 'НЕТ')
         counter = str(c.formation_h1) if c.formation_h1 is not None else 'н/д'
         core = (f'{c.formation_observed_core_h1}/{c.formation_expected_core_h1}'
                 if c.formation_expected_core_h1 is not None else 'н/д')
         span = str(c.formation_calendar_hours) if c.formation_calendar_hours is not None else 'н/д'
+        edge = str(c.formation_observed_edge_h1) if c.formation_observed_edge_h1 is not None else 'н/д'
+        closed_hours = str(c.formation_closed_market_hours) if c.formation_closed_market_hours is not None else 'н/д'
+        weekend_opens = (str(c.formation_tf_weekend_opens) if c.formation_tf_weekend_opens is not None else 'н/д')
         lines.append(f'  {c.name} · {"ЛОНГ" if c.side == "LONG" else "ШОРТ"} '
                      f'· закрыто {end:%d.%m %H:%M} UTC; '
                      f'от {start:%d.%m %H:%M} UTC; TF-свечей {c.formation_bars}; '
                      f'календарных часов {span}; H1 формирования {counter}; '
-                     f'основных H1 {core}; полное покрытие {complete}.')
+                     f'основных H1 {core}; пограничных H1 {edge}; '
+                     f'закрытых часов в интервале {closed_hours}; '
+                     + (f'TF-меток в закрытые часы {weekend_opens}; ' if tf in ('D1','W1') else '')
+                     + f'покрытие H1 {complete}.')
     if len(known) > max_cases:
         lines.append(f'Показано до {max_cases} примеров из {len(known)}, без выгрузки всей истории.')
     lines.append('Мало H1 за несколько D1 не обязательно ошибка: возможны выходные. '
@@ -557,8 +589,9 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
                          f"формирование {_median(c.formation_bars for c in group)} {tf}; "+
                          f"H1 формирования (медиана, полное покрытие) "
                          f"{_median(c.formation_h1 for c in group if c.formation_h1_complete)}; "+
-                         f"H1 формирование полное "
-                         f"{sum(c.formation_h1_complete for c in group)}/{len(group)}; "+
+                         f"H1 покрытие основных часов "
+                         f"{sum(c.formation_h1_complete for c in group)}/{len(group)}"+
+                         (' (граница D1/W1 не проверена); ' if tf in ('D1','W1') else '; ')+
                          f"откаты (медиана) {_median(c.pullbacks_h1 for c in mature)}; "+
                          f"до исхода/горизонта (медиана) {_median(c.outcome_after_h1 for c in mature)} H1; "+
                          f"нет H1 {sum(c.outcome=='NO_H1' for c in group)}")

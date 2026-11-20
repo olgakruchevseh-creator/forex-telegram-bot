@@ -14,7 +14,7 @@ import math
 import sqlite3
 
 import config as cfg
-from ohlc_history_journal import db_default
+from ohlc_history_journal import db_default, ARCHIVE_SETTLING_SECONDS
 from patterns_history_integrity import definitely_closed_fx, definitely_trading_fx
 
 FIELDS = ('open','high','low','close')
@@ -75,12 +75,18 @@ def inspect(pair: str, *, db_path: Path | None = None, cache: list | None = None
                 continue
             pip = .01 if pair.endswith('/JPY') else .0001
             first = _utc(first_seen)
-            lag = ((first - (dt + HOUR)).total_seconds()/3600 if first else None)
+            lag_seconds = ((first - (dt + HOUR)).total_seconds() if first else None)
+            lag = (lag_seconds / 3600 if lag_seconds is not None else None)
+            timing = ('НЕИЗВЕСТНО' if lag_seconds is None else
+                      'ДО_ЗАКРЫТИЯ' if lag_seconds < 0 else
+                      'ДО_ТЕКУЩЕГО_ПОРОГА_СТАБИЛИЗАЦИИ' if lag_seconds < ARCHIVE_SETTLING_SECONDS else
+                      'ПОСЛЕ_ТЕКУЩЕГО_ПОРОГА')
             records.append({'dt':dt,'fields':fields,'archive':a,'cache':b,
                             'max_pips':round(max(abs(z) for z in delta)/pip,3),
                             'close_pips':round(delta[-1]/pip,3),
                             'source':str(source)[:64], 'first_seen':first,
-                            'lag_hours':lag,
+                            'lag_hours':lag, 'lag_seconds':lag_seconds,
+                            'first_seen_timing':timing,
                             'session':'ВЫХОДНЫЕ' if definitely_closed_fx(dt) else
                                       'ОСНОВНЫЕ' if definitely_trading_fx(dt) else 'ПОГРАНИЧНЫЕ'})
     records.sort(key=lambda x:x['dt'])
@@ -128,7 +134,8 @@ def inspect(pair: str, *, db_path: Path | None = None, cache: list | None = None
             'session_types':Counter(x['session'] for x in records),
             'vendor_reported':sum(bool(x['probe']) for x in records),
             'vendor_checked':sum(x['probe'] in ('MATCH','DIFFER') for x in records),
-            'source_types':Counter(x['source'] for x in records)}
+            'source_types':Counter(x['source'] for x in records),
+            'first_seen_timings':Counter(x['first_seen_timing'] for x in records)}
 
 
 def format_report(pair: str, *, db_path: Path | None = None,
@@ -141,20 +148,32 @@ def format_report(pair: str, *, db_path: Path | None = None,
     lines.append(f'Конфликтов {len(r["rows"])}; текущих H1 в кеше {r["overlap"]}; '
                  f'дублирующихся кеш-меток {r["duplicate_cache"]}; '
                  f'сохранённых попыток API {r["vendor_reported"]}, с сопоставленными ценами {r["vendor_checked"]}/{len(r["rows"])}.')
+    timing = r['first_seen_timings']
+    lines.append(f'Первое сохранение относительно закрытия: до нынешнего порога '
+                 f'{ARCHIVE_SETTLING_SECONDS // 60} мин — '
+                 f'{timing["ДО_ТЕКУЩЕГО_ПОРОГА_СТАБИЛИЗАЦИИ"]}; '
+                 f'после порога — {timing["ПОСЛЕ_ТЕКУЩЕГО_ПОРОГА"]}; '
+                 f'до закрытия — {timing["ДО_ЗАКРЫТИЯ"]}; '
+                 f'неизвестно — {timing["НЕИЗВЕСТНО"]}. '
+                 'Это времена first_seen, а не доказательство применявшейся версии кода.')
     lines.append(f'Только Close {r["field_types"]["CLOSE_ONLY"]}; '
                  f'другие OHLC {r["field_types"]["OTHER_FIELDS"]}. '
                  'Сначала приведены часы с наибольшим отклонением.')
     for event in sorted(r['rows'],key=lambda x:(-x['max_pips'],x['dt']))[:25]:
         a,c=event['archive'],event['cache']
-        lag=f'{event["lag_hours"]:.0f}ч' if event['lag_hours'] is not None else 'н/д'
+        seconds=event['lag_seconds']
+        lag=(f'{seconds:+.0f} сек' if seconds is not None and abs(seconds)<3600 else
+             f'{seconds/3600:+.2f} ч' if seconds is not None else 'н/д')
         probe=(f' · API {event["probe"]}' + (f' (ближе: {event["vendor_closer"]})'
                 if event['vendor_closer'] else '')) if event['probe'] else ' · API не проверен'
         lines.append(f'  {event["dt"]:%d.%m %H:%M} UTC · '
                      f'{"/".join({"open":"O","high":"H","low":"L","close":"C"}[k] for k in event["fields"])} · Δмакс {event["max_pips"]:.2f} п.; '
                      f'C архив {a[3]:.6f} / кеш {c[3]:.6f}; '
-                     f'впервые +{lag} · {event["session"]}{probe}')
+                     f'впервые {lag} от закрытия · {event["session"]}{probe}')
     if len(r['rows'])>25:
         lines.append(f'Показаны 25 крупнейших из {len(r["rows"])}. Конфликты не исправлены.')
+    lines.append('Раннее first_seen само по себе НЕ доказывает, что такая цена '
+                 'использовалась для торгового решения или что поставщик позднее исправил её.')
     lines.append('O/H/L/C = открытие/максимум/минимум/закрытие. Метки API показывают '
                  'лишь поздний ответ того же поставщика и не устанавливают истину на дату сигнала.')
     lines.append('«API не проверен» означает отсутствие сопоставимого сохранённого запроса, '
