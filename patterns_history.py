@@ -18,7 +18,7 @@ from pathlib import Path
 import config as cfg
 import patterns
 from analysis import Candle, atr, closed_candles
-from patterns_history_integrity import audit_h1, missing_core_hours, HOUR
+from patterns_history_integrity import audit_h1, missing_core_hours, definitely_trading_fx, HOUR
 from patterns_history_sources import (archive_metadata, overlap_diagnostics,
                                       report_lines, choose_replay_h1)
 
@@ -141,6 +141,15 @@ def _actual_closed_h1_count(h1: list[Candle], start: datetime | None, end: datet
         # Examine boundaries too: otherwise a missing first/last hour is hidden.
         if missing_core_hours(start - HOUR, selected[0]) or missing_core_hours(selected[-1], end):
             return None, False
+    else:
+        # Zero full H1 is legitimate for a short M5/M15 formation, but NOT
+        # when a full core weekday H1 should have closed inside the interval.
+        first_close = start.replace(minute=0, second=0, microsecond=0) + HOUR
+        close_at = first_close
+        while close_at <= end:
+            if close_at > start and definitely_trading_fx(close_at - HOUR):
+                return None, False
+            close_at += HOUR
     return len(selected), True
 
 
@@ -226,7 +235,7 @@ def _h1_atr_coverage_reason(h1: list[Candle], confirmed_at: datetime, entry: flo
                     if (t := _dt(bar.dt)) is not None and t + timedelta(hours=1) <= confirmed_at]
     if len(prior_closes) < 15:
         return 'H1_МЕНЬШЕ_15_ДЛЯ_ATR'
-    if missing_core_hours(prior_closes[-1] - HOUR, confirmed_at - HOUR):
+    if missing_core_hours(prior_closes[-1] - HOUR, confirmed_at):
         return 'H1_ПРОБЕЛ_ПЕРЕД_ПОДТВЕРЖДЕНИЕМ'
     # ATR should not be calculated across missing core weekday sessions.
     atr_opens = [_dt(b.dt) for b in h1 if (t := _dt(b.dt)) is not None
@@ -425,6 +434,9 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
     else:
         lines.append('Покрытие H1: нет достоверных закрытых свечей; исходы проверить нельзя.')
     lines.append('Архив при наличии читается локально, без запросов API; ретроспективные OHLC не доказывают данные, видимые боту в прошлом.')
+    lines.append('H1 формирования: количество фактических закрытий при полном покрытии. '
+                 'D1/W1: временная основа дневных и недельных свечей поставщика '
+                 'не подтверждена, поэтому сравнение с H1 остаётся предварительным.')
     for tf in TFS:
         cases = replay_tf(symbol, by_tf, tf, max_steps=max_steps, detectors=detectors)
         groups: dict[tuple[str, str], list[HistoryCase]] = defaultdict(list)
@@ -452,8 +464,10 @@ def format_report(symbol: str, by_tf: dict, *, max_steps: int = REPLAY_MAX_STEPS
             labels = {"LONG": "ЛОНГ", "SHORT": "ШОРТ"}
             lines.append(f"  {name} · {labels[side]}: n={len(group)}, созрели={len(mature)}, "+
                          f"формирование {_median(c.formation_bars for c in group)} {tf}; "+
-                         f"H1 формирования {_median(c.formation_h1 for c in group)}; "+
-                         f"неполное формирование H1 {sum(not c.formation_h1_complete for c in group)}; "+
+                         f"H1 формирования (медиана, полное покрытие) "
+                         f"{_median(c.formation_h1 for c in group if c.formation_h1_complete)}; "+
+                         f"H1 формирование полное "
+                         f"{sum(c.formation_h1_complete for c in group)}/{len(group)}; "+
                          f"откаты (медиана) {_median(c.pullbacks_h1 for c in mature)}; "+
                          f"до исхода/горизонта (медиана) {_median(c.outcome_after_h1 for c in mature)} H1; "+
                          f"нет H1 {sum(c.outcome=='NO_H1' for c in group)}")

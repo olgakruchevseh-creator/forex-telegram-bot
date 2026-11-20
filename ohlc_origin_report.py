@@ -18,6 +18,8 @@ from ohlc_history_journal import db_default
 from patterns_history_integrity import audit_h1, definitely_closed_fx, definitely_trading_fx
 from patterns_history_sources import overlap_diagnostics
 from ohlc_calendar_profiles import format_calendar_lines
+from ohlc_conflict_evidence import inspect as inspect_close_evidence, report_lines as close_evidence_lines
+from ohlc_backfill_preview import preview as preview_h1_backfill, format_lines as backfill_preview_lines
 
 MAX_ROWS = 12000
 MAX_VENDOR_REPORT_BYTES = 250000
@@ -155,6 +157,8 @@ def analyze(pair: str, *, db_path: Path | None = None,
         'ОСНОВНЫЕ_ТОРГОВЫЕ_ЧАСЫ' if definitely_trading_fx(t) else 'ПОГРАНИЧНЫЕ_ЧАСЫ'
         for t in contested
     )
+    close_evidence = inspect_close_evidence(pair, path, contested, live, as_of=now)
+    backfill = preview_h1_backfill(path)
     return {'pair': pair, 'state': 'OK', 'archive_rows': total,
             'archive_read': len(raw), 'archive_first': _utc(raw[-1][0]) if raw else None,
             'archive_last': _utc(raw[0][0]) if raw else None,
@@ -169,7 +173,8 @@ def analyze(pair: str, *, db_path: Path | None = None,
             'conflict_examples': source['examples'][:3],
             'revisions': revisions, 'invalid_rows_skipped': nonfinite,
             'probe': _read_recent_vendor_probe(path, pair),
-            'calendar_lines': format_calendar_lines(live, older)}
+            'calendar_lines': format_calendar_lines(live, older),
+            'close_evidence': close_evidence, 'backfill_preview': backfill}
 
 
 def format_report(pair: str, *, db_path: Path | None = None,
@@ -214,6 +219,8 @@ def format_report(pair: str, *, db_path: Path | None = None,
                             data['disputed_calendar'].most_common()) or '0') +
                  '. Причина изменения цены не установлена.')
     lines.extend(data.get('calendar_lines', []))
+    lines.extend(close_evidence_lines(data['close_evidence']))
+    lines.extend(backfill_preview_lines(data['backfill_preview']))
     lines.append(f'Записей пересмотров в SQLite: {data["revisions"] if data["revisions"] is not None else "н/д"}; '
                  f'неверных архивных записей пропущено: {data["invalid_rows_skipped"]}.')
     probe = data['probe']
