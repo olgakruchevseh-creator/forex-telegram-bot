@@ -702,6 +702,27 @@ async def cmd_ohlc_conflicts(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Диагностика отдельных H1 сейчас недоступна.")
 
 
+async def cmd_ohlc_triplet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only comparison of archived, cached and previously rechecked H1."""
+    _remember_effective_chat(update)
+    raw = "".join(getattr(context, "args", [])).upper().replace(" ", "")
+    if "/" not in raw and len(raw) == 6:
+        raw = raw[:3] + "/" + raw[3:]
+    if raw not in cfg.PAIRS:
+        await update.message.reply_text("Укажи валютную пару: /ohlc_triplet EUR/USD")
+        return
+    try:
+        from ohlc_triplet_report import format_report
+        hit = CACHE.get((raw, "H1")) or {}
+        observed = list(hit.get("candles") or [])
+        report = await asyncio.to_thread(format_report, raw, cache=observed)
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception as exc:
+        log.error("OHLC_TRIPLET_COMMAND_FAILED pair=%s error_type=%s",
+                  raw, type(exc).__name__, exc_info=True)
+        await update.message.reply_text("Сравнение OHLC временно недоступно. Данные не изменены.")
+
+
 _OHLC_VERIFY_COMMAND_LOCK = asyncio.Lock()
 
 
@@ -2995,6 +3016,7 @@ def main() -> None:
     app.add_handler(CommandHandler("patterns_history", cmd_patterns_history))
     app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
     app.add_handler(CommandHandler("ohlc_conflicts", cmd_ohlc_conflicts))
+    app.add_handler(CommandHandler("ohlc_triplet", cmd_ohlc_triplet))
     app.add_handler(CommandHandler("ohlc_verify", cmd_ohlc_verify))
     app.add_handler(CommandHandler("patterns_formation", cmd_patterns_formation))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)

@@ -153,6 +153,10 @@ def audit_once(*, db_path: Path, session, api_key: str, now: datetime | None = N
                 maximum = round(max(abs(v) for v in deltas.values()), 3)
                 item.update({"vendor_returned_label": vendor_label,
                              "archive_source_label": stored[4],
+                             # The old report stored only rounded differences.
+                             # Preserve the exact parsed response for future
+                             # manual rechecks, without changing frozen SQLite.
+                             "vendor_ohlc_response": dict(zip(_FIELDS, vendor_ohlc)),
                              "delta_quote_ticks_stored_minus_vendor": deltas,
                              "max_abs_delta_quote_ticks": maximum})
                 match = maximum <= 1.001
