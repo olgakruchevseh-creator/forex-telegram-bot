@@ -398,8 +398,14 @@ def briefing_status(symbol: str, by_tf: dict, *, snapshot: dict | None = None) -
                     wave = waves[wave_tf]
                     movement = "вверх" if wave.get("current_side", 0) > 0 else (
                         "вниз" if wave.get("current_side", 0) < 0 else "неясно")
-                    result += (f" · Эллиотт {wave_tf}: волна {wave.get('current_wave') or '—'} "
-                               f"({movement}, гипотеза; не торговый сигнал)")
+                    abc = wave.get("abc") or {}
+                    if wave.get("current_wave") is None and abc.get("completed") == 3:
+                        result += (f" · Эллиотт {wave_tf}: A–B–C, концы A/B/C подтверждены "
+                                   f"({abc.get('geometry_hint', 'тип не определён')}; "
+                                   "гипотеза; не торговый сигнал)")
+                    else:
+                        result += (f" · Эллиотт {wave_tf}: волна {wave.get('current_wave') or '—'} "
+                                   f"({movement}, гипотеза; не торговый сигнал)")
             except (TypeError, ValueError, AttributeError):
                 pass
         return result

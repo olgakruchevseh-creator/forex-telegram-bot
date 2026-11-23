@@ -86,27 +86,34 @@ def _prefix(pts: list[dict]) -> dict | None:
 
 
 def _abc_after(impulse: list[dict], after: list[dict], side: int) -> dict | None:
+    """Observe A–B–C after an impulse; allow a plausible extended wave B.
+
+    Structural A/B/C pivots are confirmed by the canonical ZigZag, but the
+    named correction family remains a *hypothesis*, not a completed Elliott
+    5-3-5/3-3-5 proof. No direction or trade filters depend on this result.
+    """
     if not after or len(after) > 3:
         return None
-    # The alternating ZigZag legs after p5 are potential A, B, C.
-    prev = impulse[-1]
-    p5 = prev["price"]
-    a = side * (after[0]["price"] - p5)
-    if a >= 0:
+    from abc_correction_geometry import classify
+
+    values = [impulse[-1], *after]
+    result = classify(values[0]["price"], values[1]["price"],
+                      values[2]["price"] if len(values) >= 3 else None,
+                      values[3]["price"] if len(values) >= 4 else None,
+                      impulse_side=side,
+                      indexes=tuple(p["index"] for p in values))
+    if result is None or result["kind"] == "NONSTANDARD":
         return None
-    result = {"completed": len(after), "a_length": abs(a), "b_retrace": None,
-              "c_to_a": None}
-    if len(after) >= 2:
-        b = side * (after[1]["price"] - after[0]["price"])
-        if not (0 < b < abs(a)):
-            return None
-        result["b_retrace"] = b / abs(a)
-    if len(after) >= 3:
-        c = side * (after[2]["price"] - after[1]["price"])
-        if c >= 0:
-            return None
-        result["c_to_a"] = abs(c) / abs(a)
-    return result
+    return {
+        "completed": len(after), "a_length": result["a_length"],
+        "b_retrace": result["b_retrace"], "c_to_a": result["c_to_a"],
+        "geometry_hint": result["geometry_hint"], "geometry_kind": result["kind"],
+        "bars_by_leg": result["bars_by_leg"],
+        "time_c_to_a": result["time_c_to_a"],
+        "time_asymmetry": result["time_asymmetry"],
+        "elliott_confirmed": False, "evidence": result["evidence"],
+        "pivot_endpoints_confirmed": True,
+    }
 
 
 
@@ -191,6 +198,11 @@ def analyze(confirmed_swings: Sequence, closed_bars: Sequence | None = None, *, 
     points = _swings(confirmed_swings)
     if len(points) < MIN_PIVOTS:
         return base
+    # Caller passes *closed* OHLC only. Even a confirmed-looking ZigZag pivot
+    # cannot be published if it lies beyond that frozen data snapshot.
+    if closed_bars and points[-1]["index"] >= len(closed_bars):
+        return {**base, "status": "ОПОРА ЗА ПРЕДЕЛАМИ ЗАКРЫТЫХ OHLC",
+                "alternative": "ТРЕБУЕТСЯ СИНХРОНИЗАЦИЯ ДАННЫХ И ZIGZAG"}
     # Complete 5-wave structure with at most three following corrective swings.
     # Later starts win if the same closed history supports multiple counts.
     full = []
@@ -213,7 +225,7 @@ def analyze(confirmed_swings: Sequence, closed_bars: Sequence | None = None, *, 
                    else "C" if completed_abc == 2 else None)
         phase = ("ВОЗМОЖНО НАЧАЛО КОРРЕКЦИИ A–B–C" if current == "A" else
                  "КОРРЕКЦИЯ A–B–C: ВОЗМОЖНА ВОЛНА " + current if current else
-                 "КОРРЕКЦИЯ A–B–C: ТРИ ОПОРЫ НАЙДЕНЫ")
+                 "КОРРЕКЦИЯ A–B–C: КОНЦЫ A/B/C ПОДТВЕРЖДЕНЫ, ТИП — ГИПОТЕЗА")
         return {**base, "available": True, "status": "ГИПОТЕЗА ПОЛНОГО ИМПУЛЬСА",
                 "side": info["side"], "current_side": _current_side(info["side"], current),
                 "phase": phase, "current_wave": current,
@@ -282,6 +294,17 @@ def compact_lines(waves: dict | None, *, tf: str = "H1") -> list[str]:
     inv = s.get("invalidation")
     if inv is not None:
         lines.append(f"Граница отмены волновой гипотезы: {inv:.5f} · НЕ торговый стоп")
+    abc = s.get("abc") or {}
+    if abc:
+        b_ratio = abc.get("b_retrace")
+        c_ratio = abc.get("c_to_a")
+        b_text = f"{b_ratio:.2f}" if isinstance(b_ratio, (int, float)) else "—"
+        c_text = f"{c_ratio:.2f}" if isinstance(c_ratio, (int, float)) else "—"
+        lines.append(f"A–B–C {tf} после предполагаемого 1–5: "
+                     f"{abc.get('geometry_hint', 'тип не определён')} · B/A {b_text} · C/A {c_text}")
+        if abc.get("time_asymmetry"):
+            lines.append("A–B–C: выраженная асимметрия длительности A и C")
+        lines.append("A–B–C: экстремумы подтверждены ZigZag; внутренняя волновая форма не доказана")
     if (s.get("ratios") or {}).get("wave5_truncated"):
         lines.append("Волна 5: возможное укорочение, требуется альтернативный счёт")
     senior = []

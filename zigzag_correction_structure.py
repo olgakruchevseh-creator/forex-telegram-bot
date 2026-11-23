@@ -12,7 +12,7 @@ import math
 def _num(value):
     try:
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return out if math.isfinite(out) else None
 
@@ -28,16 +28,27 @@ def _label(kind: str, price: float, previous: float | None, tolerance: float) ->
 
 
 def _decorate(swings: list, tolerance: float) -> list[dict]:
+    """Only strictly ordered, alternating, positive confirmed extrema.
+
+    Skipping one damaged pivot can manufacture a new A–B–C from unrelated
+    historical swings. Fail closed for the entire diagnostic readout instead.
+    """
     out, previous_high, previous_low = [], None, None
     for point in swings or []:
         kind = getattr(point, "kind", None) if not isinstance(point, dict) else point.get("kind")
         price = _num(getattr(point, "price", None) if not isinstance(point, dict) else point.get("price"))
         index = getattr(point, "index", None) if not isinstance(point, dict) else point.get("index")
-        if kind not in {"high", "low"} or price is None:
-            continue
+        try:
+            valid_index = (not isinstance(index, bool) and int(index) == index and int(index) >= 0)
+            index = int(index) if valid_index else None
+        except (TypeError, ValueError, OverflowError):
+            index = None
+        if (kind not in {"high", "low"} or price is None or price <= 0 or index is None
+                or (out and (index <= out[-1]["index"] or kind == out[-1]["kind"]))):
+            return []
         previous = previous_high if kind == "high" else previous_low
         row = {
-            "kind": kind, "price": price, "index": int(index) if index is not None else None,
+            "kind": kind, "price": price, "index": index,
             "label": _label(kind, price, previous, tolerance),
             "confirmed": True, "immutable": True, "eligible_for_signal": True,
         }
@@ -53,19 +64,25 @@ def _candidate(confirmed: list[dict], bars: list) -> dict | None:
     if not confirmed or not bars:
         return None
     last = confirmed[-1]
-    try:
-        start = max(0, int(last.get("index") or 0) + 1)
-    except (TypeError, ValueError):
-        start = 0
+    start = last["index"] + 1
     if start >= len(bars):
         return None
-    tail = bars[start:]
+    tail = []
+    for offset, bar in enumerate(bars[start:]):
+        hi, lo = _num(getattr(bar, "high", None)), _num(getattr(bar, "low", None))
+        if hi is None or lo is None or lo <= 0 or hi < lo:
+            return None
+        tail.append((offset, bar, hi, lo))
     if last["kind"] == "high":
-        rel, bar = min(enumerate(tail), key=lambda item: float(item[1].low))
-        kind, price = "low", float(bar.low)
+        rel, bar, _, price = min(tail, key=lambda item: item[3])
+        kind = "low"
+        if price >= last["price"]:
+            return None
     else:
-        rel, bar = max(enumerate(tail), key=lambda item: float(item[1].high))
-        kind, price = "high", float(bar.high)
+        rel, bar, price, _ = max(tail, key=lambda item: item[2])
+        kind = "high"
+        if price <= last["price"]:
+            return None
     return {
         "kind": kind, "price": price, "index": start + rel, "dt": str(getattr(bar, "dt", "")),
         "confirmed": False, "immutable": False, "eligible_for_signal": False,
@@ -102,6 +119,7 @@ def _abc(points: list[dict], candidate: dict | None, main_side: int) -> dict:
         "available": False, "status": "NONE", "phase_ru": "A-B-C не выделена",
         "main_side": main_side, "candidate_can_signal": False,
         "direction_effect": "NONE", "publication_effect": "NONE", "fib_reference_only": True,
+        "elliott_confirmed": False, "impulse_1_to_5_verified": False,
     }
     if main_side not in (-1, 1):
         return base
@@ -111,8 +129,8 @@ def _abc(points: list[dict], candidate: dict | None, main_side: int) -> dict:
     if len(points) >= 4 and [p["kind"] for p in points[-4:]] == pattern:
         chosen = [dict(p) for p in points[-4:]]
         endpoint_confirmed = True
-        status = "ABC_CONFIRMED"
-        phase_ru = "A-B-C подтверждена четырьмя закрытыми H1 pivot"
+        status = "ABC_CONFIRMED"  # Backward compatible: *pivots*, not Elliott family.
+        phase_ru = "концы A, B, C подтверждены экстремумами ZigZag; тип коррекции — гипотеза"
     elif (len(points) >= 3 and [p["kind"] for p in points[-3:]] == pattern[:3]
           and candidate and candidate.get("kind") == pattern[3]):
         chosen = [dict(p) for p in points[-3:]] + [dict(candidate)]
@@ -120,34 +138,35 @@ def _abc(points: list[dict], candidate: dict | None, main_side: int) -> dict:
         phase_ru = "волна C формируется; конечный pivot ещё не подтверждён"
     else:
         return base
-    p0, p1, p2, p3 = [float(p["price"]) for p in chosen]
-    a = p1 - p0
-    b = p2 - p1
-    c = p3 - p2
-    b_ratio = _ratio(a, b)
-    c_ratio = _ratio(a, c)
-    if b_ratio is None:
-        geometry = "НЕ ОПРЕДЕЛЕНО"
-    elif b_ratio <= 0.786:
-        geometry = "ЗИГЗАГ-ПОДОБНАЯ"
-    elif b_ratio >= 0.900:
-        geometry = "ФЛЭТ-ПОДОБНАЯ"
-    else:
-        geometry = "ПЕРЕХОДНАЯ"
+    from abc_correction_geometry import classify
+    geometry = classify(
+        *[p["price"] for p in chosen], impulse_side=main_side,
+        indexes=tuple(p["index"] for p in chosen),
+    )
+    if geometry is None or geometry["kind"] == "NONSTANDARD":
+        return base
+    b_ratio = geometry["b_retrace"]
+    c_ratio = geometry["c_to_a"]
     return {
         **base, "available": True, "status": status, "phase_ru": phase_ru,
         "endpoint_confirmed": endpoint_confirmed, "uses_candidate": not endpoint_confirmed,
-        "points": chosen, "a_points": abs(a), "b_points": abs(b), "c_points": abs(c),
+        "points": chosen, "a_points": geometry["a_length"],
+        "b_points": geometry["b_length"], "c_points": geometry["c_length"],
         "b_retracement_ratio": b_ratio, "c_to_a_ratio": c_ratio,
-        "b_nearest_fib": _nearest(b_ratio, (0.382, 0.5, 0.618, 0.786, 0.9, 1.0)),
+        "b_nearest_fib": _nearest(b_ratio, (0.382, 0.5, 0.618, 0.786, 0.9, 1.0, 1.272, 1.382)),
         "c_nearest_fib": _nearest(c_ratio, (0.618, 1.0, 1.272, 1.618)),
-        "geometry_hint": geometry,
+        "geometry_hint": geometry["geometry_hint"], "geometry_kind": geometry["kind"],
+        "bars_by_leg": geometry["bars_by_leg"], "time_c_to_a": geometry["time_c_to_a"],
+        "time_asymmetry": geometry["time_asymmetry"], "evidence": geometry["evidence"],
     }
 
 
 def build(confirmed_swings: list, h1_bars: list, main_side: int, adaptive_side: int = 0,
           tolerance: float = 0.0) -> dict:
     points = _decorate(confirmed_swings, tolerance)
+    # Never label a pivot beyond the latest supplied closed H1 snapshot.
+    if points and h1_bars and points[-1]["index"] >= len(h1_bars):
+        points = []
     candidate = _candidate(points, h1_bars)
     return {
         "owner": "CANONICAL_FOREX_H1_ZIGZAG_CONSUMER",
@@ -180,8 +199,12 @@ def compact_lines(readout: dict | None) -> list[str]:
         c = correction.get("c_to_a_ratio")
         b_text = f"{b:.2f}" if isinstance(b, (int, float)) else "—"
         c_text = f"{c:.2f}" if isinstance(c, (int, float)) else "—"
-        status = "ПОДТВЕРЖДЕНА" if correction.get("endpoint_confirmed") else "C ФОРМИРУЕТСЯ · НЕ СИГНАЛ"
+        status = ("ОПОРЫ A/B/C ПОДТВЕРЖДЕНЫ · ТИП ГИПОТЕЗА" if correction.get("endpoint_confirmed")
+                  else "C ФОРМИРУЕТСЯ · НЕ СИГНАЛ")
         lines.append(
             f"A-B-C H1: {status} · B/A {b_text} · C/A {c_text} · {correction.get('geometry_hint', '—')}"
         )
+        if correction.get("time_asymmetry") and correction.get("endpoint_confirmed"):
+            lines.append("A-B-C H1: выраженная асимметрия времени A и C")
+        lines.append("A-B-C H1: только свинги; связь с импульсом 1–5 не доказана")
     return lines

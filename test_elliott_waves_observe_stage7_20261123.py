@@ -100,10 +100,11 @@ def test_abc_after_complete_impulse_with_correct_direction():
     assert ew.analyze(pivots(more))["abc"]["c_to_a"] == pytest.approx(1.0)
 
 
-def test_abc_retracing_past_previous_fifth_is_not_called_zigzag():
-    invalid = BULL + [1.40, 1.60]  # B over start A; could be an expanded flat
-    x = ew.analyze(pivots(invalid))
-    assert x.get("abc") is None  # No invented strict ABC label
+def test_abc_b_extends_beyond_start_a_is_expanded_flat_hypothesis_not_zigzag():
+    extended = BULL + [1.40, 1.60]  # B over start A: possible expanded flat
+    x = ew.analyze(pivots(extended))
+    assert x["abc"]["geometry_kind"] == "EXPANDED_FLAT_LIKE"
+    assert x["abc"]["elliott_confirmed"] is False
 
 
 def test_current_wave_rechecked_on_closed_bar_wicks():
