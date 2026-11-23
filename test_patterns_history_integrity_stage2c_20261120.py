@@ -47,13 +47,31 @@ def test_h1_duplicate_and_off_hour_grid_fail_closed():
     assert result.blocks_replay
 
 
-def test_unclosed_last_live_bar_is_ignored_not_misreported():
-    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    live = hours(now-timedelta(hours=25), 26)  # last H1 currently open
+def test_unclosed_last_live_bar_is_ignored_not_misreported(monkeypatch):
+    # A moving 25-hour lookback includes Saturday/Sunday on Mondays. That
+    # tests the weekend quarantine instead of the unfinished-bar rule and
+    # fails depending on the weekday of GitHub Actions. Freeze a trading-day
+    # clock so both protections remain independently testable.
+    import analysis
+    import patterns_history_integrity as integrity
+
+    clock = datetime(2026, 11, 18, 12, 30, tzinfo=UTC)  # Wednesday, UTC
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.astimezone(tz) if tz is not None else clock.replace(tzinfo=None)
+
+    monkeypatch.setattr(analysis, 'datetime', FrozenDateTime)
+    monkeypatch.setattr(integrity, 'datetime', FrozenDateTime)
+    latest_open = clock.replace(minute=0, second=0, microsecond=0)
+    live = hours(latest_open - timedelta(hours=25), 26)
+    assert len(analysis.closed_candles(live, 60)) == 25
+
     report = ph.format_report('EUR/USD', {'H1': live}, max_steps=5,
                               use_archive=False, detectors=())
     assert 'H1_ЦЕЛОСТНОСТЬ_НЕ_ПОДТВЕРЖДЕНА' not in report
-    assert 'Покрытие H1:' in report
+    assert 'Покрытие H1: 25 закрытых свечей' in report
 
 
 def test_real_weekend_gap_is_not_fabricated_and_not_missing_core_hours():
