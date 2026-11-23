@@ -48,7 +48,7 @@ def test_independent_all_tf_and_conflict(monkeypatch):
     assert 'W1: ↓ AB=CD' in report
     assert 'H1: ↑ 1-2-3' in report
     assert 'M15: ↑ Локальный флаг' in report
-    assert 'M5 (подтв.): ↑ Локальный флаг' in report
+    assert 'M5: ↑ Локальный флаг' in report
     assert 'конфликт' in report
     assert 'НЕ СИГНАЛ' in report
 
@@ -112,14 +112,14 @@ def test_caption_includes_multiple_tf_and_is_telegram_safe():
                      'H4: ↑ Паттерн 1-2-3\n'
                      'H1: ↓ Двойная вершина\n'
                      'M15: ↑ Молот\n'
-                     'M5 (подтв.): ↑ Бычье поглощение\n'
-                     'Главная фигура: W1 ШОРТ\n'
+                     'M5: ↑ Бычье поглощение\n'
+                     'Старшая обнаруженная фигура: W1 ШОРТ\n'
                      'Есть конфликт направлений между фигурами')
     result = compact_pair_caption('━━━ 💱 EUR/USD ━━━\nНАПРАВЛЕНИЕ: ЛОНГ\nW1 ЛОНГ · D1 ЛОНГ · H4 ЛОНГ · H1 ЛОНГ · M15 ЛОНГ · M5 ЛОНГ', patterns_text)
     assert _telegram_len(result) <= 1000
-    for tf in ('W1:', 'D1:', 'H4:', 'H1:', 'M15:', 'M5 (подтв.):'):
+    for tf in ('W1:', 'D1:', 'H4:', 'H1:', 'M15:', 'M5:'):
         assert tf in result
-    assert 'Главная фигура: W1 ШОРТ' in result
+    assert 'Старшая обнаруженная фигура: W1 ШОРТ' in result
 
 
 def test_more_than_two_per_tf_reports_suppressed_count():

@@ -621,9 +621,10 @@ HARMONIC_RATIOS = {
     # Сайфер: B откатывает XA, C — расширение XA (не AB), D — откат XC около 0.786.
     "cypher": {"xb": (0.382, 0.618), "xc": (1.272, 1.414), "dxc": (0.75, 0.82)},
     "five_o": {"xb": (1.13, 1.618), "ac": (1.618, 2.24), "cd": (0.48, 0.62)},
-    "abcd": {"bc": (0.382, 0.886), "cd_ab": (1.0, 1.68)},
+    "abcd": {"bc": (0.382, 0.886), "cd_ab": (0.88, 1.12)},
 }
-ABCD_TIME_SYM = 0.45
+ABCD_TIME_SYM = 0.45  # Minimum CD/AB temporal symmetry (shorter duration / longer).
+ABCD_PRICE_SYM_TOL = 0.12  # Strict |CD/AB - 1| bound, independent of FIB_TOL.
 PATTERN_MAIN_TFS = ["W1", "D1", "H4", "H1"]
 PATTERN_CONFIRM_TFS = ["M15", "M5"]
 # Technical lifetime/cache bounds only; do NOT change trade admission limits.

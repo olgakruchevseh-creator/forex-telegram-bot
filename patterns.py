@@ -6,6 +6,7 @@ import json
 import io
 import hashlib
 import logging
+import math
 import os
 import time
 from collections import OrderedDict
@@ -84,6 +85,23 @@ def _save(data: dict) -> None:
     tmp.replace(dest)
 
 
+def _validated_ohlc(bars: list[Candle]) -> bool:
+    """Fail closed on nonfinite, nonpositive or geometrically impossible prices.
+
+    Preserve the raw candles, never synthesize replacements from neighboring
+    bars. The upstream OHLC history journal performs its own stricter checks.
+    """
+    for bar in bars:
+        try:
+            o, h, l, c = (float(bar.open), float(bar.high), float(bar.low), float(bar.close))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (not all(math.isfinite(v) and v > 0 for v in (o, h, l, c))
+                or h < max(o, l, c) or l > min(o, h, c)):
+            return False
+    return True
+
+
 def _body(c: Candle) -> float:
     return abs(c.close - c.open)
 
@@ -154,11 +172,25 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     if _bull(a) and _body(b) <= _body(a) * .55 and _bear(c) and c.close <= (a.open + a.close) / 2:
         add("Вечерняя звезда", "SHORT", 84, 80, "Трёхсвечный разворот подтверждён закрытием ниже середины первой бычьей свечи.", max(a.high, b.high, c.high), prior_move)
 
-    # Three soldiers / crows.
-    if all(_bull(x) for x in (a, b, c)) and a.close < b.close < c.close and min(_body(x) / _range(x) for x in (a, b, c)) >= .55:
-        add("Три белых солдата", "LONG", 86, 82, "Три сильные закрытые бычьи свечи последовательно обновили закрытия вверх.", min(a.low, b.low, c.low), .8)
-    if all(_bear(x) for x in (a, b, c)) and a.close > b.close > c.close and min(_body(x) / _range(x) for x in (a, b, c)) >= .55:
-        add("Три чёрные вороны", "SHORT", 86, 82, "Три сильные закрытые медвежьи свечи последовательно обновили закрытия вниз.", max(a.high, b.high, c.high), .8)
+    # Three soldiers / crows: successive opens must lie within the preceding
+    # real body. Three gap-separated impulse bars are NOT this classical pattern.
+    def _opens_within_previous_body(x: Candle, y: Candle) -> bool:
+        return min(x.open, x.close) <= y.open <= max(x.open, x.close)
+
+    body_sequence_ok = (_opens_within_previous_body(a, b)
+                        and _opens_within_previous_body(b, c))
+    if (body_sequence_ok and all(_bull(x) for x in (a, b, c))
+            and a.close < b.close < c.close
+            and min(_body(x) / _range(x) for x in (a, b, c)) >= .55):
+        add("Три белых солдата", "LONG", 86, 82,
+            "Три сильные бычьи свечи: открытия внутри предыдущих тел, закрытия последовательно выше.",
+            min(a.low, b.low, c.low), .8)
+    if (body_sequence_ok and all(_bear(x) for x in (a, b, c))
+            and a.close > b.close > c.close
+            and min(_body(x) / _range(x) for x in (a, b, c)) >= .55):
+        add("Три чёрные вороны", "SHORT", 86, 82,
+            "Три сильные медвежьи свечи: открытия внутри предыдущих тел, закрытия последовательно ниже.",
+            max(a.high, b.high, c.high), .8)
 
     # Piercing Line / Dark Cloud Cover: обязательное проникновение за середину тела.
     bmid = (b.open + b.close) / 2
@@ -191,19 +223,42 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
 
 
 def _pivots(bars: list[Candle], n: int = 3, limit: int = 12) -> list[tuple[int, float, str]]:
-    out = []
+    """Only *confirmed* extrema. A dual high/low candle is ambiguous, not two legs.
+
+    A plateau has one deterministic (earliest) pivot; otherwise flat candles
+    could manufacture arbitrarily many harmonic X-A-B-C-D anchors.
+    """
+    out: list[tuple[int, float, str]] = []
+    n = max(1, int(n))
     for i in range(n, len(bars) - n):
-        if bars[i].high >= max(x.high for x in bars[i-n:i+n+1]):
-            out.append((i, bars[i].high, "H"))
-        if bars[i].low <= min(x.low for x in bars[i-n:i+n+1]):
-            out.append((i, bars[i].low, "L"))
-    return sorted(out, key=lambda x: x[0])[-max(4, limit):]
+        neighbors = [(j, bars[j]) for j in range(i-n, i+n+1) if j != i]
+        high = float(bars[i].high)
+        low = float(bars[i].low)
+        is_high = (all(high >= b.high for _, b in neighbors)
+                   and any(high > b.high for _, b in neighbors)
+                   and not any(j < i and high == b.high for j, b in neighbors))
+        is_low = (all(low <= b.low for _, b in neighbors)
+                  and any(low < b.low for _, b in neighbors)
+                  and not any(j < i and low == b.low for j, b in neighbors))
+        if is_high and is_low:
+            continue  # Outside bar: high and low sequence is unknown inside H1.
+        if is_high:
+            out.append((i, high, "H"))
+        elif is_low:
+            out.append((i, low, "L"))
+    return out[-max(4, limit):]
 
 
 def _alternating_pivots(pivots: list[tuple[int, float, str]]) -> list[tuple[int, float, str]]:
-    """Убирает соседние экстремумы одного типа, сохраняя более сильный."""
+    """Keep alternating, strictly time-ordered swings without zero-time legs."""
     out: list[tuple[int, float, str]] = []
-    for pivot in pivots:
+    ambiguous_indexes = {index for index, _, kind in pivots
+                         if any(j == index and other != kind for j, _, other in pivots)}
+    for pivot in sorted(pivots, key=lambda item: item[0]):
+        if pivot[0] in ambiguous_indexes:
+            continue
+        if out and pivot[0] <= out[-1][0]:
+            continue
         if not out or out[-1][2] != pivot[2]:
             out.append(pivot)
             continue
@@ -319,6 +374,52 @@ def _line(points: list[tuple[int, float]], at: int) -> tuple[float, float] | Non
     return (fit[0], fit[1]) if fit else None
 
 
+def _flag_pennant_patterns(tf: str, bars: list[Candle], av: float) -> list[Pattern]:
+    """Independent short-consolidation geometry; no triangle/wedge pivots required.
+
+    Flag = small sideways/countertrend channel following a pole.
+    Pennant = two genuinely converging boundaries following a pole.
+    A single narrow candle is insufficient evidence of a pennant.
+    """
+    out: list[Pattern] = []
+    if len(bars) < 19 or not av or av <= 0:
+        return out
+    last = bars[-1]
+    pole_start, pole_end = bars[-18], bars[-11]
+    pole = pole_end.close - pole_start.close
+    impulse = pole / av
+    consolidation = bars[-10:-1]
+    cons_high = max(x.high for x in consolidation)
+    cons_low = min(x.low for x in consolidation)
+    width = cons_high - cons_low
+    if width <= 0 or width > abs(pole) * .75:
+        return out
+    early, late = consolidation[:4], consolidation[-4:]
+    pennant = (max(x.high for x in late) < max(x.high for x in early) - av * .03
+               and min(x.low for x in late) > min(x.low for x in early) + av * .03)
+    drift = consolidation[-1].close - consolidation[0].close
+    tolerance = av * float(getattr(cfg, "PATTERN_CHART_BREAK_BUFFER_ATR", .05))
+    min_body = av * float(getattr(cfg, "PATTERN_CHART_BREAK_MIN_BODY_ATR", .35))
+    # Price must remain near the end of the pole; don't call a deep reversal a flag.
+    if (impulse >= 1.8 and drift <= av * .15
+            and cons_low >= pole_end.close - abs(pole) * .65
+            and last.close > cons_high + tolerance
+            and _bull(last) and _body(last) >= min_body):
+        name = "Бычий вымпел" if pennant else "Бычий флаг"
+        _add(out, name, "LONG", tf, 86, 82,
+             "После направленного импульса короткая консолидация завершилась первым закрытым пробоем вверх.",
+             cons_high, last)
+    if (impulse <= -1.8 and drift >= -av * .15
+            and cons_high <= pole_end.close + abs(pole) * .65
+            and last.close < cons_low - tolerance
+            and _bear(last) and _body(last) >= min_body):
+        name = "Медвежий вымпел" if pennant else "Медвежий флаг"
+        _add(out, name, "SHORT", tf, 86, 82,
+             "После направленного импульса короткая консолидация завершилась первым закрытым пробоем вниз.",
+             cons_low, last)
+    return out
+
+
 def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     """Клинья, флаги, вымпелы, прямоугольники и треугольники.
 
@@ -328,9 +429,10 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {}).get(tf, 42) or 42)
     if len(bars) < 45:
         return []
-    out, previous, last = [], bars[-2], bars[-1]
+    previous, last = bars[-2], bars[-1]
     history = bars[-(hist_n + 1):-1] if len(bars) > hist_n + 1 else bars[:-1]
     av = atr(bars, 14) or _range(last)
+    out = _flag_pennant_patterns(tf, bars, av)
     piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(tf, 3)), int(getattr(cfg, "PATTERN_CHART_PIVOT_LIMIT", 16)))
     highs = [(i, price) for i, price, kind in piv if kind == "H"]
     lows = [(i, price) for i, price, kind in piv if kind == "L"]
@@ -357,9 +459,13 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     tolerance = av * float(getattr(cfg, "PATTERN_CHART_BREAK_BUFFER_ATR", .05))
     min_break_body = av * float(getattr(cfg, "PATTERN_CHART_BREAK_MIN_BODY_ATR", .35))
     body = _body(last)
-    breaks_up = (previous.close <= top + tolerance and last.close > top + tolerance
+    # Compare each close to the *line at that bar*, not both to today's line.
+    # Otherwise a sloping wedge may falsely break or miss the first breakout.
+    previous_top = top - top_slope
+    previous_bottom = bottom - bottom_slope
+    breaks_up = (previous.close <= previous_top + tolerance and last.close > top + tolerance
                  and _bull(last) and body >= min_break_body)
-    breaks_down = (previous.close >= bottom - tolerance and last.close < bottom - tolerance
+    breaks_down = (previous.close >= previous_bottom - tolerance and last.close < bottom - tolerance
                    and _bear(last) and body >= min_break_body)
     old_x = max(0, len(history)-18)
     old_top = top-top_slope*(len(history)-old_x)
@@ -407,20 +513,6 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
             _add(out, "Медвежий прямоугольник", "SHORT", tf, 84+fit_bonus, 80+fit_bonus,
                  "Боковой диапазон завершён закрытым пробоем нижней границы.", bottom, last)
 
-    # Флаг/вымпел требует выраженного импульса перед короткой консолидацией.
-    impulse_start, impulse_end = bars[-18], bars[-11]
-    impulse = (impulse_end.close-impulse_start.close) / av
-    consolidation = bars[-10:-1]
-    cons_high, cons_low = max(x.high for x in consolidation), min(x.low for x in consolidation)
-    narrowed = _range(consolidation[-1]) < max(_range(x) for x in consolidation[:4]) * .75
-    if impulse >= 1.8 and last.close > cons_high + tolerance and _bull(last):
-        name = "Бычий вымпел" if narrowed else "Бычий флаг"
-        _add(out, name, "LONG", tf, 86+fit_bonus, 82+fit_bonus,
-             "После бычьего импульса коррекционная фигура завершилась закрытым пробоем вверх.", cons_high, last)
-    if impulse <= -1.8 and last.close < cons_low - tolerance and _bear(last):
-        name = "Медвежий вымпел" if narrowed else "Медвежий флаг"
-        _add(out, name, "SHORT", tf, 86+fit_bonus, 82+fit_bonus,
-             "После медвежьего импульса коррекционная фигура завершилась закрытым пробоем вниз.", cons_low, last)
     return out
 
 
@@ -604,7 +696,16 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     bc_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("bc", (.382, .886))
     cd_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("cd_ab", (1.0, 1.68))
     tol = float(getattr(cfg, "FIB_TOL", .06))
-    if _inside(ratio_bc, bc_limits, tol) and _inside(ratio_cd, cd_limits, tol):
+    # AB=CD is an equality-of-legs pattern, not a generic 1.0–1.68 extension.
+    # Fib tolerance applies to BC/retracements, but must not relax this core
+    # equality beyond the independent configured percentage bound.
+    price_sym_tol = max(0.0, min(0.5, float(getattr(cfg, "ABCD_PRICE_SYM_TOL", .12))))
+    time_ab, time_cd = b[0]-a[0], d[0]-c[0]
+    time_sym = (min(time_ab, time_cd)/max(time_ab, time_cd)
+                if min(time_ab, time_cd) > 0 else 0.0)
+    min_time_sym = max(0.0, min(1.0, float(getattr(cfg, "ABCD_TIME_SYM", .45))))
+    if (_inside(ratio_bc, bc_limits, tol) and _inside(ratio_cd, cd_limits, tol)
+            and abs(ratio_cd - 1.0) <= price_sym_tol and time_sym >= min_time_sym):
         side = "LONG" if d[2] == "L" else "SHORT"
         last = bars[-1]
         # Это только первичное подтверждение геометрии. Перед отправкой
@@ -612,12 +713,14 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
         confirmed = last.close > last.open if side == "LONG" else last.close < last.open
         if confirmed:
             ratio_q = (_ratio_quality(ratio_bc, bc_limits, tol) + _ratio_quality(ratio_cd, cd_limits, tol)) / 2.0
-            time_ab, time_cd = max(1, b[0]-a[0]), max(1, d[0]-c[0])
-            time_sym = min(time_ab, time_cd) / max(time_ab, time_cd)
+            # Both price and time symmetries already passed hard validation.
             geometry = int(round(ratio_q*5 + time_sym*3))
             q = min(92, 82 + geometry)
             old_count = len(out)
-            _add(out, "Гармонический AB=CD", side, tf, q, min(90, 78+geometry), f"Завершена зеркальная структура AB=CD; BC={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, последняя свеча подтвердила разворот.", d[1], last)
+            _add(out, "Гармонический AB=CD", side, tf, q, min(90, 78+geometry),
+                 f"Геометрия AB=CD: BC/AB={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, симметрия по времени={time_sym:.2f}; "
+                 "на последней закрытой свече обнаружена направленная реакция (не доказательство разворота тренда).",
+                 d[1], last)
             if len(out) > old_count:
                 out[-1].geometry_id = f"ABCD:{bars[d[0]].dt}:{d[1]:.8f}" if 0 <= d[0] < len(bars) else ""
     return out
@@ -668,6 +771,9 @@ def pattern_123_states(by_tf: dict) -> list[dict]:
     for tf in cfg.PATTERN_MAIN_TFS:
         bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
         bars = bars[-cfg.PATTERN_LOOKBACK.get(tf, 160):]
+        if not _validated_ohlc(bars):
+            log.warning("PATTERNS_OHLC_INVALID tf=%s phase=123_lifecycle", tf)
+            continue
         life = pattern_123_lifecycle(tf, bars)
         state = str(life.get("state", "NONE"))
         if state in {"NONE", "REJECTED"}:
@@ -688,6 +794,9 @@ def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
         bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
         lookback = cfg.PATTERN_LOOKBACK.get(tf, 160)
         bars = bars[-lookback:]
+        if not _validated_ohlc(bars):
+            log.warning("PATTERNS_OHLC_INVALID tf=%s phase=scan", tf)
+            continue
         found.extend(candlestick_patterns(tf, bars))
         found.extend(structural_patterns(tf, bars))
         found.extend(chart_patterns(tf, bars))
@@ -1289,5 +1398,6 @@ def briefing_htf_card(symbol: str, by_tf: dict):
     p = found[0]
     image = render_pattern_chart(symbol, p, by_tf)
     side = "ЛОНГ" if p.side == "LONG" else "ШОРТ"
-    caption = f"🧩 {symbol} · {p.tf} · {p.name}\nНаправление фигуры: {side} · качество {p.quality}/100 · вероятность {p.confidence}%"
+    caption = (f"🧩 {symbol} · {p.tf} · {p.name}\nНаправление фигуры: {side} · "
+               f"геометрия {p.quality}/100 · оценка модели {p.confidence}/100 (НЕ вероятность)")
     return {"image": image, "caption": caption, "tf": p.tf, "pattern": p.name}

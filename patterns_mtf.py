@@ -42,7 +42,11 @@ class MTFObservation:
 
 
 def _closed(tf: str, by_tf: dict):
-    return closed_candles(by_tf.get(tf) or [], patterns.TF_MINUTES[tf])[-cfg.PATTERN_LOOKBACK.get(tf, 160):]
+    bars = closed_candles(by_tf.get(tf) or [], patterns.TF_MINUTES[tf])[-cfg.PATTERN_LOOKBACK.get(tf, 160):]
+    if not patterns._validated_ohlc(bars):
+        log.warning("PATTERNS_OHLC_INVALID tf=%s phase=mtf_view", tf)
+        return []
+    return bars
 
 
 def _ltfs_signature(by_tf: dict) -> bytes | None:
@@ -136,7 +140,7 @@ def format_observation(observation: MTFObservation, *, max_per_tf: int | None = 
         visible = group if max_per_tf is None else group[:max(1, int(max_per_tf))]
         names = [f"{_ru_side(p.side)} {p.name}" for p in visible]
         extra = len(group) - len(visible)
-        label = f"{tf} (подтв.)" if tf == "M5" else tf
+        label = tf  # Independent M5 observation is NOT confirmation of an HTF figure.
         suffix = f"; ещё {extra}" if extra else ""
         lines.append(f"{label}: {'; '.join(names)}{suffix}")
     if len(lines) == 1:
@@ -144,9 +148,9 @@ def format_observation(observation: MTFObservation, *, max_per_tf: int | None = 
     else:
         if observation.primary_tf:
             side = "ЛОНГ" if observation.primary_side == "LONG" else "ШОРТ"
-            lines.append(f"Главная фигура: {observation.primary_tf} {side} (старший TF)")
+            lines.append(f"Старшая обнаруженная фигура: {observation.primary_tf} {side} (не торговое направление)")
         if observation.has_conflict:
-            lines.append("Есть конфликт направлений между фигурами")
+            lines.append("Есть конфликт направлений между фигурами; подтверждение HTF по M5 не установлено")
     return "\n".join(lines)
 
 

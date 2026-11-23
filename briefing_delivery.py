@@ -81,8 +81,8 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
     # visible in the same compact per-pair caption, within Telegram's UTF-16 cap.
     for line in chart_lines:
         if (line.startswith("🧩 ") and "· ПАТТЕРНЫ ·" in line) or line.startswith((
-                "W1:", "D1:", "H4:", "H1:", "M15:", "M5 (подтв.):",
-                "Главная фигура:", "Есть конфликт", "Подтверждённых фигур")):
+                "W1:", "D1:", "H4:", "H1:", "M15:", "M5:", "M5 (подтв.):",
+                "Главная фигура:", "Старшая обнаруженная фигура:", "Есть конфликт", "Подтверждённых фигур")):
             if line not in chart_selected:
                 chart_selected.append(line)
     for line in chart_lines:
