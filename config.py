@@ -352,6 +352,9 @@ ZIGZAG_SCANNER_ENABLED = True
 # Подтверждённая H1 swing-структура и A-B-C — диагностический слой поверх
 # существующего ZigZag. Не имеет права менять сторону/сигнал/цели.
 ZIGZAG_CORRECTION_STRUCTURE_ENABLED = True
+# Волны Эллиотта: read-only счёт импульса 1–5 и A–B–C по подтверждённому ZigZag.
+# Ни Master, ни Killer, ни Telegram-отправка сигналов не используют его как gate.
+ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED = True
 ZIGZAG_CHART_IMAGES_ENABLED = True
 PATTERNS_ENABLED = True
 # Impulse Displacement: shared confirmation layer (not FVG and not Disbalance/BOS).

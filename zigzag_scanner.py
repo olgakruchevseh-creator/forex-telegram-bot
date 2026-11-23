@@ -307,8 +307,26 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
             )
         except Exception:
             log.exception("ZIGZAG_CORRECTION_STRUCTURE_FAILED symbol=%s", symbol)
+    elliott = {}
+    if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", False):
+        try:
+            import elliott_waves
+            # Independent degrees: do not combine D1 pivots with H1 pivots.
+            wave_swings = {tf: swings_by_tf[tf] for tf in ("D1", "H4", "H1")
+                           if tf in swings_by_tf}
+            wave_bars = {tf: bars_by_tf[tf] for tf in wave_swings}
+            if by_tf.get("W1"):
+                w1_bars = closed_candles(by_tf["W1"], TF_MINUTES["W1"])
+                if len(w1_bars) >= 20:
+                    wave_bars["W1"] = w1_bars
+                    wave_swings["W1"] = zigzag(
+                        w1_bars, cfg.ZIGZAG_PCT.get("W1", 1.20), cfg.ZIGZAG_MIN_BARS)
+            elliott = elliott_waves.analyze_timeframes(wave_swings, wave_bars)
+        except Exception:
+            log.exception("ELLIOTT_OBSERVE_ONLY_FAILED symbol=%s", symbol)
     return {
         "symbol": symbol,
+        "elliott_observation": elliott,
         "pair_character": character,
         "event": event,
         "side": side,
@@ -362,15 +380,29 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
     }
 
 
-def briefing_status(symbol: str, by_tf: dict) -> str:
-    snap = analyze_symbol(symbol, by_tf)
+def briefing_status(symbol: str, by_tf: dict, *, snapshot: dict | None = None) -> str:
+    snap = snapshot if snapshot is not None else analyze_symbol(symbol, by_tf)
     seq = snap.get("sequence") or ""
     # Подпись рядом с HH/HL/LH/LL обязана описывать именно ZigZag,
     # а не противоположный краткосрочный импульс индикаторов.
     structural_dirs = snap.get("zigzag_directions") or {}
     direction = _word(structural_dirs.get(snap.get("tf"), 0))
     if seq:
-        return f"{snap['tf']}: {seq}" + (f" · {direction}" if direction else " · структура смешанная")
+        result = f"{snap['tf']}: {seq}" + (f" · {direction}" if direction else " · структура смешанная")
+        if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", False):
+            try:
+                waves = snap.get("elliott_observation") or {}
+                wave_tf = next((key for key in ("H1", "H4", "D1", "W1")
+                                if (waves.get(key) or {}).get("available")), None)
+                if wave_tf:
+                    wave = waves[wave_tf]
+                    movement = "вверх" if wave.get("current_side", 0) > 0 else (
+                        "вниз" if wave.get("current_side", 0) < 0 else "неясно")
+                    result += (f" · Эллиотт {wave_tf}: волна {wave.get('current_wave') or '—'} "
+                               f"({movement}, гипотеза; не торговый сигнал)")
+            except (TypeError, ValueError, AttributeError):
+                pass
+        return result
     # Do not print the misleading combination "arrow + неясно". If fewer
     # than four confirmed extrema exist, state exactly what ZigZag has.
     swings_count = len((snap.get("sequence") or "").split(" → ")) if snap.get("sequence") else 0
@@ -413,6 +445,12 @@ def format_message(s: dict) -> str:
             lines.extend(zigzag_correction_structure.compact_lines(s.get("correction_structure")))
         except Exception:
             pass
+    if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", False):
+        try:
+            import elliott_waves
+            lines.extend(elliott_waves.compact_lines(s.get("elliott_observation")))
+        except Exception:
+            log.exception("ELLIOTT_CARD_FAILED symbol=%s", s.get("symbol"))
     if s.get("high"):
         lines.append(f"Последний максимум: {_fmt_price(s['symbol'], s['high'])}")
     if s.get("low"):

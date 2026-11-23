@@ -724,7 +724,7 @@ def build_pair_briefs(
         try:
             import zigzag_scanner
             zz = zigzag_scanner.analyze_symbol(symbol, market.get(symbol) or {})
-            zigzag_text = zigzag_scanner.briefing_status(symbol, market.get(symbol) or {})
+            zigzag_text = zigzag_scanner.briefing_status(symbol, market.get(symbol) or {}, snapshot=zz)
             zigzag_h4_side = int((zz.get("zigzag_directions") or {}).get("H4", 0))
             h4_sequence = (zz.get("sequences") or {}).get("H4", "")
             zigzag_h4_mixed = bool(h4_sequence and not zigzag_h4_side)
