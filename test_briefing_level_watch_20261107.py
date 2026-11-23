@@ -87,6 +87,7 @@ def test_wick_then_confirmed_return_no_invented_intra_h1_sequence(tmp_path):
 def test_break_requires_two_closed_h1_then_role_from_retest(tmp_path):
     dest = _new(tmp_path,'resistance',1.102,1.103)
     bars=[c(0,1.101,1.101,1.1,1.1007),
+          c(1,1.1007,1.102,1.1005,1.1015),  # published-hour baseline, not a watched event
           c(2,1.102,1.1048,1.1018,1.1042),
           c(3,1.1042,1.1050,1.1034,1.1046),
           c(4,1.1046,1.1049,1.1026,1.1040)]
@@ -103,6 +104,7 @@ def test_break_requires_two_closed_h1_then_role_from_retest(tmp_path):
 def test_failed_beyond_close_does_not_claim_break(tmp_path):
     dest=_new(tmp_path,'support',1.099,1.100)
     bars=[c(0,1.101,1.102,1.1005,1.101),
+          c(1,1.101,1.102,1.1005,1.1005),  # actual preceding H1 close
           c(2,1.1005,1.1008,1.0969,1.0975),
           c(3,1.0975,1.1011,1.0971,1.1005)]
     w.observe_market({'EUR/USD':{'H1':bars}},now=BASE+timedelta(hours=6),path=dest)

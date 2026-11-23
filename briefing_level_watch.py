@@ -58,8 +58,15 @@ def _open(path: Path | None = None) -> sqlite3.Connection:
         last_contact_h1 TEXT NOT NULL DEFAULT '', pending_wick TEXT NOT NULL DEFAULT '',
         candidate_h1 TEXT NOT NULL DEFAULT '', break_h1 TEXT NOT NULL DEFAULT '',
         break_confirmed INTEGER NOT NULL DEFAULT 0, role_confirmed INTEGER NOT NULL DEFAULT 0,
-        lifecycle TEXT NOT NULL DEFAULT '', tfs TEXT NOT NULL DEFAULT ''
+        lifecycle TEXT NOT NULL DEFAULT '', tfs TEXT NOT NULL DEFAULT '',
+        candidate_crossed INTEGER NOT NULL DEFAULT 0, hold_reported INTEGER NOT NULL DEFAULT 0
     )""")
+    # Railway keeps the same SQLite database across deploys; do not lose journals.
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(watched)')}
+    if 'candidate_crossed' not in columns:
+        conn.execute('ALTER TABLE watched ADD COLUMN candidate_crossed INTEGER NOT NULL DEFAULT 0')
+    if 'hold_reported' not in columns:
+        conn.execute('ALTER TABLE watched ADD COLUMN hold_reported INTEGER NOT NULL DEFAULT 0')
     conn.execute("""CREATE TABLE IF NOT EXISTS watch_events (
         id TEXT PRIMARY KEY, watch_id TEXT NOT NULL, symbol TEXT NOT NULL,
         h1 TEXT NOT NULL, event TEXT NOT NULL, report TEXT NOT NULL,
@@ -189,6 +196,8 @@ def _update_one(conn, state, bars, *, now: datetime) -> int:
     last_contact = _parse_dt(state["last_contact_h1"]) if state["last_contact_h1"] else None
     pending_wick = state["pending_wick"]
     candidate = _parse_dt(state["candidate_h1"]) if state["candidate_h1"] else None
+    candidate_crossed = bool(state.get('candidate_crossed', 0))
+    hold_reported = bool(state.get('hold_reported', 0))
     broken = bool(state["break_confirmed"])
     break_h1 = _parse_dt(state["break_h1"]) if state["break_h1"] else None
     role = bool(state["role_confirmed"])
@@ -223,13 +232,37 @@ def _update_one(conn, state, bars, *, now: datetime) -> int:
         event = None
         if not broken and candidate is not None:
             if crossed and opened - candidate == timedelta(hours=1):
-                broken, break_h1, candidate = True, opened, None
-                event = ("break", "Подтверждённый пробой: две закрытые H1 за зоной",
-                         "Граница пройдена с запасом. Это технический факт закрытий, не гарантия продолжения.")
+                if candidate_crossed:
+                    broken, break_h1, hold_reported = True, opened, False
+                    event = ("break", "Подтверждённый новый пробой: две закрытые H1 за зоной",
+                             "Зафиксировано пересечение опубликованной границы и два последовательных закрытия.")
+                elif not hold_reported:
+                    hold_reported = True
+                    direction_text = ('ниже поддержки' if state['kind'] == 'support' else 'выше сопротивления')
+                    event = ("hold", f"Удержание цены {direction_text}: две закрытые H1",
+                             "Цена оставалась за зоной; нового пересечения после брифинга не установлено.")
+                candidate, candidate_crossed = None, False
             elif not crossed and opened > candidate:
+                # A non-directional candle still outside the zone is NOT a return.
+                back_to_zone = low <= candle.close <= high
+                back_to_origin = ((state['kind'] == 'support' and candle.close > high)
+                                  or (state['kind'] == 'resistance' and candle.close < low))
                 candidate = None
-                event = ("false_break", "Неудачный пробой: цена вернулась к зоне",
-                         "После закрытия за границей следующая H1 не закрепилась за ней.")
+                if back_to_zone or back_to_origin:
+                    # A failed new-break attempt requires a documented crossing.
+                    # Leaving an old hold is a different observable event.
+                    if candidate_crossed:
+                        title = ('Неудачный пробой: H1 вернулась внутрь зоны' if back_to_zone
+                                 else 'Неудачный пробой: H1 вернулась на исходную сторону зоны')
+                        event = ("false_break", title,
+                                 "Возврат подтверждён ценой закрытия H1, а не прекращением импульса.")
+                    elif hold_reported:
+                        title = ('Возврат в зону после удержания' if back_to_zone
+                                 else 'Возврат на исходную сторону после удержания')
+                        event = ("hold_end", title,
+                                 "Ранее удерживалась цена за зоной, но нового пробоя не фиксировалось.")
+                    hold_reported = False
+                candidate_crossed = False
         if broken and break_h1 is not None and opened > break_h1:
             if touched and holding_role and not role:
                 role = True
@@ -238,6 +271,7 @@ def _update_one(conn, state, bars, *, now: datetime) -> int:
             elif (state["kind"] == "support" and candle.close > high) or (state["kind"] == "resistance" and candle.close < low):
                 # Failed breakdown/breakout: never keep reporting the old role.
                 broken, role, candidate, break_h1 = False, False, None, None
+                candidate_crossed, hold_reported = False, False
                 event = ("failed_break", "Возврат за пробитую зону",
                          "Предыдущий подтверждённый пробой больше нельзя считать действующим.")
         if pending_wick and opened > (_parse_dt(pending_wick) or opened):
@@ -247,6 +281,13 @@ def _update_one(conn, state, bars, *, now: datetime) -> int:
             pending_wick = ""
         if not broken and not candidate and crossed:
             candidate = opened
+            # A new breakout needs a preceding H1 close on the original side.
+            previous = bars[idx - 1] if idx > 0 else None
+            contiguous = previous is not None and previous[0] + timedelta(hours=1) == opened
+            previous_close = float(previous[1].close) if contiguous else None
+            candidate_crossed = bool(previous_close is not None and (
+                (state['kind'] == 'support' and previous_close >= low) or
+                (state['kind'] == 'resistance' and previous_close <= high)))
             # First close beyond is not independently a confirmed breakout.
         if not broken and piercing and not pending_wick and event is None:
             pending_wick = _stamp(opened)
@@ -267,25 +308,28 @@ def _update_one(conn, state, bars, *, now: datetime) -> int:
             _watch_event(conn, state, opened, *event, candle, state["published_at"])
     if processed:
         conn.execute("""UPDATE watched SET last_h1=?, contacts=?, in_contact=?, last_contact_h1=?,
-            pending_wick=?, candidate_h1=?, break_h1=?, break_confirmed=?, role_confirmed=? WHERE id=?""",
+            pending_wick=?, candidate_h1=?, break_h1=?, break_confirmed=?, role_confirmed=?,
+            candidate_crossed=?, hold_reported=? WHERE id=?""",
             (_stamp(last), contact_count, int(in_contact), _stamp(last_contact) if last_contact else "",
              pending_wick, _stamp(candidate) if candidate else "", _stamp(break_h1) if break_h1 else "",
-             int(broken), int(role), state["id"]))
+             int(broken), int(role), int(candidate_crossed), int(hold_reported), state["id"]))
     return processed
 
 
-def observe_market(market: dict, *, now: datetime | None = None, path: Path | None = None) -> int:
-    """Replays only NEW fully post-publication H1, idempotent after redeploy."""
+def observe_market(market: dict, *, now: datetime | None = None, path: Path | None = None,
+                   settle_minutes: int = 0) -> int:
+    """Replays only post-publication H1, with optional vendor-settlement delay."""
     now = now or _now()
+    settled_cutoff = now - timedelta(minutes=max(0, min(30, int(settle_minutes))))
     updated = 0
     with _open(path) as conn:
         tracked = conn.execute("SELECT * FROM watched WHERE active=1 AND expires_at>? ORDER BY symbol, published_at", (_stamp(now),)).fetchall()
         for item in tracked:
             symbol = item["symbol"]
-            series = _valid_bars((market or {}).get(symbol) or {}, now)
+            series = _valid_bars((market or {}).get(symbol) or {}, settled_cutoff)
             if not series:
                 continue
-            updated += _update_one(conn, dict(item), series, now=now)
+            updated += _update_one(conn, dict(item), series, now=settled_cutoff)
         conn.execute("UPDATE watched SET active=0 WHERE active=1 AND expires_at<=?", (_stamp(now),))
     return updated
 
@@ -359,13 +403,16 @@ def claim_short_digests(*, path: Path | None = None, now: datetime | None = None
             body = row['report'].splitlines()
             source = next((v for v in body if v.startswith(('S1 ', 'S2 ', 'R1 ', 'R2 ', 'Z1 '))), '')
             event = next((v.removeprefix('Событие: ') for v in body if v.startswith('Событие: ')), row['event'])
-            newlines = ([row['symbol']] if row['symbol'] != last_symbol else []) + [f"• {source} · {event}"]
+            published_line = next((v for v in body if v.startswith('Уровень зафиксирован при брифинге:')), '')
+            origin_text = published_line.removeprefix('Уровень зафиксирован при брифинге: ').strip()
+            compact_source = f" · исходный брифинг {origin_text}" if origin_text else ''
+            newlines = ([row['symbol']] if row['symbol'] != last_symbol else []) + [f"• {source} · {event}{compact_source}"]
             prospective = '\n'.join(lines + newlines + [footer])
             if ids and len(prospective) > 3500:
                 flush()
                 if len(out) >= max_chunks:
                     break
-                newlines = [row['symbol'], f"• {source} · {event}"]
+                newlines = [row['symbol'], f"• {source} · {event}{compact_source}"]
             lines.extend(newlines)
             last_symbol = row['symbol']
             ids.append(row['id'])

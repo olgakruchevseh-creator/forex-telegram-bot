@@ -992,7 +992,7 @@ async def _observe_and_send_brief_levels(app: Application, chat_id: int, market:
     if not getattr(cfg, "BRIEF_LEVEL_WATCH_ENABLED", True):
         return
     try:
-        briefing_level_watch.observe_market(market)
+        briefing_level_watch.observe_market(market, settle_minutes=5)
         batch = briefing_level_watch.claim_short_digests(limit=7)
     except Exception:
         log.exception("BRIEF_LEVEL_WATCH_OBSERVE_FAILED")
@@ -1090,8 +1090,12 @@ async def _maybe_send_session_briefing(
             context.application, int(chat_id), delivery_market, strength, rank, dxy, events, upcoming_events
         )
         briefing.mark_issue_sent(state, iid, delivered)
-        # Register after successful publication, not during chart construction.
-        _register_briefing_level_watch(iid, delivery_market)
+        # The single canonical source is a *fully delivered* main briefing.
+        # Projection-card levels may have different numbering and must not win a race.
+        if delivered >= len(cfg.PAIRS) + 1:
+            _register_briefing_level_watch(iid, delivery_market)
+        else:
+            log.warning('BRIEF_LEVEL_WATCH_NOT_REGISTERED incomplete_delivery=%s', delivered)
         state["last_rank"] = [c for c, _ in rank]
         state["last_strength_h1"] = closed_dt
         state["last_strength_ts"] = time.time()
@@ -2838,13 +2842,8 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                         message = await context.application.bot.send_photo(
                             chat_id=int(chat_id), photo=image, caption=caption)
                         message_id = getattr(message, "message_id", None)
-                        if getattr(cfg, "BRIEF_LEVEL_WATCH_ENABLED", True):
-                            try:
-                                briefing_level_watch.register_briefing(
-                                    briefing.briefing_id(), bundle.get("symbol") or "",
-                                    bundle.get("levels_brief") or {})
-                            except Exception:
-                                log.exception("BRIEF_LEVEL_WATCH_PROJECTION_REGISTER_FAILED pair=%s", bundle.get("symbol"))
+                        # Only the delivered main briefing freezes canonical Levels.
+                        # This separate projection must not overwrite the published labels.
                         session_projection_reports.mark_delivered(state, bundle["key"])
                         save_state(state)
                         log.info("SESSION_ECHO_PIVOT_BUNDLE_SENT message_id=%s key=%s pid=%s",

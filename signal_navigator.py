@@ -1015,9 +1015,19 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         navigator_status = "⚠️ CHoCH / СТРУКТУРНАЯ СМЕНА · НОВЫЙ BOS ЕЩЁ НЕ ПОДТВЕРЖДЁН"
         assessment = f"⚠️ ранняя смена структуры в {side} есть, но полноценный разворот будет подтверждён только после BOS нового направления."
         display_mode = "ПОТЕНЦИАЛЬНАЯ СМЕНА / РАЗВОРОТ НЕ ПОДТВЕРЖДЁН"
+    # A source can pass its own checks while H1 Direction is opposite or
+    # fewer than two junior frames agree. Do not describe this as full H1
+    # direction confirmation; this is a caption-only clarification.
+    partial_h1 = (not source_accepted and not local_early and
+                  (h1_bias == -direction or int(master.get('junior_n') or 0) < 2))
+    if partial_h1 and not pending_reversal:
+        navigator_status = '⚠️ НЕПОЛНОЕ ПОДТВЕРЖДЕНИЕ МЛАДШИХ TF'
+        assessment = (f'⚠️ событие {side} зафиксировано после закрытия H1, '
+                      'но направление H1/M15/M5 подтверждено не большинством; '
+                      'это не подтверждение единого тренда H1.')
     title = ("🧭 НАВИГАТОР СОПРОВОЖДАЕТ СИГНАЛ" if source_accepted else
              ("⚡ РАННИЙ ЛОКАЛЬНЫЙ СИГНАЛ" if local_early else
-              ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР")))
+              ("🔄 НАПРАВЛЕНИЕ СМЕНИЛОСЬ" if reversal else ("🧭 НАВИГАТОР · ЧАСТИЧНОЕ СОГЛАСОВАНИЕ" if partial_h1 else "🧭 ПОДТВЕРЖДЁННЫЙ НАВИГАТОР"))))
     zz_h4 = master.get("zigzag_h4", side)
     zz_line = ("• Старший тренд ещё не подтверждён полностью" if local_early else
                ("• ZigZag H4: нейтрален" if zz_h4 == "RANGE" else
@@ -1098,7 +1108,11 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
                   if source_accepted else
                   ("Факт: завершённый AMD, закрытые M15/M5, сила валют и структурная цель подтверждают раннее локальное движение."
                   if local_early else
-                  "Факт: исходный модуль, большинство H1/M15/M5, сила валют и структурная цель подтверждены; старший контекст, ZigZag и DXY учтены в режиме и качестве."))
+                  ("Факт: исходный модуль принят; младшие TF подтверждают лишь "
+                   f"{int(master.get('junior_n') or 0)}/3; сила валют и маршрут учтены, "
+                   "но это НЕ большинство младших TF. Старший контекст, ZigZag и DXY показаны отдельно."
+                   if int(master.get("junior_n") or 0) < 2 else
+                   "Факт: исходный модуль, большинство H1/M15/M5, сила валют и структурная цель подтверждены; старший контекст, ZigZag и DXY учтены в режиме и качестве.")))
     lines.extend([
         "", f"Начало маршрута H1: {movement_progress._price(master['symbol'], route['anchor'])}",
         f"Текущая цена: {movement_progress._price(master['symbol'], route['current'])}",
@@ -1121,6 +1135,7 @@ def format_confirmed(master: dict, route: dict, sources: list[str], reversal: bo
         f"Осталось до TR1: {route['remaining']}%", "",
         f"Оценка: {assessment}",
         final_fact,
+        "Цели Навигатора рассчитаны отдельно от целей исходного модуля (в том числе Killer); TR1 этих двух карточек может различаться.",
         "Процент показывает долю пути до последней цели этого сигнала. Цена берётся из геометрии модуля и его таймфрейма, а не из общей сетки. Это не гарантия движения.",
         "", "━━━━━━━━━━━━━━━━━━",
     ])

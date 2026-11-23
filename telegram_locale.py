@@ -56,6 +56,7 @@ _PHRASES = (
     ("TRANSITION", "ПЕРЕХОД"),
     ("DISTRIBUTION", "РАСПРЕДЕЛЕНИЕ"),
     ("ACCUMULATION", "НАКОПЛЕНИЕ"),
+    ("RECLAIMED", "УРОВЕНЬ ВОЗВРАЩЁН"),
     ("RECLAIM", "ВОЗВРАТ ЗА УРОВЕНЬ"),
     ("RETEST", "ПОВТОРНЫЙ ТЕСТ"),
     ("BREAKOUT", "ПРОБОЙ"),

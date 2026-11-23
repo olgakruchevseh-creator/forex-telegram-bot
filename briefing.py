@@ -1176,7 +1176,7 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
         lines.append("НЕТ")
         return lines
     first = ready[0]
-    lines.append(f"{first.symbol} {_ru_display(first.side)} — оценка уверенности {first.confidence}%")
+    lines.append(f"{first.symbol} {_ru_display(first.side)} — оценка согласования {first.confidence}/100")
     if len(ready) > 1:
         second = ready[1]
         ea = _currency_exposure(first.symbol, first.side)
@@ -1184,11 +1184,11 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
         usd_opposite = ea.get("USD") and eb.get("USD") and ea["USD"] != eb["USD"]
         if usd_opposite:
             lines.append(
-                f"Альтернатива, не второй лидер: {second.symbol} {_ru_display(second.side)} — {second.confidence}% · противоположная ставка на USD"
+                f"Альтернатива, не второй лидер: {second.symbol} {_ru_display(second.side)} — {second.confidence}/100 · противоположная ставка на USD"
             )
         else:
             lines.append(
-                f"Второй план: {second.symbol} {_ru_display(second.side)} — оценка уверенности {second.confidence}%"
+                f"Второй план: {second.symbol} {_ru_display(second.side)} — оценка согласования {second.confidence}/100"
             )
     lines.append("")
     lines.append("🎯 ПРИОРИТЕТ СЕССИИ:")
@@ -1196,7 +1196,7 @@ def format_leaders(leaders: list[PairBrief], data_ok: bool = True, briefs: Optio
     if not top:
         lines.append("НЕТ")
     else:
-        lines.append(f"{top.symbol} {_ru_display(top.side)} — {top.confidence}%")
+        lines.append(f"{top.symbol} {_ru_display(top.side)} — оценка согласования {top.confidence}/100")
     return lines
 
 

@@ -37,6 +37,7 @@ def _relevant_lines(pair_text: str) -> list[str]:
         lambda x: "💱" in x and "━━" in x,
         lambda x: "НАПРАВЛЕНИЕ:" in x,
         lambda x: x.startswith("W1 "),
+        lambda x: x.startswith("⚠️ РАСХОЖДЕНИЕ МЕТОДОВ:"),
         lambda x: x.startswith("Текущая зона:"),
         lambda x: x.startswith("Поддержка:"),
         lambda x: x.startswith("Сопротивление:"),
@@ -95,11 +96,22 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
     pieces: list[str] = []
     if selected:
         pieces.append(selected[0])
+    # Preserve safety-critical direction conflicts BEFORE verbose pattern rows.
+    for line in selected[1:]:
+        if line.startswith('⚠️ РАСХОЖДЕНИЕ МЕТОДОВ:'):
+            if _telegram_len('\n'.join(pieces + [line])) <= limit - 52:
+                pieces.append(line)
+            else:
+                compact = line.split(' · разные модели', 1)[0]
+                if _telegram_len('\n'.join(pieces + [compact])) <= limit - 52:
+                    pieces.append(compact)
     for line in chart_selected:
         if line and line not in pieces and _telegram_len("\n".join(pieces + [line])) <= limit - 80:
             pieces.append(line)
     count = 1 if selected else 0
     for line in selected[count:]:
+        if line in pieces or line.startswith('⚠️ РАСХОЖДЕНИЕ МЕТОДОВ:'):
+            continue
         if _telegram_len("\n".join(pieces + [line])) > limit - 56:
             continue
         pieces.append(line)
