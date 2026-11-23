@@ -967,6 +967,9 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
         else:
             lines.append(newsmod.scenario_before(e, score))
         lines.append("")
+    completeness = newsmod.pmi_calendar_diagnostic(events)
+    if completeness:
+        lines.append(completeness)
     return lines
 
 
@@ -1017,6 +1020,48 @@ def _ru_display(value: str) -> str:
         out=out.replace(a,b)
     return out
 
+def _position_direction_icon(position: str) -> str:
+    """Colour the CURRENT leg, not the parent trend named after 'ВНУТРИ'."""
+    up = str(position or "").upper()
+    import re
+    # 'ОТКАТ ЛОНГ ВНУТРИ ШОРТ' must be green, not short-coloured.
+    match = re.search(r"(?:ОТКАТ|ИМПУЛЬС|ОСНОВНОЙ)\s+(LONG|SHORT|ЛОНГ|ШОРТ)", up)
+    if match:
+        word = match.group(1)
+    else:
+        match = re.search(r"\b(LONG|SHORT|ЛОНГ|ШОРТ)\b", up)
+        word = match.group(1) if match else ""
+    if word in ("LONG", "ЛОНГ"):
+        return "🟢"
+    if word in ("SHORT", "ШОРТ"):
+        return "🔴"
+    return "🟡" if "ПЕРЕХОД" in up else "⚪"
+
+
+def _direction_method_disagreements(b: PairBrief) -> list[str]:
+    """Display contradictions without adding/removing any confirmation votes."""
+    adaptive = b.adaptive_direction or {}
+    pairs = (("H4", b.h4, adaptive.get("main_direction")),
+             ("H1", b.h1, adaptive.get("working_h1_direction")))
+    conflicts = []
+    for tf, table_side, adaptive_side in pairs:
+        table_side = str(table_side or "").upper()
+        adaptive_side = str(adaptive_side or "").upper()
+        if table_side in ("LONG", "SHORT") and adaptive_side in ("LONG", "SHORT") and table_side != adaptive_side:
+            conflicts.append(f"{tf}: таблица {_ru_display(table_side)} ≠ адаптивная {_ru_display(adaptive_side)}")
+    return conflicts
+
+
+def _snapshot_status_line(report: briefing_strength_verified.StrengthCheck) -> str:
+    if not report.ok or not report.last_closed_at:
+        return "Срез H1: общая закрытая свеча не подтверждена"
+    stamp = report.last_closed_at.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    # The archival delay is only a settlement wait, not a data-finality guarantee.
+    stage = ("первый закрытый снимок, до 5-минутной стабилизации архива"
+             if report.age_minutes < 5 else "закрытый снимок, не гарантия неизменности поставщика")
+    return f"Срез анализа: закрытие общей H1 {stamp} · {stage}; M15/M5 не позже этой H1"
+
+
 def format_board(briefs: list[PairBrief]) -> list[str]:
     lines = ["📊 ДОСКА ПРИОРИТЕТОВ", ""]
     for b in briefs:
@@ -1036,6 +1081,10 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         direction_text = _ru_display(direction) if direction else "НЕЙТРАЛЬНО"
         lines.append(f"{direction_icon} НАПРАВЛЕНИЕ: {direction_text}")
         lines.append(f"W1 {_ru_display(b.w1)} · D1 {_ru_display(b.d1)} · H4 {_ru_display(b.h4)} · H1 {_ru_display(b.h1)} · M15 {_ru_display(b.m15)} · M5 {_ru_display(b.m5)}")
+        disagreements = _direction_method_disagreements(b)
+        if disagreements:
+            lines.append("⚠️ РАСХОЖДЕНИЕ МЕТОДОВ: " + "; ".join(disagreements)
+                         + " · разные модели, не второе подтверждение")
         lines.append(weekly_bias_context.compact_ru(b.weekly_bias))
         if b.weekly_rhythm:
             wr = b.weekly_rhythm
@@ -1043,15 +1092,7 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             lines.append(f"📅 Ритм недели: {getattr(wr, 'day_name', '—')} · {getattr(wr, 'phase', '—')} · {wr_dir} · реализация {float(getattr(wr, 'realization', 0) or 0)*100:.0f}%")
         lines.append(f"🧠 Основа рынка: {market_direction_regime.compact_ru(b.adaptive_direction)}")
         zz_icon = "🟢" if b.zigzag_h4_side > 0 else ("🔴" if b.zigzag_h4_side < 0 else "🟡")
-        position_upper = (b.position or "").upper()
-        if "SHORT" in position_upper:
-            position_icon = "🔴"
-        elif "LONG" in position_upper:
-            position_icon = "🟢"
-        elif "ПЕРЕХОД" in position_upper:
-            position_icon = "🟡"
-        else:
-            position_icon = "⚪"
+        position_icon = _position_direction_icon(b.position)
         amd_text = (b.amd or "").replace(
             "ИМПУЛЬСНОЕ РАСПРЕДЕЛЕНИЕ", "НАПРАВЛЕННЫЙ ВЫХОД"
         )
@@ -1193,9 +1234,9 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
         score=max(45,min(82,int(round(score))))
         note=(f" · {div.kind}" if div and div.confirmed else "")
         tech_icon = "🟢" if tech == "LONG" else "🔴"
-        lines.append(f"{b.symbol}: вероятное направление {tech_icon} {_ru_display(tech)} · {score}% · текущая разница силы {b.gap:+.2f}{note}")
+        lines.append(f"{b.symbol}: сценарий {tech_icon} {_ru_display(tech)} · оценка согласования {score}/100 · текущая разница силы {b.gap:+.2f}{note}")
     if len(lines)==3: lines.append("Нет подтверждённого прогнозного направления")
-    lines.append("Это вероятностная оценка следующей сессии, а не гарантированное направление.")
+    lines.append("Оценка 0–100 — эвристический балл согласования, НЕ статистическая вероятность и НЕ сигнал.")
     return lines
 
 def build_briefing_text(
@@ -1220,6 +1261,7 @@ def build_briefing_text(
         "━━━━━━━━━━━━━━━━━━",
         "",
         f"🕐 Время: {now.strftime('%H:%M')} · Europe/Amsterdam",
+        _snapshot_status_line(verified_strength),
         "",
     ]
     try:
@@ -1301,7 +1343,8 @@ def build_briefing_sections(
     leaders = pick_leaders(briefs)
     head = [
         "━━━━━━━━━━━━━━━━━━", f"🌍 БРИФИНГ — {sess['name']}", "━━━━━━━━━━━━━━━━━━", "",
-        f"🕐 Время: {now.strftime('%H:%M')} · Europe/Amsterdam", "",
+        f"🕐 Время: {now.strftime('%H:%M')} · Europe/Amsterdam",
+        _snapshot_status_line(verified_strength), "",
     ]
     try:
         head.extend(briefing_strength_verified.format_block(verified_strength))

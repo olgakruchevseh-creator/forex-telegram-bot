@@ -536,11 +536,18 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     else:
         lines.append(f"Adaptive ZigZag: {_side_badge(zside)} · окно до следующего угла пока без достаточной статистики")
 
-    # Everything below the engine stack is deliberately emoji-free.
+    # Preserve the established four-line engine stack and blank separator.
     lines.append("")
     period = str(bundle.get("period") or "")
     if period:
         lines.append(f"Период: {period}")
+    # Temporal provenance follows the normal period row; it is still ahead
+    # of Levels in the compact caption and is never a trading confirmation.
+    anchor = str(bundle.get("h1_closed_at") or "").strip()
+    if anchor:
+        lines.append(f"Срез: закрытие H1 {anchor} · M15/M5 ≤ H1 · сила Echo/Pivot 8H, брифинг 1/4/12/24H")
+    else:
+        lines.append("Срез H1: НЕ СИНХРОНИЗИРОВАН · модель силы Echo/Pivot 8H, брифинг 1/4/12/24H")
     lines.extend(_levels_lines(symbol, bundle.get("levels_brief")))
     character = bundle.get("pair_character") or {}
     if character:
@@ -807,6 +814,20 @@ def pending_report_bundles(
     delivered = state.setdefault("session_projection_delivered", {})
     current_name, next_name, hours = _session_context()
     try:
+        # Match the main briefing's verified seven-pair UTC H1 cutoff.
+        # This informational copy never alters the caller's trading market.
+        check = briefing.briefing_strength_verified.calculate(market)
+        if check.ok and check.last_closed_at is not None:
+            import live_briefing
+            market = live_briefing.anchored_market(market, check.last_closed_at)
+            h1_closed_label = check.last_closed_at.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        else:
+            h1_closed_label = ""
+            log.warning("SESSION_PROJECTION_H1_NOT_VERIFIED reason=%s", getattr(check, "reason", "unknown"))
+    except Exception:
+        h1_closed_label = ""
+        log.exception("SESSION_PROJECTION_H1_ANCHOR_FAILED")
+    try:
         h1_market = {symbol: (market.get(symbol) or {}).get("H1") or [] for symbol in cfg.PAIRS}
         strength = currency_strength(h1_market, 8)
     except Exception:
@@ -858,6 +879,7 @@ def pending_report_bundles(
                 levels_brief = {}
             bundle = {"key": key, "symbol": symbol, "echo": echo, "pivot": pivot, "zigzag": zz,
                       "pair_character": character, "levels_brief": levels_brief,
+                      "h1_closed_at": h1_closed_label,
                       "period": f"{current_name} → {next_name} · около {hours} ч"}
             pb_states = state.setdefault("session_pullback_consensus", {})
             previous_pb = pb_states.get(symbol) or {}

@@ -138,14 +138,74 @@ TITLE_RU = (
 )
 
 
+def _translate_pmi_title(raw: str) -> str:
+    """Preserve scope and sub-index of Forex Factory PMI titles in Russian.
+
+    A generic or ambiguous release keeps the vendor title verbatim; a missing
+    country/index is never inferred from an event's currency.
+    """
+    low = raw.lower()
+    if "pmi" not in low:
+        return raw
+    scopes = (
+        ("french", "Франция"), ("france", "Франция"),
+        ("german", "Германия"), ("germany", "Германия"),
+        ("eurozone", "Еврозона"), ("euro area", "Еврозона"),
+        ("euro-zone", "Еврозона"), ("european", "Европа"),
+        ("uk ", "Великобритания"), ("british", "Великобритания"),
+        ("united kingdom", "Великобритания"),
+        ("us ", "США"), ("u.s.", "США"),
+        ("canadian", "Канада"), ("japanese", "Япония"),
+        ("australian", "Австралия"), ("new zealand", "Новая Зеландия"),
+        ("swiss", "Швейцария"),
+    )
+    scope = next((ru for token, ru in scopes if token in low), "")
+    if "manufacturing" in low or "mfg" in low:
+        sector = "производства"
+    elif "services" in low or "service " in low:
+        sector = "сферы услуг"
+    elif "composite" in low:
+        sector = "составной"
+    else:
+        sector = ""
+    early = "предварительный " if "flash" in low else ("окончательный " if "final" in low else "")
+    if scope and sector:
+        return f"{scope} · {early}PMI {sector}".strip()
+    # No transformation can capture all nuances of an unfamiliar vendor title.
+    return f"PMI · оригинал: {raw}"
+
+
+def pmi_calendar_diagnostic(events: list[NewsEvent]) -> str:
+    """Read-only completeness hint; never asserts that a missing release exists."""
+    eur_pmi = [e for e in events if e.currency == "EUR" and "pmi" in (e.title or "").lower()]
+    if not eur_pmi:
+        return ""
+    names = [(e.title or "").lower() for e in eur_pmi]
+    france = any("french" in x or "france" in x for x in names)
+    germany = any("german" in x or "germany" in x for x in names)
+    if not (france and germany):
+        return ""
+    has_eurozone = any("eurozone" in x or "euro area" in x or "euro-zone" in x for x in names)
+    # Forex Factory sometimes leaves the Eurozone flash PMI country implicit.
+    has_unscoped = any(not any(k in x for k in ("french", "france", "german", "germany",
+                    "italian", "italy", "spanish", "spain", "eurozone", "euro area", "euro-zone"))
+                       for x in names)
+    if has_eurozone or has_unscoped:
+        return ""
+    return ("⚠️ Проверка полноты календаря: в полученном списке PMI Франции и Германии "
+            "есть, отдельный PMI еврозоны не найден. Это НЕ доказательство отсутствия релиза; "
+            "проверь источник Forex Factory.")
+
+
 def translate_title(title: str) -> str:
     raw = (title or "").strip()
     if not raw:
         return raw
     low = raw.lower()
+    if "pmi" in low:
+        return _translate_pmi_title(raw)
     for en, ru in TITLE_RU:
         if en in low:
-            rest = raw
             return ru
     return raw
 
