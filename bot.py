@@ -14,6 +14,7 @@ import os
 import sys
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -2298,6 +2299,9 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         peers = [raw for raw, verdict in baseline.items() if verdict.status == "ALLOW"]
         admitted = []
         allowed_texts = set()
+        # Keep every unique H1 decision in BOTH persistent journals. Suppress
+        # only repetitive Railway INFO lines for the same stale H1 window.
+        stale_h1_log = Counter()
         for priority, raw in source_alerts:
             ruling = (signal_release_guard.review(raw, market, peers, source_ids, cache=trap_cache)
                       if baseline[raw].allowed else baseline[raw])
@@ -2334,9 +2338,12 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                             log.exception("WEEKLY_RHYTHM_INFO_RECONCILE_FAILED")
                 continue
             if ruling.status != "ALLOW":
-                log.info("UNIFIED_SIGNAL_BLOCK source=%s pair=%s side=%s reason=%s h1_closed_at=%s",
-                         ruling.source, ruling.pair, ruling.side, ruling.reason,
-                         ruling.h1_closed_at or "unknown")
+                if ruling.reason == "h1_not_fresh":
+                    stale_h1_log[(ruling.source, ruling.pair, ruling.h1_closed_at or "unknown")] += 1
+                else:
+                    log.info("UNIFIED_SIGNAL_BLOCK source=%s pair=%s side=%s reason=%s h1_closed_at=%s",
+                             ruling.source, ruling.pair, ruling.side, ruling.reason,
+                             ruling.h1_closed_at or "unknown")
                 try:
                     decision_journal.record_stage(raw, market, strength, "BLOCKED",
                                                   reason="unified_" + ruling.reason)
@@ -2345,6 +2352,16 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             admitted.append((priority, raw))
             allowed_texts.add(raw)
+        if stale_h1_log:
+            by_source = Counter()
+            for (source, _pair, _h1), count in stale_h1_log.items():
+                by_source[source] += count
+            log.info("UNIFIED_H1_STALE_SUMMARY raw_blocks=%d distinct_source_pair_h1=%d "
+                     "pairs=%d sources=%s h1_ends=%s journal=preserved",
+                     sum(stale_h1_log.values()), len(stale_h1_log),
+                     len({key[1] for key in stale_h1_log}),
+                     dict(by_source.most_common(8)),
+                     sorted({key[2] for key in stale_h1_log})[:3])
         memory_scan_stage8.mark("admission_unified_done")
         save_state(state)
         source_alerts = admitted
@@ -2365,7 +2382,13 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         # delivery gates; a bare memory fact cannot bypass them.
         if getattr(cfg, "KILLER_ENABLED", True) and (raw_alerts or killer_engine.hunter_scan_due(market)):
             try:
-                for text in killer_engine.process_candidates(raw_alerts, market, strength):
+                killer_started = time.perf_counter()
+                killer_candidates = killer_engine.process_candidates(raw_alerts, market, strength)
+                killer_elapsed = time.perf_counter() - killer_started
+                if killer_elapsed >= 2.0:
+                    log.info("KILLER_TIMING_OBSERVE_ONLY elapsed_s=%.3f detector_cards=%d "
+                             "candidate_cards=%d", killer_elapsed, len(raw_alerts), len(killer_candidates))
+                for text in killer_candidates:
                     source_ids[text] = "killer_engine"
                     ruling = signal_release_guard.review(text, market, raw_alerts + [text], source_ids, cache=trap_cache)
                     signal_release_guard.journal(ruling, _source_event_id(text))
@@ -2411,11 +2434,16 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # Fail closed on a broken calendar. A successfully loaded empty
                 # event list is distinct from an unavailable source.
                 if calendar_ready:
+                    master_started = time.perf_counter()
                     master_results = master_direction.analyze_market(
                         market, strength, candidate_alerts,
                         dxy_bias=master_dxy_bias, events=master_events,
                         now_utc=datetime.now(timezone.utc), priority_keys=mandatory_keys,
                     )
+                    master_elapsed = time.perf_counter() - master_started
+                    if master_elapsed >= 2.0:
+                        log.info("MASTER_GATE_TIMING_OBSERVE_ONLY elapsed_s=%.3f source_cards=%d "
+                                 "confirmed=%d", master_elapsed, len(candidate_alerts), len(master_results))
                 else:
                     master_results = []
                     log.error("MASTER_TRADE_BLOCK reason=news_calendar_unavailable")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import logging
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -258,8 +259,11 @@ def analyze_symbol(
     now_utc: datetime | None = None,
     market: dict | None = None,
     side_override: int = 0,
+    _prebuilt_stack: PairStack | None = None,
 ) -> dict | None:
-    stack = build_stack(symbol, by_tf, strength)
+    # The complete MTF stack is invariant across LONG/SHORT attempts for the
+    # same symbol in ONE synchronous market snapshot. The caller may share it.
+    stack = _prebuilt_stack if _prebuilt_stack is not None else build_stack(symbol, by_tf, strength)
     if not stack:
         return None
     senior_side = _consensus(stack, ("D1", "H4", "H1"), 2)
@@ -273,6 +277,12 @@ def analyze_symbol(
         if not ltf:
             return None
         side = ltf
+
+    # A candidate without an aligned detector cannot pass the mandatory
+    # source gate. Reject it BEFORE running dozens of context analyzers.
+    aligned, opposite = _module_evidence(symbol, side, alerts)
+    if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
+        return None
 
     gap = stack.strength_gap
     minimum_gap = float(getattr(cfg, "MASTER_STRENGTH_MIN_GAP", 0.08))
@@ -308,14 +318,11 @@ def analyze_symbol(
     pdh_pdl_ctx = daily_high_low.analyze_pdh_pdl(by_tf, side)
     ohlc_ctx = ohlc_movement.setup_adjustment(by_tf, side) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
     h4_zz = int((zz.get("zigzag_directions") or {}).get("H4", 0))
-    aligned, opposite = _module_evidence(symbol, side, alerts)
     evidence_families = _aligned_families(symbol, side, alerts)
     po3_fvg_ctx = po3_fvg_context.analyze(symbol, "LONG" if side > 0 else "SHORT", by_tf, alerts)
     evidence_families = po3_fvg_context.collapse_families(
         evidence_families, po3_fvg_ctx, "session_setup", "imbalance"
     )
-    if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True) and not aligned:
-        return None
     local_gate_ok, local_reaction_cluster = _local_reaction_gate(
         stack, h4_zz, side, alerts, symbol
     )
@@ -671,7 +678,7 @@ def format_message(result: dict) -> str:
         f"💱 Пара: {result['symbol']}",
         f"{icon} Направление: {side}",
         f"💪 Качество: {result['quality']}/100",
-        f"📈 Вероятность: {result['confidence']}%",
+        f"📈 Оценка согласования модели: {result['confidence']}/100 · не вероятность",
         "",
         "Подтверждения:",
         f"• D1/H4/H1: {result['senior_n']} из 3 подтверждают {side}",
@@ -719,10 +726,12 @@ def analyze_market(
 ) -> list[dict]:
     """Возвращает подтверждённые результаты без преждевременного форматирования."""
     candidates = []
+    # Performance telemetry is informational. Never reorder, combine, cache
+    # across H1 snapshots, or replace the two directional verdicts.
+    profile = []
+    batch_started = time.perf_counter()
     for symbol in cfg.PAIRS:
-        # Evaluate every direction actually produced by a module. This prevents
-        # a strong confirmed reversal/pullback from disappearing merely because
-        # the current 2/3 LTF consensus still points the other way.
+        # Keep the source order and candidate direction order unchanged.
         sides = []
         for text in module_alerts:
             if _pair(text) != symbol:
@@ -731,18 +740,37 @@ def analyze_market(
             if found in (-1, 1) and found not in sides:
                 sides.append(found)
         if not sides:
+            if getattr(cfg, "MASTER_REQUIRE_MODULE_TRIGGER", True):
+                continue  # cannot pass mandatory evidence gate
             sides = [0]
+        # One read-only stack for all sides of the same PAIR and market snapshot.
+        try:
+            shared_stack = build_stack(symbol, market.get(symbol) or {}, strength)
+        except Exception:
+            log.exception("Master Direction MTF stack %s", symbol)
+            continue
+        if not shared_stack:
+            continue
         for candidate_side in sides:
+            started = time.perf_counter()
             try:
                 result = analyze_symbol(
                     symbol, market.get(symbol) or {}, strength, module_alerts,
                     dxy_bias=dxy_bias, events=events, now_utc=now_utc, market=market,
-                    side_override=candidate_side,
+                    side_override=candidate_side, _prebuilt_stack=shared_stack,
                 )
                 if result:
                     candidates.append(result)
             except Exception:
                 log.exception("Master Direction %s", symbol)
+            finally:
+                profile.append((symbol, candidate_side, round(time.perf_counter() - started, 3)))
+    elapsed = time.perf_counter() - batch_started
+    if elapsed >= 2.0:
+        # A single compact event, never one message per scanner or rejection.
+        log.info("MASTER_TIMING_OBSERVE_ONLY elapsed_s=%.3f candidates=%d "
+                 "confirmed=%d slowest=%s", elapsed, len(profile), len(candidates),
+                 sorted(profile, key=lambda row: row[2], reverse=True)[:5])
     candidates.sort(key=lambda item: (item["quality"], abs(item["gap"])), reverse=True)
     # 0 = без лимита: не отбрасываем более поздние качественные кандидаты.
     limit = int(getattr(cfg, "MASTER_MAX_SIGNALS_PER_H1", 0) or 0)
