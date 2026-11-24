@@ -703,8 +703,8 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
     if len(zpts)>=2: draw.line([(x,y) for x,y,_ in zpts],fill="#f1f5fb",width=4)
     ph=pl=None
     for x,y,p in zpts:
-        if p.kind=="high": label="H" if ph is None else ("HH" if p.price>ph else "LH"); ph=p.price
-        else: label="L" if pl is None else ("HL" if p.price>pl else "LL"); pl=p.price
+        if p.kind=="high": label=zigzag_scanner.swing_label("high",p.price,ph); ph=p.price
+        else: label=zigzag_scanner.swing_label("low",p.price,pl); pl=p.price
         draw.ellipse((x-5,y-5,x+5,y+5),fill="#f1f5fb")
         draw.text((x-11,y-25 if p.kind=="high" else y+8),label,fill="#f1f5fb",font=small)
 

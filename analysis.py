@@ -199,8 +199,19 @@ def zigzag(candles: list[Candle], pct: float, min_bars: int, scale: float = 1.0)
         # сторону, которая дальше от середины соседнего диапазона.
         if high and low:
             neighbour_mid = (max(c.high for c in area if c is not candles[i]) + min(c.low for c in area if c is not candles[i])) / 2
-            high = abs(candles[i].high-neighbour_mid) >= abs(candles[i].low-neighbour_mid)
-            low = not high
+            up_reach = abs(candles[i].high-neighbour_mid)
+            down_reach = abs(candles[i].low-neighbour_mid)
+            # Float noise (~1e-16) must not decide a tie differently for the
+            # market and its mirror; 1e-9 of price is far below one pip.
+            if abs(up_reach - down_reach) <= abs(candles[i].close) * 1e-9:
+                # Exact tie used to always pick the high (bearish bias). The
+                # extreme printed LAST inside the bar is the high for a bullish
+                # body and the low for a bearish one; a doji stays ambiguous.
+                high = candles[i].close > candles[i].open
+                low = candles[i].close < candles[i].open
+            else:
+                high = up_reach > down_reach
+                low = not high
         if high:
             candidates.append(Swing(i, candles[i].high, "high"))
         elif low:

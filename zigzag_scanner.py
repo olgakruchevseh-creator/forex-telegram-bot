@@ -60,18 +60,39 @@ def _word(v: int) -> str:
     return "LONG" if v > 0 else "SHORT" if v < 0 else ""
 
 
+def swing_label(kind: str, price: float, previous: float | None) -> str:
+    """HH/LH/EQH for highs, HL/LL/EQL for lows; ``H``/``L`` for the first one.
+
+    An exactly equal extreme is neither higher nor lower. It used to be labelled
+    LH (high) and LL (low), i.e. always bearish: an equal-price double top plus
+    a lower low gave SHORT, while the mirrored double bottom plus a higher high
+    gave nothing. Equal is now neutral for both sides.
+    """
+    if previous is None:
+        return "H" if kind == "high" else "L"
+    if price == previous:
+        return "EQH" if kind == "high" else "EQL"
+    if kind == "high":
+        return "HH" if price > previous else "LH"
+    return "HL" if price > previous else "LL"
+
+
+_HIGH_LABELS = ("HH", "LH", "EQH")
+_LOW_LABELS = ("HL", "LL", "EQL")
+
+
 def _sequence(swings: list) -> str:
-    """Convert completed extrema to a compact HH/HL/LH/LL sequence."""
+    """Convert completed extrema to a compact HH/HL/LH/LL(/EQH/EQL) sequence."""
     prev_high = prev_low = None
     labels = []
     for point in swings:
         if point.kind == "high":
             if prev_high is not None:
-                labels.append("HH" if point.price > prev_high else "LH")
+                labels.append(swing_label("high", point.price, prev_high))
             prev_high = point.price
         else:
             if prev_low is not None:
-                labels.append("HL" if point.price > prev_low else "LL")
+                labels.append(swing_label("low", point.price, prev_low))
             prev_low = point.price
     return " → ".join(labels[-4:])
 
@@ -93,8 +114,10 @@ def _swing_side(swings: list) -> int:
 def _sequence_side(sequence: str) -> int:
     """Направление по последней паре подписей high/low."""
     labels = [x.strip() for x in (sequence or "").split("→") if x.strip()]
-    last_high = next((x for x in reversed(labels) if x in ("HH", "LH")), "")
-    last_low = next((x for x in reversed(labels) if x in ("HL", "LL")), "")
+    # The LAST high/low label decides; an equal (EQH/EQL) one must not be
+    # skipped in favour of an older HH/LH, otherwise a stale label decides.
+    last_high = next((x for x in reversed(labels) if x in _HIGH_LABELS), "")
+    last_low = next((x for x in reversed(labels) if x in _LOW_LABELS), "")
     if last_high == "HH" and last_low == "HL":
         return 1
     if last_high == "LH" and last_low == "LL":
@@ -540,10 +563,10 @@ def render_chart(s: dict, by_tf: dict) -> io.BytesIO:
     previous_high = previous_low = None
     for x, y, point in confirmed:
         if point.kind == "high":
-            label = "H" if previous_high is None else ("HH" if point.price > previous_high else "LH")
+            label = swing_label("high", point.price, previous_high)
             previous_high = point.price
         else:
-            label = "L" if previous_low is None else ("HL" if point.price > previous_low else "LL")
+            label = swing_label("low", point.price, previous_low)
             previous_low = point.price
         draw.ellipse((x-6, y-6, x+6, y+6), fill=path_color, outline="#ffffff", width=2)
         draw.text((x-12, y-27 if point.kind == "high" else y+10), label, fill="#ffffff", font=small)
