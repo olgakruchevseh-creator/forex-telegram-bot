@@ -101,6 +101,27 @@ def _formation_start_index(tf: str, bars: list[Candle], p: patterns.Pattern) -> 
         if any(x in name for x in ("поглощение", "харами", "Пинцет", "облаках", "Завеса")):
             return max(0, len(bars) - 2)
         return len(bars) - 1
+    # Stage 18: use the anchor the detector itself chose whenever it is known.
+    # Since stages 16-17 the confirmed 1-2-3 triple and the double-top pair
+    # are not necessarily the LAST pivots, and chart figures carry their start
+    # in geometry_id ("CHART:<dt of the first boundary touch>").
+    gid = str(getattr(p, "geometry_id", "") or "")
+    if gid.startswith("CHART:"):
+        anchor = gid[len("CHART:"):]
+        found = next((i for i, bar in enumerate(bars) if str(bar.dt) == anchor), None)
+        if found is not None:
+            return found
+    if name in {"Двойная вершина", "Двойное дно"} and gid.startswith(("DT:", "DB:")):
+        prefix = gid[:3]
+        found = next((i for i, bar in enumerate(bars) if gid.startswith(f"{prefix}{bar.dt}:")), None)
+        if found is not None:
+            return found
+    if name == "Паттерн 1-2-3":
+        life = patterns.pattern_123_lifecycle(tf, bars)
+        if life.get("state") in {"CONFIRMED", "CONFIRMED_PRIOR"} and "p1_i" in life:
+            p1 = int(life["p1_i"])
+            if 0 <= p1 < len(bars):
+                return p1
     if name in {"Паттерн 1-2-3", "Гармонический AB=CD"} or name.startswith("Гармонический паттерн"):
         n = cfg.PATTERN_PIVOT.get(tf, 3)
         piv = patterns._alternating_pivots(patterns._pivots(bars, n))
@@ -113,7 +134,7 @@ def _formation_start_index(tf: str, bars: list[Candle], p: patterns.Pattern) -> 
         relevant = [i for i, _, kind in piv if kind == k]
         if len(relevant) >= 2:
             return relevant[-2]
-    # BOS/chart patterns: cannot reconstruct exact start without explicit anchors.
+    # BOS / H&S / chart patterns without an anchor: no exact start.
     return None
 
 

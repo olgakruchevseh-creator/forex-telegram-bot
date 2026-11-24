@@ -2,6 +2,7 @@
 
 Every scenario below reproduced a real defect on the pre-fix code.
 """
+import itertools
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -120,7 +121,9 @@ def test_one_breakout_gets_exactly_one_chart_classification(top, bottom):
     bars = path_bars([1.0, 1.0], prefix=60, wick=0.0004)
     bars[-1] = Candle(bars[-1].dt, 1.0000, 1.0032, 0.99995, 1.0030)
     av = atr(bars, 14)
-    fits = iter([(1.0010, top * av, 1.0, 0.0), (0.9990, bottom * av, 1.0, 0.0)])
+    # Upper, lower, upper, lower...: stage 18 re-fits earlier prefixes too
+    # (redraw guard), so the mock must not run out after two calls.
+    fits = itertools.cycle([(1.0010, top * av, 1.0, 0.0), (0.9990, bottom * av, 1.0, 0.0)])
     pivots = [(5, 1.001, "H"), (15, 0.999, "L"), (25, 1.001, "H"), (35, 0.999, "L")]
     with patch.object(patterns, "_line_fit", side_effect=lambda *_: next(fits)), \
          patch.object(patterns, "_pivots", return_value=pivots), \

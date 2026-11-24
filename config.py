@@ -659,6 +659,10 @@ PATTERN_CHART_BREAK_BUFFER_ATR = 0.05
 PATTERN_CHART_BREAK_MIN_BODY_ATR = 0.35
 PATTERN_LINE_MIN_R2 = 0.55
 PATTERN_LINE_MAX_MAE_ATR = 0.28
+# Этап 18: фигура, перерисованная через свечу уже случившегося пробоя
+# (свеча пробоя стала новым пивотом границы), не даёт второй карточки ни
+# в ту же, ни в обратную сторону. Откат: False.
+PATTERN_CHART_BLOCK_REDRAW = True
 PATTERN_CONVERGENCE_MAX_RATIO = 0.82
 PATTERN_NEWS_BEFORE_MINUTES = 60
 PATTERN_NEWS_AFTER_MINUTES = 30

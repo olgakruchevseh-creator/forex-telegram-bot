@@ -1,4 +1,5 @@
 """Geometry and reporting regressions: patterns 3.0 (not trading thresholds)."""
+import itertools
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -86,8 +87,8 @@ def test_sloped_wedge_breakout_checks_previous_line_at_previous_bar(monkeypatch)
     bars[-1] = Candle(bars[-1].dt, 1.12, 1.18, 1.11, 1.17)
     pivots = [(4, 1.40, 'H'), (10, 1.30, 'L'), (18, 1.25, 'H'), (24, 1.10, 'L')]
     with patch.object(patterns, '_pivots', return_value=pivots), \
-         patch.object(patterns, '_line_fit', side_effect=[(1.10, -.03, 1.0, 0.0),
-                                                           (1.00, -.015, 1.0, 0.0)]), \
+         patch.object(patterns, '_line_fit', side_effect=itertools.cycle([(1.10, -.03, 1.0, 0.0),
+                                                                          (1.00, -.015, 1.0, 0.0)])), \
          patch.object(patterns, 'atr', return_value=.10):
         found = patterns.chart_patterns('H1', bars)
     assert any(p.name == 'Падающий клин' for p in found)

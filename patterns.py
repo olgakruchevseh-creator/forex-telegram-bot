@@ -598,25 +598,28 @@ def _flag_pennant_patterns(tf: str, bars: list[Candle], av: float) -> list[Patte
     return out
 
 
-def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
-    """Клинья, флаги, вымпелы, прямоугольники и треугольники.
+def _chart_figure(tf: str, bars: list[Candle]) -> dict | None:
+    """Raw triangle / wedge / rectangle breakout on the LAST closed bar.
 
-    Очертание фигуры само по себе не отправляется: последняя закрытая свеча
-    обязана впервые пробить расчётную границу телом.
+    Returns the classification and the absolute index where the figure starts,
+    or None. No redraw check here (see chart_patterns); this is also the probe
+    used to find earlier breakouts inside a later figure.
     """
     hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {}).get(tf, 42) or 42)
     if len(bars) < 45:
-        return []
-    previous, last = bars[-2], bars[-1]
+        return None
+    last = bars[-1]
     history = bars[-(hist_n + 1):-1] if len(bars) > hist_n + 1 else bars[:-1]
+    offset = len(bars) - 1 - len(history)
     av = atr(bars, 14) or _range(last)
-    out = _flag_pennant_patterns(tf, bars, av)
+    if not av or av <= 0:
+        return None
     piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(tf, 3)), int(getattr(cfg, "PATTERN_CHART_PIVOT_LIMIT", 16)))
     highs = [(i, price) for i, price, kind in piv if kind == "H"]
     lows = [(i, price) for i, price, kind in piv if kind == "L"]
     upper_fit, lower_fit = _line_fit(highs, len(history)), _line_fit(lows, len(history))
     if not upper_fit or not lower_fit or len(highs) < 2 or len(lows) < 2:
-        return out
+        return None
     top, top_slope, top_r2, top_mae = upper_fit
     bottom, bottom_slope, bottom_r2, bottom_mae = lower_fit
     # Две точки задают линию идеально по определению; при 3+ касаниях требуем
@@ -625,10 +628,10 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     max_mae = av * float(getattr(cfg, "PATTERN_LINE_MAX_MAE_ATR", .28))
     if ((len(highs) >= 3 and top_r2 < min_r2 and abs(top_slope/av) > .01) or
         (len(lows) >= 3 and bottom_r2 < min_r2 and abs(bottom_slope/av) > .01) or
-        top_mae > max_mae or lower_fit[3] > max_mae):
-        return out
+        top_mae > max_mae or bottom_mae > max_mae):
+        return None
     if top <= bottom:
-        return out
+        return None
     top_n, bottom_n = top_slope / av, bottom_slope / av
     # По референсам 2026-10-04 фигура сама по себе не равна направлению.
     # Пробой должен быть именно сильным закрытым импульсом, а не тонким проколом
@@ -639,12 +642,15 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     body = _body(last)
     # Compare each close to the *line at that bar*, not both to today's line.
     # "First breakout" = every close since the earliest boundary touch stayed
-    # inside the figure (with tolerance); a re-break after an earlier close
-    # outside is NOT a new pattern.
+    # inside the figure; a re-break after an earlier close outside is NOT a
+    # new pattern. A fitted boundary may sit up to its MAE inside a real touch,
+    # so the inside band is line ± (buffer + MAE).
+    # The breakout itself only needs line ± buffer, so a close between buffer
+    # and buffer + MAE is a breakout on its bar and still "inside" on the next
+    # one. Such a second "first" breakout of the same figure is removed by the
+    # redraw guard in chart_patterns (stage 18), thresholds stay unchanged.
     used_points = highs[-5:] + lows[-5:]
     start_x = min(i for i, _ in used_points)
-    # A fitted boundary may sit up to its MAE inside a real touch; allow that
-    # residual so ordinary touches are not mistaken for earlier breakouts.
     inside_top, inside_bottom = tolerance + top_mae, tolerance + bottom_mae
     inside_until_now = all(
         bottom - bottom_slope * (len(history) - j) - inside_bottom
@@ -655,6 +661,8 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
                  and _bull(last) and body >= min_break_body)
     breaks_down = (inside_until_now and last.close < bottom - tolerance
                    and _bear(last) and body >= min_break_body)
+    if not (breaks_up or breaks_down):
+        return None
     old_x = max(0, len(history)-18)
     old_top = top-top_slope*(len(history)-old_x)
     old_bottom = bottom-bottom_slope*(len(history)-old_x)
@@ -662,7 +670,6 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     width = top-bottom
     converging = old_width > 0 and width < old_width * float(getattr(cfg, "PATTERN_CONVERGENCE_MAX_RATIO", .82))
     fit_bonus = int(round(((top_r2 + bottom_r2) / 2.0) * 4))
-    geometry_id = f"CHART:{history[start_x].dt}"
 
     # ONE mutually exclusive classification per boundary pair. Each boundary is
     # flat / rising / falling by a single threshold, so the same breakout can
@@ -696,20 +703,60 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
             choice = ("Нисходящий треугольник — пробой вверх", "LONG", 80, 76,
                       "Цена нарушила снижающуюся верхнюю границу закрытой свечой; медвежий сценарий фигуры отменён.", top)
     elif converging and shape == ("down", "up"):
-        if breaks_up or breaks_down:
-            side, level = ("LONG", top) if breaks_up else ("SHORT", bottom)
-            choice = ("Симметричный треугольник", side, 84, 80,
-                      f"Сходящиеся границы завершены; закрытая свеча подтвердила пробой {'вверх' if side == 'LONG' else 'вниз'}.", level)
+        side, level = ("LONG", top) if breaks_up else ("SHORT", bottom)
+        choice = ("Симметричный треугольник", side, 84, 80,
+                  f"Сходящиеся границы завершены; закрытая свеча подтвердила пробой {'вверх' if side == 'LONG' else 'вниз'}.", level)
     elif converging and shape == ("down", "down") and breaks_up:
         choice = ("Падающий клин", "LONG", 87, 83,
                   "Обе границы снижались и сходились; закрытая свеча пробила верхнюю границу клина.", top)
     elif converging and shape == ("up", "up") and breaks_down:
         choice = ("Восходящий клин", "SHORT", 87, 83,
                   "Обе границы росли и сходились; закрытая свеча пробила нижнюю границу клина.", bottom)
-    if choice:
-        name, side, q, conf, fact, level = choice
-        _add(out, name, side, tf, q + fit_bonus, conf + fit_bonus, fact, level, last, geometry_id)
+    if not choice:
+        return None
+    return {"choice": choice, "fit_bonus": fit_bonus, "start": offset + start_x,
+            "geometry_id": f"CHART:{history[start_x].dt}"}
 
+
+def _chart_redraw_of_earlier_break(tf: str, bars: list[Candle], figure: dict) -> bool:
+    """True when the figure re-draws one that already broke out inside its span.
+
+    Stage 18. After a breakout, the breakout candle (or the reaction after it)
+    can become a new boundary pivot. The lines are then re-drawn THROUGH the
+    old breakout, its close is "inside" again, and the same consolidation could
+    break out a second time: the same way (duplicate card) or the opposite way
+    (an ascending-triangle LONG followed 4 H1 later by a rising-wedge SHORT).
+    A figure is a re-draw if an earlier bar of its span was itself a figure
+    breakout whose figure started no later than this one. A larger figure that
+    started EARLIER and contains a small nested breakout is still allowed.
+    """
+    start = int(figure["start"])
+    for j in range(max(start, 44), len(bars) - 1):
+        earlier = _chart_figure(tf, bars[:j + 1])
+        if earlier is not None and int(earlier["start"]) <= start:
+            return True
+    return False
+
+
+def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
+    """Клинья, флаги, вымпелы, прямоугольники и треугольники.
+
+    Очертание фигуры само по себе не отправляется: последняя закрытая свеча
+    обязана впервые пробить расчётную границу телом.
+    """
+    if len(bars) < 45:
+        return []
+    last = bars[-1]
+    av = atr(bars, 14) or _range(last)
+    out = _flag_pennant_patterns(tf, bars, av)
+    figure = _chart_figure(tf, bars)
+    if figure is None:
+        return out
+    if getattr(cfg, "PATTERN_CHART_BLOCK_REDRAW", True) and _chart_redraw_of_earlier_break(tf, bars, figure):
+        return out
+    name, side, q, conf, fact, level = figure["choice"]
+    bonus = figure["fit_bonus"]
+    _add(out, name, side, tf, q + bonus, conf + bonus, fact, level, last, figure["geometry_id"])
     return out
 
 
