@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -362,7 +363,71 @@ def closed_candles(candles: list[Candle], timeframe_minutes: int = 60) -> list[C
     return out
 
 
+def _pair_returns_pct(series: dict[str, list[Candle]], lookback: int) -> list[tuple[str, str, float]]:
+    edges = []
+    for symbol, candles in series.items():
+        bars = closed_candles(candles)
+        if len(bars) <= lookback:
+            continue
+        base, quote = split_pair(symbol)
+        end = bars[-1].close
+        start = bars[-1 - lookback].close
+        if start <= 0:
+            continue
+        edges.append((base, quote, (end / start - 1) * 100))
+    return edges
+
+
+def _solve_linear(matrix: list[list[float]], rhs: list[float]) -> list[float]:
+    """Gaussian elimination with partial pivoting (8x8, no numpy needed)."""
+    n = len(rhs)
+    a = [row[:] + [rhs[i]] for i, row in enumerate(matrix)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(a[r][col]))
+        a[col], a[pivot] = a[pivot], a[col]
+        p = a[col][col]
+        for r in range(n):
+            if r != col and a[r][col]:
+                f = a[r][col] / p
+                for k in range(col, n + 1):
+                    a[r][k] -= f * a[col][k]
+    return [a[i][n] / a[i][i] for i in range(n)]
+
+
 def currency_strength(series: dict[str, list[Candle]], lookback: int) -> dict[str, float]:
+    """Zero-sum currency scores whose differences equal pair returns.
+
+    Least squares over the pair graph: S[base] - S[quote] ≈ return(pair),
+    sum(S) = 0. For the 7 USD majors (a star graph) the fit is exact, so
+    S[EUR] - S[USD] is precisely the EUR/USD return. The legacy method
+    averaged 7 pairs for USD but used ONE pair for every other currency,
+    which added the basket-average USD move to every USD-pair gap
+    (EUR/USD could fall while «EUR stronger than USD»). Thresholds keep
+    their units (simple % change over ``lookback`` closed H1).
+    """
+    if str(getattr(cfg, "STRENGTH_METHOD", "usd_star")).lower() == "legacy":
+        return _currency_strength_legacy(series, lookback)
+    names = list(cfg.CURRENCIES)
+    index = {c: i for i, c in enumerate(names)}
+    n = len(names)
+    lap = [[0.0] * n for _ in range(n)]
+    rhs = [0.0] * n
+    for base, quote, pct in _pair_returns_pct(series, lookback):
+        if base not in index or quote not in index or not math.isfinite(pct):
+            continue
+        i, j = index[base], index[quote]
+        lap[i][i] += 1; lap[j][j] += 1
+        lap[i][j] -= 1; lap[j][i] -= 1
+        rhs[i] += pct; rhs[j] -= pct
+    # 11ᵀ/n pins the overall mean to 0; a tiny ridge keeps currencies with no
+    # pair (or a disconnected partial basket) at 0 instead of a singular solve.
+    matrix = [[lap[i][j] + 1.0 / n + (1e-9 if i == j else 0.0) for j in range(n)] for i in range(n)]
+    solved = _solve_linear(matrix, rhs)
+    mean = sum(solved) / n
+    return {c: solved[index[c]] - mean for c in names}
+
+
+def _currency_strength_legacy(series: dict[str, list[Candle]], lookback: int) -> dict[str, float]:
     scores = {c: 0.0 for c in cfg.CURRENCIES}
     counts = {c: 0 for c in cfg.CURRENCIES}
     for symbol, candles in series.items():

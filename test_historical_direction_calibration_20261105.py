@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from analysis import Candle, currency_strength
+from analysis import Candle, _currency_strength_legacy as currency_strength
 import config as cfg
 import historical_direction_calibration as mod
 

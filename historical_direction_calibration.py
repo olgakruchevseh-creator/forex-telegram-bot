@@ -98,7 +98,7 @@ def read_basket(directory: Path) -> dict[str, dict[datetime, Candle]]:
 def score_at(close_window: dict[str, list[Candle]], method: str) -> dict[str, float]:
     """Use identical 26-bar snapshots for three models; no current wall clock.
 
-    Legacy formula EXACTLY mirrors analysis.currency_strength for a complete
+    Legacy formula EXACTLY mirrors analysis._currency_strength_legacy (STRENGTH_METHOD="legacy") for a complete
     seven-pair basket. This isolates the original behaviour without hidden
     clock-dependent closed_candles().
     """

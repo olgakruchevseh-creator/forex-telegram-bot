@@ -1,8 +1,10 @@
 """Независимая сверка горизонтов валютной силы — без влияния на входы.
 
-The original trading 4H simple-return method is retained to avoid silently
-changing its tuned thresholds. Briefing uses a distinct verified blend of
-1/4/12/24 closed H1. We label genuine sign disagreements, not falsely claim
+Trading uses the 4H simple-return USD-star (analysis.currency_strength,
+STRENGTH_METHOD="usd_star"): its gaps equal pair returns, like the briefing.
+Remaining differences are then truly the horizon (4H vs 1/4/12/24 blend).
+With STRENGTH_METHOD="legacy" the note says so, because then part of the
+gap is the old formula's basket-average USD term, not the horizon. We label genuine sign disagreements, not falsely claim
 these two correlated USD-derived series are independent votes.
 """
 from __future__ import annotations
@@ -57,6 +59,9 @@ def note(data: dict) -> str:
     if data.get('status') != 'РАСХОЖДЕНИЕ ГОРИЗОНТОВ':
         return ''
     symbols = ', '.join(x['pair'] for x in data.get('conflicts', []))
+    legacy = str(getattr(cfg, 'STRENGTH_METHOD', 'usd_star')).lower() == 'legacy'
+    cause = ('Торговый расчёт использует старую формулу (USD = среднее 7 пар), '
+             'поэтому расхождение может быть не только из-за горизонта. ' if legacy else
+             'Расчёт по 4 закрытым H1 ≠ смесь 1/4/12/24 H1 в брифинге. ')
     return (f'⚠️ Разные горизонты силы валют дают противоположное направление: {symbols}. '
-            'Расчёт по 4 закрытым H1 ≠ смесь 1/4/12/24 H1 в брифинге. '
-            'Это контекст, НЕ отдельный сигнал или запрет.')
+            + cause + 'Это контекст, НЕ отдельный сигнал или запрет.')

@@ -28,10 +28,21 @@ def anchored_market(market: dict, h1_closed_at: datetime) -> dict:
     if h1_closed_at.tzinfo is None:
         raise ValueError('H1 anchor must be timezone aware')
     cutoff = h1_closed_at.astimezone(timezone.utc)
+    from analysis import SeriesByTF
     out = {}
     for symbol in cfg.PAIRS:
-        out[symbol] = {}
-        for tf, bars in ((market or {}).get(symbol) or {}).items():
+        source = (market or {}).get(symbol) or {}
+        # Keep provider request times: patterns.final_by_tf() uses them to
+        # drop bars that were still forming when they were downloaded.
+        series = SeriesByTF()
+        own = getattr(source, "request_started_by_tf", None)
+        basket = getattr(market, "request_started_by_series", None)
+        times = dict(own) if isinstance(own, dict) else {}
+        if isinstance(basket, dict):
+            times.update({tf: t for (sym, tf), t in basket.items() if sym == symbol and t is not None})
+        series.request_started_by_tf = times
+        out[symbol] = series
+        for tf, bars in source.items():
             minutes = _TF_MINUTES.get(tf)
             if minutes is None:
                 continue

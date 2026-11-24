@@ -670,7 +670,7 @@ def interpret_print(event: NewsEvent) -> Optional[str]:
     return "positive" if better else "negative"
 
 
-def scenario_before(event: NewsEvent, ccy_score: float) -> str:
+def scenario_before(event: NewsEvent, ccy_score: float | None) -> str:
     if is_speech_event(event):
         return (
             f"Для выступления нет числового Actual. Жёсткий тон комментариев может усилить {event.currency}; "
@@ -687,9 +687,11 @@ def scenario_before(event: NewsEvent, ccy_score: float) -> str:
     if is_cpi_event(event) or any(x in title for x in ("interest rate", "cash rate", "bank rate", "federal funds rate")):
         return (f"Сравниваем факт и прогноз по {event.currency}, но направление не выводим автоматически. "
                 "Оцениваем ожидания ставок, другие показатели релиза и реакцию цены после закрытой H1.")
-    weak = ccy_score <= -0.03
-    strong = ccy_score >= 0.03
+    # None = no verified strength: never claim a rank position.
+    weak = ccy_score is not None and ccy_score <= -0.03
+    strong = ccy_score is not None and ccy_score >= 0.03
     current = (
+        "Сила валюты сейчас не подтверждена. " if ccy_score is None else
         f"{event.currency} сейчас слабая. " if weak else
         f"{event.currency} сейчас сильная. " if strong else
         f"{event.currency} в середине рейтинга. "

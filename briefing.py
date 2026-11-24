@@ -94,6 +94,9 @@ class PairBrief:
     adaptive_direction: dict | None = None
     weekly_rhythm: object | None = None
     levels_brief: dict | None = None
+    # False when the verified H1 strength was unavailable: gap 0.0 is then
+    # "unknown", not "equal strength".
+    strength_known: bool = True
 
 
 def now_local() -> datetime:
@@ -642,60 +645,6 @@ def dxy_context(usd_score: float, dxy: Optional[IndexView]) -> str:
     return "DXY и корзина USD без явного подтверждения"
 
 
-def strength_pct(rank: list[tuple[str, float]]) -> list[tuple[str, float]]:
-    """Robust 0..100 display scale without forcing every basket to 0/100.
-
-    The old min/max normalization made an almost-flat basket look maximally
-    polarized.  The display is now centred on 50 and scaled by the basket's
-    robust dispersion. Trading logic continues to use the raw strength scores.
-    """
-    if not rank:
-        return []
-    vals = [float(s) for _, s in rank]
-    centre = sum(vals) / len(vals)
-    deviations = sorted(abs(v - centre) for v in vals)
-    median_dev = deviations[len(deviations) // 2] if deviations else 0.0
-    scale = max(0.035, median_dev * 3.0)
-    out = []
-    for cur, score in rank:
-        z = (float(score) - centre) / scale
-        pct = 50.0 + 50.0 * math.tanh(z)
-        out.append((cur, max(0.0, min(100.0, pct))))
-    return out
-
-
-def briefing_strength_profile(market: dict, fallback: dict[str, float]) -> tuple[dict[str, float], dict[str, str]]:
-    """Stable H1 currency-strength view for the briefing only.
-
-    Blends 1/4/12/24 closed-H1 horizons. Short horizons retain session
-    responsiveness while 12/24H prevent one burst from dominating the table.
-    This does not replace the project's canonical 4H basket used by trading.
-    """
-    h1 = {symbol: ((market.get(symbol) or {}).get('H1') or []) for symbol in cfg.PAIRS}
-    horizons = ((1, 0.15), (4, 0.35), (12, 0.30), (24, 0.20))
-    components = []
-    for lookback, weight in horizons:
-        if any(len(closed_candles(v)) > lookback for v in h1.values()):
-            components.append((currency_strength(h1, lookback), weight))
-    if not components:
-        return dict(fallback or {}), {c: '—' for c in cfg.CURRENCIES}
-    total_w = sum(w for _, w in components) or 1.0
-    blended = {c: sum(part.get(c, 0.0) * w for part, w in components) / total_w for c in cfg.CURRENCIES}
-    # Direction of strength itself: compare short 1/4H blend with 12/24H baseline.
-    short = components[0][0] if components else blended
-    if len(components) > 1:
-        short = {c: components[0][0].get(c, 0.0) * 0.30 + components[1][0].get(c, 0.0) * 0.70 for c in cfg.CURRENCIES}
-    long_parts = components[2:] if len(components) >= 3 else components[-1:]
-    long_w = sum(w for _, w in long_parts) or 1.0
-    baseline = {c: sum(part.get(c, 0.0) * w for part, w in long_parts) / long_w for c in cfg.CURRENCIES}
-    eps = float(getattr(cfg, 'BRIEFING_STRENGTH_TREND_EPS', 0.025))
-    dynamics = {}
-    for c in cfg.CURRENCIES:
-        delta = short.get(c, 0.0) - baseline.get(c, 0.0)
-        dynamics[c] = '↑' if delta >= eps else ('↓' if delta <= -eps else '→')
-    return blended, dynamics
-
-
 def build_pair_briefs(
     market: dict,
     strength: dict[str, float],
@@ -786,6 +735,7 @@ def build_pair_briefs(
             adaptive_direction=adaptive_direction,
             weekly_rhythm=weekly_rhythm,
             levels_brief=level_snapshot,
+            strength_known=bool(strength),
         )
         technical_side = technical_pair_side(brief)
         brief.strength_relation = _strength_relation(brief.gap, technical_side)
@@ -874,25 +824,7 @@ def pick_leaders(briefs: list[PairBrief]) -> list[PairBrief]:
     return chosen
 
 
-def format_strength_block(rank: list[tuple[str, float]], dynamics: Optional[dict[str, str]] = None) -> list[str]:
-    lines = ["💱 СИЛА ВАЛЮТ", ""]
-    pct = strength_pct(rank)
-    if not pct:
-        lines.append("нет данных по закрытой H1")
-        return lines
-    for i, (cur, sc) in enumerate(pct, 1):
-        arrow = (dynamics or {}).get(cur, "")
-        suffix = f" {arrow}" if arrow else ""
-        lines.append(f"{i}. {cur} {sc:.0f}%{suffix}")
-    strong, weak = pct[0], pct[-1]
-    lines.append("")
-    lines.append(f"💪 Самая сильная: {strong[0]} ({strong[1]:.0f}%)")
-    lines.append(f"🔻 Самая слабая: {weak[0]} ({weak[1]:.0f}%)")
-    lines.append(f"Разница силы: {strong[1] - weak[1]:.0f} п.п.")
-    return lines
-
-
-def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
+def format_dxy_block(dxy: Optional[IndexView], usd_score: float | None) -> list[str]:
     lines = ["", "🇺🇸 DXY", ""]
     if not dxy or not getattr(dxy, "available", False):
         lines.append("нет данных")
@@ -908,7 +840,9 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float) -> list[str]:
     lines.append(f"Структура: {dxy.structure}")
     lines.append(f"Фаза: {dxy.phase}")
     lines.append(f"ADX: {dxy.adx:.0f}")
-    lines.append(f"Контекст относительно силы USD: {dxy_context(usd_score, dxy)}")
+    lines.append("Контекст относительно силы USD: " + (
+        dxy_context(usd_score, dxy) if usd_score is not None
+        else "сила USD не подтверждена — с DXY не сравнивается"))
     if getattr(dxy, "source", "") == "synthetic":
         lines.append("Источник: синтетическая корзина")
     return lines
@@ -959,7 +893,7 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
             lines.append("Затрагивает: " + ", ".join(touched))
         if newsmod.is_briefing_low_watch(e):
             lines.append("Низкая важность по календарю; возможна локальная реакция при заметном отклонении факта.")
-        score = strength.get(e.currency, 0.0)
+        score = strength.get(e.currency) if strength else None
         if left < 0 and newsmod.is_speech_event(e):
             lines.append("Выступление состоялось; числовой Actual для него не предусмотрен. Направление оцениваем только по реакции цены.")
         elif left < 0 and not newsmod.has_actual(e):
@@ -1066,12 +1000,14 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
     lines = ["📊 ДОСКА ПРИОРИТЕТОВ", ""]
     for b in briefs:
         base, quote = split_pair(b.symbol)
-        if b.gap > 0.03:
-            force = f"{base} сильнее {quote} на {abs(b.gap):.2f}"
+        if not b.strength_known:
+            force = "нет подтверждённых данных по общей закрытой H1"
+        elif b.gap > 0.03:
+            force = f"{base} сильнее {quote} на {abs(b.gap):.2f} п.п."
         elif b.gap < -0.03:
-            force = f"{quote} сильнее {base} на {abs(b.gap):.2f}"
+            force = f"{quote} сильнее {base} на {abs(b.gap):.2f} п.п."
         else:
-            force = f"сила почти равная ({b.gap:+.2f})"
+            force = f"сила почти равная ({b.gap:+.2f} п.п.)"
         # Отдельный крупный визуальный заголовок пары. Telegram не умеет менять
         # размер шрифта в plain-text caption, поэтому используем верхний регистр
         # и рамку-разделитель: пара не теряется между аналитическими строками.
@@ -1117,7 +1053,8 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         lines.append(f"Согласие D1/H4/H1: {agree_label}")
         session_side = session_pair_side(b)
         lines.append(f"Направление текущей сессии: {_ru_display(session_side) if session_side else 'НЕ ПОДТВЕРЖДЕНО'}")
-        relation = b.strength_relation or _strength_relation(b.gap, technical_pair_side(b))
+        relation = ("не оценивается" if not b.strength_known
+                    else b.strength_relation or _strength_relation(b.gap, technical_pair_side(b)))
         lines.append(f"Сила: {force} · {relation}")
         try:
             import session_projection_reports as projection_reports
@@ -1252,7 +1189,7 @@ def build_briefing_text(
     sess = current_session(now)
     verified_strength = briefing_strength_verified.calculate(market)
     briefing_scores = verified_strength.scores if verified_strength.ok else {}
-    usd = briefing_scores.get("USD", 0.0)
+    usd = briefing_scores.get("USD")  # None when strength is not verified
     briefs = build_pair_briefs(market, briefing_scores, events, now_utc)
     leaders = pick_leaders(briefs)
     lines = [
@@ -1338,7 +1275,7 @@ def build_briefing_sections(
     sess = current_session(now)
     verified_strength = briefing_strength_verified.calculate(market)
     briefing_scores = verified_strength.scores if verified_strength.ok else {}
-    usd = briefing_scores.get("USD", 0.0)
+    usd = briefing_scores.get("USD")  # None when strength is not verified
     briefs = build_pair_briefs(market, briefing_scores, events, now_utc)
     leaders = pick_leaders(briefs)
     head = [

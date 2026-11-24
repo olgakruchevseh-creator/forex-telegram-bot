@@ -171,7 +171,9 @@ def _flat_then(closes, tail):
 def test_bullish_belt_hold_after_rally_is_not_a_reversal():
     tail = [(1.10, 1.11, 1.09, 1.10), (1.10, 1.11, 1.09, 1.10), (1.10, 1.20, 1.10, 1.19)]
     rally = _flat_then((1.00, 1.025, 1.05, 1.075, 1.10), tail)
-    decline = _flat_then((1.20, 1.175, 1.15, 1.125, 1.10), tail)
+    # A one-candle figure measures the 5 bars right before it (stage 13), so
+    # the decline must still be visible within them.
+    decline = _flat_then((1.30, 1.25, 1.20, 1.15, 1.10), tail)
     assert "Бычий Belt Hold" not in [p.name for p in patterns.candlestick_patterns("H1", rally)]
     assert "Бычий Belt Hold" in [p.name for p in patterns.candlestick_patterns("H1", decline)]
 

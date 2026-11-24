@@ -193,15 +193,23 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
         return []
     out, a, b, c = [], bars[-3], bars[-2], bars[-1]
     av = atr(bars, 14) or _range(c)
-    prior = bars[-8:-3]
-    prior_move = (prior[-1].close - prior[0].close) / max(av, 1e-12) if len(prior) >= 2 else 0.0
-
     # Classical reversal shapes require a preceding move to reverse: a hammer
-    # after a rally is a hanging man, not a bullish reversal.
+    # after a rally is a hanging man, not a bullish reversal. The move is
+    # measured over the 5 bars that END right before the pattern's first
+    # candle (1-, 2- or 3-candle figure), so a sell-off in the bars just
+    # before a hammer counts.
     require_trend = bool(getattr(cfg, "PATTERN_CANDLE_REQUIRE_PRIOR_TREND", True))
     min_trend = float(getattr(cfg, "PATTERN_CANDLE_PRIOR_TREND_ATR", .50))
-    fell_before = (not require_trend) or prior_move <= -min_trend
-    rose_before = (not require_trend) or prior_move >= min_trend
+
+    def _prior(length: int) -> tuple[float, bool, bool]:
+        window = bars[-(length + 5):-length]
+        move = (window[-1].close - window[0].close) / max(av, 1e-12) if len(window) >= 2 else 0.0
+        return (move, (not require_trend) or move <= -min_trend,
+                (not require_trend) or move >= min_trend)
+
+    prior1, fell1, rose1 = _prior(1)
+    prior2, fell2, rose2 = _prior(2)
+    prior_move, fell_before, rose_before = _prior(3)
     min_range = av * float(getattr(cfg, "PATTERN_CANDLE_MIN_RANGE_ATR", .50))
     min_body = av * float(getattr(cfg, "PATTERN_CANDLE_MIN_BODY_ATR", .30))
 
@@ -210,21 +218,21 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
         _add(out, name, side, tf, q, conf, fact, level, c)
 
     # Engulfing / outside reversal. Контекст предыдущего движения повышает доверие.
-    if (fell_before and _bear(b) and _bull(c) and c.open <= b.close and c.close >= b.open
+    if (fell2 and _bear(b) and _bull(c) and c.open <= b.close and c.close >= b.open
             and _body(c) >= _body(b) * 1.05 and _body(c) >= min_body):
-        add("Бычье поглощение", "LONG", 80, 78, "Закрытая бычья свеча полностью поглотила тело предыдущей медвежьей свечи.", c.low, -prior_move)
-    if (rose_before and _bull(b) and _bear(c) and c.open >= b.close and c.close <= b.open
+        add("Бычье поглощение", "LONG", 80, 78, "Закрытая бычья свеча полностью поглотила тело предыдущей медвежьей свечи.", c.low, -prior2)
+    if (rose2 and _bull(b) and _bear(c) and c.open >= b.close and c.close <= b.open
             and _body(c) >= _body(b) * 1.05 and _body(c) >= min_body):
-        add("Медвежье поглощение", "SHORT", 80, 78, "Закрытая медвежья свеча полностью поглотила тело предыдущей бычьей свечи.", c.high, prior_move)
+        add("Медвежье поглощение", "SHORT", 80, 78, "Закрытая медвежья свеча полностью поглотила тело предыдущей бычьей свечи.", c.high, prior2)
 
     # Hammer / Shooting Star: тень + качественное закрытие, но не самостоятельный разворот.
     upper, lower, body = c.high - max(c.open, c.close), min(c.open, c.close) - c.low, max(_body(c), av * .03)
-    if (fell_before and _range(c) >= min_range and lower >= body * 2.2 and upper <= body * .8
+    if (fell1 and _range(c) >= min_range and lower >= body * 2.2 and upper <= body * .8
             and c.close >= c.low + _range(c) * .60):
-        add("Молот / бычий Pin Bar", "LONG", 76, 74, "Длинная нижняя тень отвергнута, свеча закрылась в верхней части диапазона.", c.low, -prior_move)
-    if (rose_before and _range(c) >= min_range and upper >= body * 2.2 and lower <= body * .8
+        add("Молот / бычий Pin Bar", "LONG", 76, 74, "Длинная нижняя тень отвергнута, свеча закрылась в верхней части диапазона.", c.low, -prior1)
+    if (rose1 and _range(c) >= min_range and upper >= body * 2.2 and lower <= body * .8
             and c.close <= c.low + _range(c) * .40):
-        add("Падающая звезда / медвежий Pin Bar", "SHORT", 76, 74, "Длинная верхняя тень отвергнута, свеча закрылась в нижней части диапазона.", c.high, prior_move)
+        add("Падающая звезда / медвежий Pin Bar", "SHORT", 76, 74, "Длинная верхняя тень отвергнута, свеча закрылась в нижней части диапазона.", c.high, prior1)
 
     # Morning / Evening Star.
     a_mid = (a.open + a.close) / 2
@@ -259,30 +267,30 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
 
     # Piercing Line / Dark Cloud Cover: обязательное проникновение за середину тела.
     bmid = (b.open + b.close) / 2
-    if fell_before and _bear(b) and _body(b) >= av * .35 and _bull(c) and c.open <= b.close and c.close > bmid and c.close < b.open:
-        add("Просвет в облаках", "LONG", 79, 76, "После медвежьей свечи бычье закрытие вернулось выше середины её тела.", min(b.low, c.low), -prior_move)
-    if rose_before and _bull(b) and _body(b) >= av * .35 and _bear(c) and c.open >= b.close and c.close < bmid and c.close > b.open:
-        add("Завеса из тёмных облаков", "SHORT", 79, 76, "После бычьей свечи медвежье закрытие ушло ниже середины её тела.", max(b.high, c.high), prior_move)
+    if fell2 and _bear(b) and _body(b) >= av * .35 and _bull(c) and c.open <= b.close and c.close > bmid and c.close < b.open:
+        add("Просвет в облаках", "LONG", 79, 76, "После медвежьей свечи бычье закрытие вернулось выше середины её тела.", min(b.low, c.low), -prior2)
+    if rose2 and _bull(b) and _body(b) >= av * .35 and _bear(c) and c.open >= b.close and c.close < bmid and c.close > b.open:
+        add("Завеса из тёмных облаков", "SHORT", 79, 76, "После бычьей свечи медвежье закрытие ушло ниже середины её тела.", max(b.high, c.high), prior2)
 
     # Harami: слабее поглощения, поэтому требует выраженного предыдущего тела.
     inside_body = min(c.open, c.close) >= min(b.open, b.close) and max(c.open, c.close) <= max(b.open, b.close)
     if inside_body and _body(b) >= av * .55 and _body(c) <= _body(b) * .55:
-        if fell_before and _bear(b) and _bull(c):
-            add("Бычий харами", "LONG", 75, 72, "Малое бычье тело сформировалось внутри крупного предыдущего медвежьего тела; требуется внешнее подтверждение.", min(b.low, c.low), -prior_move)
-        elif rose_before and _bull(b) and _bear(c):
-            add("Медвежий харами", "SHORT", 75, 72, "Малое медвежье тело сформировалось внутри крупного предыдущего бычьего тела; требуется внешнее подтверждение.", max(b.high, c.high), prior_move)
+        if fell2 and _bear(b) and _bull(c):
+            add("Бычий харами", "LONG", 75, 72, "Малое бычье тело сформировалось внутри крупного предыдущего медвежьего тела; требуется внешнее подтверждение.", min(b.low, c.low), -prior2)
+        elif rose2 and _bull(b) and _bear(c):
+            add("Медвежий харами", "SHORT", 75, 72, "Малое медвежье тело сформировалось внутри крупного предыдущего бычьего тела; требуется внешнее подтверждение.", max(b.high, c.high), prior2)
 
     # Tweezer reversal: близкие экстремумы + противоположное закрытие.
     tol = max(av * .10, _range(c) * .08)
-    if fell_before and _bear(b) and _bull(c) and abs(c.low - b.low) <= tol and _body(c) >= av * .25:
-        add("Пинцет снизу", "LONG", 76, 73, "Два близких минимума и бычье закрытие показывают повторное отвержение нижней цены.", min(b.low, c.low), -prior_move)
-    if rose_before and _bull(b) and _bear(c) and abs(c.high - b.high) <= tol and _body(c) >= av * .25:
-        add("Пинцет сверху", "SHORT", 76, 73, "Два близких максимума и медвежье закрытие показывают повторное отвержение верхней цены.", max(b.high, c.high), prior_move)
+    if fell2 and _bear(b) and _bull(c) and abs(c.low - b.low) <= tol and _body(c) >= av * .25:
+        add("Пинцет снизу", "LONG", 76, 73, "Два близких минимума и бычье закрытие показывают повторное отвержение нижней цены.", min(b.low, c.low), -prior2)
+    if rose2 and _bull(b) and _bear(c) and abs(c.high - b.high) <= tol and _body(c) >= av * .25:
+        add("Пинцет сверху", "SHORT", 76, 73, "Два близких максимума и медвежье закрытие показывают повторное отвержение верхней цены.", max(b.high, c.high), prior2)
 
     # Belt Hold: a reversal candle, so it also needs a preceding opposite move.
-    if fell_before and _bull(c) and _body(c) >= av * .75 and (c.open - c.low) <= _range(c) * .08:
+    if fell1 and _bull(c) and _body(c) >= av * .75 and (c.open - c.low) <= _range(c) * .08:
         add("Бычий Belt Hold", "LONG", 78, 75, "Сильная бычья свеча открылась у минимума и закрылась направленным импульсом.", c.low, .5)
-    if rose_before and _bear(c) and _body(c) >= av * .75 and (c.high - c.open) <= _range(c) * .08:
+    if rose1 and _bear(c) and _body(c) >= av * .75 and (c.high - c.open) <= _range(c) * .08:
         add("Медвежий Belt Hold", "SHORT", 78, 75, "Сильная медвежья свеча открылась у максимума и закрылась направленным импульсом.", c.high, .5)
     return out
 
@@ -1719,6 +1727,33 @@ def _adjusted_candidates(symbol: str, by_tf: dict, candidates: list[Pattern]) ->
     return sorted(adjusted, key=lambda p: (p.quality, p.confidence), reverse=True)
 
 
+def _harmonic_still_early(p: Pattern, by_tf: dict) -> bool:
+    """Late-entry guard for harmonics (they skip _residual_potential).
+
+    Since stage 11 an H4/D1/W1 harmonic is confirmed by any later closed H1,
+    so D alone could stay «valid» for 9 bars of its own TF (9 days on D1,
+    9 weeks on W1) while price ran 6+ ATR away. The card is allowed only
+    while D is recent AND price is still near D, measured on the pattern TF.
+    """
+    bars = closed_candles(by_tf.get(p.tf) or [], TF_MINUTES[p.tf])
+    if not bars:
+        return True  # not measurable here; detection itself ran on these bars
+    d_i = None
+    anchor = p.geometry_id.split(":", 1)[1].rsplit(":", 1)[0] if p.geometry_id.count(":") >= 2 else ""
+    if anchor:
+        d_i = next((i for i in range(len(bars) - 1, -1, -1) if str(bars[i].dt) == anchor), None)
+    if d_i is None:
+        return True  # D not locatable (synthetic/legacy inputs): keep old behaviour
+    # D is a pivot confirmed by PATTERN_PIVOT bars, so the minimum age is n.
+    n = int(cfg.PATTERN_PIVOT.get(p.tf, 3))
+    max_age = int(getattr(cfg, "HARMONIC_MAX_BARS_AFTER_D", {}).get(p.tf, n + 2))
+    max_atr = float(getattr(cfg, "HARMONIC_MAX_REACTION_ATR", 2.0))
+    av = atr(bars, 14) or _range(bars[-1])
+    age = len(bars) - 1 - d_i
+    reaction = abs(float(bars[-1].close) - float(p.level)) / max(av, 1e-12)
+    return age <= max_age and reaction <= max_atr
+
+
 def _h1_confirmation_close(by_tf: dict) -> datetime | None:
     """Close time of the last closed H1 bar (the harmonic confirmation bar)."""
     h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
@@ -1792,10 +1827,21 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 cache_hits += 1
             else:
                 cache_misses += 1
+            late_harmonics = [p for p in candidates
+                              if p.name.startswith("Гармонический") and not _harmonic_still_early(p, by_tf)]
+            for p in late_harmonics:
+                # A completed D that price has already left is consumed: later
+                # H1 breaks must not re-deliver it days afterwards.
+                key = _pattern_key(symbol, p)
+                if not first and key not in sent:
+                    sent[key] = p.dt
+                    expired_ledger[key] = {"reason": "harmonic_late_after_d", "dt": p.dt,
+                                           "at": now_utc.isoformat()}
             candidates = [
                 p for p in candidates
-                if not p.name.startswith("Гармонический")
-                or harmonic_confirmation(symbol, p.side, by_tf, strength)
+                if p not in late_harmonics and (
+                    not p.name.startswith("Гармонический")
+                    or harmonic_confirmation(symbol, p.side, by_tf, strength))
             ]
             candidates = [p for p in candidates if _pattern_allowed(p, context_side)]
             # Единый OHLC слой не создаёт паттерн сам. Он лишь не даёт одной-двум

@@ -458,21 +458,6 @@ def format_h1_time(dt_str: str) -> str:
         return dt_str
 
 
-def format_strength(rank: list[tuple[str, float]], candle_dt: str = "") -> str:
-    title = "💱 Сила валют по закрытой часовой свече"
-    if candle_dt:
-        title += f"\nСвеча: {format_h1_time(candle_dt)}"
-    lines = [title + "\n"]
-    pct = briefing.strength_pct(rank)
-    for i, (cur, sc) in enumerate(pct, 1):
-        lines.append(f"{i}. {cur}  {sc:.0f}%")
-    if pct:
-        lines.append(f"\nСамая сильная: {pct[0][0]} ({pct[0][1]:.0f}%)")
-        lines.append(f"Самая слабая: {pct[-1][0]} ({pct[-1][1]:.0f}%)")
-        lines.append(f"Разница силы: {pct[0][1] - pct[-1][1]:.0f} п.п.")
-    return "\n".join(lines)
-
-
 def format_stack_block(stack: PairStack) -> list[str]:
     lines = ["Таймфреймы:"]
     for tf in cfg.TIMEFRAMES:
@@ -887,6 +872,19 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "Брифинг не собрался: нет закрытых H1. Напиши /now или повтори через минуту."
             )
             return
+        # Same gate as the automatic session briefing: coverage allows an H1
+        # up to 90 min old, verified strength only 45. Without this, minutes
+        # :46–:59 produced a board with invented zero strength.
+        strength_check = briefing.briefing_strength_verified.calculate(market)
+        if not strength_check.ok:
+            await update.message.reply_text(
+                "Брифинг не собрался: сила валют по общей закрытой H1 не подтверждена ("
+                + str(strength_check.reason) + "). Повтори после закрытия следующей H1."
+            )
+            return
+        # One closed-H1 moment, exactly like the session briefing: no M15/M5
+        # that closed after this H1 (the status line promises this).
+        market = live_briefing.anchored_market(market, strength_check.last_closed_at)
         dxy = None
         try:
             dxy = briefing.collect_extras(
@@ -908,7 +906,9 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 text = briefing.build_briefing_text(market, strength, rank, dxy, events, upcoming_events)
             except Exception:
                 log.exception("Сборка текста /briefing_full")
-                text = format_strength(rank, last_closed_h1_dt(h1_series(market)))
+                # Fallback shows the SAME verified strength as the briefing
+                # (conditional 0–100 index, not %), never a second formula.
+                text = "\n".join(briefing.briefing_strength_verified.format_block(strength_check))
                 text += "\n\nПолная доска пар сейчас недоступна."
             await _send_parts(context.application, int(update.effective_chat.id), text)
         else:
@@ -1131,7 +1131,8 @@ async def _maybe_send_session_briefing(
             _register_briefing_level_watch(iid, delivery_market)
         else:
             log.warning('BRIEF_LEVEL_WATCH_NOT_REGISTERED incomplete_delivery=%s', delivered)
-        state["last_rank"] = [c for c, _ in rank]
+        # The rank the user actually saw: verified briefing strength.
+        state["last_rank"] = [c for c, _ in rank_currencies(strength_check.scores)]
         state["last_strength_h1"] = closed_dt
         state["last_strength_ts"] = time.time()
         state["last_briefing_id"] = briefing.briefing_id()
