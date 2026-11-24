@@ -620,7 +620,9 @@ HARMONIC_RATIOS = {
     "deep_crab": {"xb": (0.84, 0.924), "ac": (0.382, 0.886), "bd": (2.0, 3.618), "xd": (1.55, 1.68)},
     # Акула в разметке XABCD = 0-X-A-B-C: AB расширяет XA, BC расширяет AB,
     # точка C завершается на 0.886-1.13 ноги 0X. Старый откат XB был другой фигурой.
-    "shark": {"bc_xa": (1.13, 1.618), "bd": (1.618, 2.24), "xd": (0.886, 1.13)},
+    # В наших обозначениях: "ac" = BC/AB (расширение ноги XA акулы),
+    # "bd" = CD/BC (её BC/AB), "xd" = |A−D|/XA (её C на 0.886–1.13 ноги 0X).
+    "shark": {"ac": (1.13, 1.618), "bd": (1.618, 2.24), "xd": (0.886, 1.13)},
     # Сайфер: B откатывает XA, C — расширение XA (не AB), D — откат XC около 0.786.
     "cypher": {"xb": (0.382, 0.618), "xc": (1.272, 1.414), "dxc": (0.75, 0.82)},
     "five_o": {"xb": (1.13, 1.618), "ac": (1.618, 2.24), "cd": (0.48, 0.62)},
@@ -635,7 +637,7 @@ PATTERN_PENDING_TTL_SECONDS = 900  # Matches UNIFIED_OUTBOX_TTL_SECONDS.
 PATTERN_ANALYSIS_CACHE_MAX_SYMBOLS = 8  # Signatures + pattern summaries only.
 PATTERN_CHART_IMAGES_ENABLED = True
 PATTERN_CHART_LOOKBACK = 55
-PATTERN_CHART_HISTORY = {"W1": 100, "D1": 120, "H4": 80, "H1": 60, "M15": 48, "M5": 42}
+PATTERN_CHART_HISTORY = {"W1": 79, "D1": 120, "H4": 80, "H1": 60, "M15": 48, "M5": 42}  # < PATTERN_LOOKBACK
 PATTERN_CHART_PIVOT_LIMIT = 16
 PATTERN_CHART_BREAK_BUFFER_ATR = 0.05
 PATTERN_CHART_BREAK_MIN_BODY_ATR = 0.35
@@ -664,9 +666,22 @@ PATTERN_123_MAX_BARS_AFTER_P3 = {"W1": 8, "D1": 8, "H4": 8, "H1": 7, "M15": 7, "
 PATTERN_HS_SHOULDER_TOL_ATR = 0.40
 PATTERN_HS_HEAD_MIN_ATR = 0.60
 PATTERN_HS_MAX_TIME_RATIO = 3.0
+PATTERN_HS_MAX_BARS_AFTER_SHOULDER = 20  # neckline break must be recent
+# Double top/bottom: real depth and spacing, recent second extreme.
+PATTERN_DOUBLE_MIN_DEPTH_ATR = 0.80
+PATTERN_DOUBLE_MIN_SEPARATION_BARS = 4
+PATTERN_DOUBLE_MAX_BARS_AFTER_SECOND = 20
+# Triangles / wedges / rectangles: one threshold classifies each boundary as
+# flat / rising / falling, so classifications are mutually exclusive.
+PATTERN_BOUNDARY_FLAT_ATR = 0.015
+# Japanese candles: reversal shapes need a preceding move; no micro-candles.
+PATTERN_CANDLE_REQUIRE_PRIOR_TREND = True
+PATTERN_CANDLE_PRIOR_TREND_ATR = 0.50
+PATTERN_CANDLE_MIN_RANGE_ATR = 0.50
+PATTERN_CANDLE_MIN_BODY_ATR = 0.30
 # Гармоническая геометрия сама по себе не является торговым сигналом.
-# Для отправки требуется подтвержденный импульс H1 и слом структуры M15,
-# поддержанные относительной силой валют.
+# Для отправки требуется закрытый пробой H1 (HARMONIC_CONFIRM_*) в сторону
+# реакции и относительная сила валют. M15/M5 в подтверждении НЕ участвуют.
 HARMONIC_MIN_STRENGTH_GAP = 0.05
 HARMONIC_CONFIRM_BODY_ATR = 0.35
 HARMONIC_CONFIRM_LOOKBACK = 8

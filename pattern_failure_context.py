@@ -38,6 +38,8 @@ def analyze_symbol(symbol, by_tf, direction):
     if not wanted:return None
     lookback=int(getattr(cfg,"PATTERN_FAILURE_LOOKBACK_BARS",8))
     best=None
+    per_tf={}  # strongest failure per timeframe; the old loop kept the LAST one
+    rank={"H1":0,"H4":1,"D1":2,"W1":3}
     for tf in ("H1","H4","D1","W1"):
         raw=(by_tf or {}).get(tf) or []
         if raw and not hasattr(raw[-1], "dt"):
@@ -65,12 +67,21 @@ def analyze_symbol(symbol, by_tf, direction):
                 if closes>=1:
                     score=min(90,76+min(8,closes*3)+(6 if disp else 0))
                     state="ПРОВАЛ ПАТТЕРНА ПОДТВЕРЖДЁН" if closes>=2 or disp else "ВОЗВРАТ ЗА ТРИГГЕР ПАТТЕРНА"
-                    best=PatternFailureContext(True,state,p.name,p.side,"LONG" if failure>0 else "SHORT",tf,trigger,closes,disp,1,score,"ожидаемое продолжение паттерна не удержалось; цена вернулась за его trigger/neckline")
-        if best: break
-    return best
+                    cand=PatternFailureContext(True,state,p.name,p.side,"LONG" if failure>0 else "SHORT",tf,trigger,closes,disp,1,score,"ожидаемое продолжение паттерна не удержалось; цена вернулась за его trigger/neckline")
+                    if tf not in per_tf or cand.score>per_tf[tf].score:
+                        per_tf[tf]=cand
+    if not per_tf: return None
+    # Prefer the strongest failure; on equal score the HIGHER timeframe wins
+    # (the module is HTF context). alignment = how many TFs agree.
+    best=max(per_tf.values(),key=lambda c:(c.score,rank[c.timeframe]))
+    from dataclasses import replace
+    return replace(best,alignment=len(per_tf))
 
 def score_delta(ctx,direction):
     if not ctx:return 0
+    wanted=_side(direction)
+    failure=1 if ctx.failure_side=="LONG" else -1 if ctx.failure_side=="SHORT" else 0
+    if not wanted or failure!=wanted:return 0  # never boost the opposite side
     return 2 if ctx.alignment>0 and ctx.state=="ПРОВАЛ ПАТТЕРНА ПОДТВЕРЖДЁН" else 0
 
 def describe(ctx):

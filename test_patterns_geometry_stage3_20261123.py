@@ -55,7 +55,8 @@ def test_three_crows_refuses_gap_separated_bearish_bars():
 
 def test_abcd_requires_price_leg_equality_and_timing(monkeypatch):
     bars = candles(30)
-    bars[-1] = Candle(bars[-1].dt, 1.03, 1.08, 1.02, 1.07)
+    # After D (index 22) nothing trades below D=1.06 (bars 1.08 low).
+    bars[-1] = Candle(bars[-1].dt, 1.065, 1.08, 1.061, 1.075)
     a, b, c = (5, 1.2, 'H'), (10, 1.1, 'L'), (15, 1.16, 'H')
     with patch.object(patterns, '_pivots', return_value=[a, b, c, (22, 1.06, 'L')]):
         good = patterns.harmonic_abcd('H1', bars)
@@ -68,6 +69,13 @@ def test_abcd_requires_price_leg_equality_and_timing(monkeypatch):
 
 def test_sloped_wedge_breakout_checks_previous_line_at_previous_bar(monkeypatch):
     bars = candles(60)
+    # Closes trade inside the falling wedge (between both projected lines)
+    # until the breakout; otherwise it would not be a FIRST breakout.
+    n_hist = len(bars) - 1
+    for j in range(4, n_hist - 1):
+        top_j, bottom_j = 1.10 + .03 * (n_hist - j), 1.00 + .015 * (n_hist - j)
+        mid = (top_j + bottom_j) / 2
+        bars[j] = Candle(bars[j].dt, mid, mid + .001, mid - .001, mid)
     bars[-2] = Candle(bars[-2].dt, 1.12, 1.14, 1.10, 1.125)
     bars[-1] = Candle(bars[-1].dt, 1.12, 1.18, 1.11, 1.17)
     pivots = [(4, 1.40, 'H'), (10, 1.30, 'L'), (18, 1.25, 'H'), (24, 1.10, 'L')]
@@ -108,7 +116,8 @@ def test_mtf_labels_do_not_claim_independent_m5_confirms_d1():
 
 def test_htf_image_caption_does_not_invent_probability(monkeypatch):
     p = patterns.Pattern('Бычье поглощение', 'LONG', 'D1', 90, 82, '', 1.1, '2026-11-20')
-    with patch.object(patterns, '_cached_analysis', return_value=('', [p], [], True)), \
+    # A candle reaction is shown only along the main context (same rule as live).
+    with patch.object(patterns, '_cached_analysis', return_value=('LONG', [p], [], True)), \
          patch.object(patterns, 'render_pattern_chart', return_value=b'fake-img'):
         card = patterns.briefing_htf_card('AUD/USD', {})
     assert card is not None

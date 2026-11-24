@@ -77,9 +77,11 @@ def _delivery_group_key(symbol: str, pattern: Pattern) -> str:
         if not d_anchor:
             d_anchor = f"{pattern.dt}:{pattern.level:.8f}"
         return f"GROUP|{symbol}|{pattern.tf}|{pattern.side}|harmonic_d|{d_anchor}"
-    if pattern.name in {"Паттерн 1-2-3", "BOS вверх", "BOS вниз"}:
-        return f"GROUP|{symbol}|{pattern.tf}|{pattern.side}|bos_123|{pattern.dt}"
-    return ""
+    # Every other detector fires only on its confirming close. Engulfing +
+    # tweezer + Belt Hold, or BOS + 1-2-3 + a triangle on the SAME closed bar
+    # and side, are one market event: one Telegram card (the strongest),
+    # the other names are listed inside it.
+    return f"GROUP|{symbol}|{pattern.tf}|{pattern.side}|bar|{pattern.dt}"
 
 
 def _path() -> Path:
@@ -136,10 +138,20 @@ def _bear(c: Candle) -> bool:
     return c.close < c.open
 
 
-def _add(out, name, side, tf, q, conf, fact, level, c):
+def _add(out, name, side, tf, q, conf, fact, level, c, geometry_id: str = ""):
     q, conf = int(min(96, q)), int(min(94, conf))
     if q >= cfg.PATTERN_MIN_QUALITY and conf >= cfg.PATTERN_MIN_CONFIDENCE:
-        out.append(Pattern(name, side, tf, q, conf, fact, level, c.dt))
+        out.append(Pattern(name, side, tf, q, conf, fact, level, c.dt, geometry_id))
+
+
+def _passes_thresholds(p: "Pattern") -> bool:
+    """The configured minimum applies to the FINAL published score.
+
+    Context, OHLC-movement and news adjustments run after detection; a card
+    must not leave below the same threshold the detector enforced.
+    """
+    return (p.quality >= cfg.PATTERN_MIN_QUALITY
+            and p.confidence >= cfg.PATTERN_MIN_CONFIDENCE)
 
 
 def _candle_strength(c: Candle, av: float) -> float:
@@ -156,7 +168,9 @@ def _japanese_scores(base_q: int, base_conf: int, c: Candle, av: float, *, confi
     strength = _candle_strength(c, av)
     q = base_q + round((strength - .60) * 14) + round(max(-1.0, min(1.0, confirm)) * 4)
     conf = base_conf + round((strength - .60) * 12) + round(max(-1.0, min(1.0, confirm)) * 5)
-    return max(68, min(94, q)), max(66, min(92, conf))
+    # No artificial floor: a weak candle must be able to fall below
+    # PATTERN_MIN_QUALITY instead of being lifted to 68/66 by its name alone.
+    return max(1, min(94, q)), max(1, min(92, conf))
 
 
 def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
@@ -167,27 +181,44 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     prior = bars[-8:-3]
     prior_move = (prior[-1].close - prior[0].close) / max(av, 1e-12) if len(prior) >= 2 else 0.0
 
+    # Classical reversal shapes require a preceding move to reverse: a hammer
+    # after a rally is a hanging man, not a bullish reversal.
+    require_trend = bool(getattr(cfg, "PATTERN_CANDLE_REQUIRE_PRIOR_TREND", True))
+    min_trend = float(getattr(cfg, "PATTERN_CANDLE_PRIOR_TREND_ATR", .50))
+    fell_before = (not require_trend) or prior_move <= -min_trend
+    rose_before = (not require_trend) or prior_move >= min_trend
+    min_range = av * float(getattr(cfg, "PATTERN_CANDLE_MIN_RANGE_ATR", .50))
+    min_body = av * float(getattr(cfg, "PATTERN_CANDLE_MIN_BODY_ATR", .30))
+
     def add(name, side, q, conf, fact, level, confirm=0.0):
         q, conf = _japanese_scores(q, conf, c, av, confirm=confirm)
         _add(out, name, side, tf, q, conf, fact, level, c)
 
     # Engulfing / outside reversal. Контекст предыдущего движения повышает доверие.
-    if _bear(b) and _bull(c) and c.open <= b.close and c.close >= b.open and _body(c) >= _body(b) * 1.05:
+    if (fell_before and _bear(b) and _bull(c) and c.open <= b.close and c.close >= b.open
+            and _body(c) >= _body(b) * 1.05 and _body(c) >= min_body):
         add("Бычье поглощение", "LONG", 80, 78, "Закрытая бычья свеча полностью поглотила тело предыдущей медвежьей свечи.", c.low, -prior_move)
-    if _bull(b) and _bear(c) and c.open >= b.close and c.close <= b.open and _body(c) >= _body(b) * 1.05:
+    if (rose_before and _bull(b) and _bear(c) and c.open >= b.close and c.close <= b.open
+            and _body(c) >= _body(b) * 1.05 and _body(c) >= min_body):
         add("Медвежье поглощение", "SHORT", 80, 78, "Закрытая медвежья свеча полностью поглотила тело предыдущей бычьей свечи.", c.high, prior_move)
 
     # Hammer / Shooting Star: тень + качественное закрытие, но не самостоятельный разворот.
     upper, lower, body = c.high - max(c.open, c.close), min(c.open, c.close) - c.low, max(_body(c), av * .03)
-    if lower >= body * 2.2 and upper <= body * .8 and c.close >= c.low + _range(c) * .60:
+    if (fell_before and _range(c) >= min_range and lower >= body * 2.2 and upper <= body * .8
+            and c.close >= c.low + _range(c) * .60):
         add("Молот / бычий Pin Bar", "LONG", 76, 74, "Длинная нижняя тень отвергнута, свеча закрылась в верхней части диапазона.", c.low, -prior_move)
-    if upper >= body * 2.2 and lower <= body * .8 and c.close <= c.low + _range(c) * .40:
+    if (rose_before and _range(c) >= min_range and upper >= body * 2.2 and lower <= body * .8
+            and c.close <= c.low + _range(c) * .40):
         add("Падающая звезда / медвежий Pin Bar", "SHORT", 76, 74, "Длинная верхняя тень отвергнута, свеча закрылась в нижней части диапазона.", c.high, prior_move)
 
     # Morning / Evening Star.
-    if _bear(a) and _body(b) <= _body(a) * .55 and _bull(c) and c.close >= (a.open + a.close) / 2:
+    a_mid = (a.open + a.close) / 2
+    # The star body must sit at the extreme of the first candle, not anywhere.
+    if (fell_before and _bear(a) and _body(a) >= min_body and _body(b) <= _body(a) * .55
+            and max(b.open, b.close) <= a_mid and _bull(c) and c.close >= a_mid):
         add("Утренняя звезда", "LONG", 84, 80, "Трёхсвечный разворот подтверждён закрытием выше середины первой медвежьей свечи.", min(a.low, b.low, c.low), -prior_move)
-    if _bull(a) and _body(b) <= _body(a) * .55 and _bear(c) and c.close <= (a.open + a.close) / 2:
+    if (rose_before and _bull(a) and _body(a) >= min_body and _body(b) <= _body(a) * .55
+            and min(b.open, b.close) >= a_mid and _bear(c) and c.close <= a_mid):
         add("Вечерняя звезда", "SHORT", 84, 80, "Трёхсвечный разворот подтверждён закрытием ниже середины первой бычьей свечи.", max(a.high, b.high, c.high), prior_move)
 
     # Three soldiers / crows: successive opens must lie within the preceding
@@ -212,24 +243,24 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
 
     # Piercing Line / Dark Cloud Cover: обязательное проникновение за середину тела.
     bmid = (b.open + b.close) / 2
-    if _bear(b) and _body(b) >= av * .35 and _bull(c) and c.open <= b.close and c.close > bmid and c.close < b.open:
+    if fell_before and _bear(b) and _body(b) >= av * .35 and _bull(c) and c.open <= b.close and c.close > bmid and c.close < b.open:
         add("Просвет в облаках", "LONG", 79, 76, "После медвежьей свечи бычье закрытие вернулось выше середины её тела.", min(b.low, c.low), -prior_move)
-    if _bull(b) and _body(b) >= av * .35 and _bear(c) and c.open >= b.close and c.close < bmid and c.close > b.open:
+    if rose_before and _bull(b) and _body(b) >= av * .35 and _bear(c) and c.open >= b.close and c.close < bmid and c.close > b.open:
         add("Завеса из тёмных облаков", "SHORT", 79, 76, "После бычьей свечи медвежье закрытие ушло ниже середины её тела.", max(b.high, c.high), prior_move)
 
     # Harami: слабее поглощения, поэтому требует выраженного предыдущего тела.
     inside_body = min(c.open, c.close) >= min(b.open, b.close) and max(c.open, c.close) <= max(b.open, b.close)
     if inside_body and _body(b) >= av * .55 and _body(c) <= _body(b) * .55:
-        if _bear(b) and _bull(c):
+        if fell_before and _bear(b) and _bull(c):
             add("Бычий харами", "LONG", 75, 72, "Малое бычье тело сформировалось внутри крупного предыдущего медвежьего тела; требуется внешнее подтверждение.", min(b.low, c.low), -prior_move)
-        elif _bull(b) and _bear(c):
+        elif rose_before and _bull(b) and _bear(c):
             add("Медвежий харами", "SHORT", 75, 72, "Малое медвежье тело сформировалось внутри крупного предыдущего бычьего тела; требуется внешнее подтверждение.", max(b.high, c.high), prior_move)
 
     # Tweezer reversal: близкие экстремумы + противоположное закрытие.
     tol = max(av * .10, _range(c) * .08)
-    if _bear(b) and _bull(c) and abs(c.low - b.low) <= tol and _body(c) >= av * .25:
+    if fell_before and _bear(b) and _bull(c) and abs(c.low - b.low) <= tol and _body(c) >= av * .25:
         add("Пинцет снизу", "LONG", 76, 73, "Два близких минимума и бычье закрытие показывают повторное отвержение нижней цены.", min(b.low, c.low), -prior_move)
-    if _bull(b) and _bear(c) and abs(c.high - b.high) <= tol and _body(c) >= av * .25:
+    if rose_before and _bull(b) and _bear(c) and abs(c.high - b.high) <= tol and _body(c) >= av * .25:
         add("Пинцет сверху", "SHORT", 76, 73, "Два близких максимума и медвежье закрытие показывают повторное отвержение верхней цены.", max(b.high, c.high), prior_move)
 
     # Belt Hold.
@@ -295,17 +326,39 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     highs = [(i, p) for i, p, k in piv if k == "H"]
     lows = [(i, p) for i, p, k in piv if k == "L"]
     tol = av * .35
-    # Double top/bottom require neckline close, not just two extrema.
+    last_i = len(bars) - 1
+    min_depth = av * float(getattr(cfg, "PATTERN_DOUBLE_MIN_DEPTH_ATR", .80))
+    min_sep = int(getattr(cfg, "PATTERN_DOUBLE_MIN_SEPARATION_BARS", 4))
+    max_after = int(getattr(cfg, "PATTERN_DOUBLE_MAX_BARS_AFTER_SECOND", 20))
+    # Double top/bottom: two comparable extrema separated in time, a real
+    # trough/peak between them, and the FIRST close beyond the neckline since
+    # that trough (not merely relative to the previous candle).
     if len(highs) >= 2 and abs(highs[-1][1] - highs[-2][1]) <= tol:
-        between = [p for i, p in lows if highs[-2][0] < i < highs[-1][0]]
-        if between and prev.close >= min(between) and c.close < min(between):
-            symmetry = max(0, 8 - int(abs(highs[-1][1] - highs[-2][1]) / max(tol, 1e-12) * 8))
-            _add(out, "Двойная вершина", "SHORT", tf, 82 + symmetry, 78 + symmetry, "Две сопоставимые вершины сформированы; последняя свеча впервые закрылась ниже линии шеи.", min(between), c)
+        first_top, second_top = highs[-2], highs[-1]
+        between = [(i, p) for i, p in lows if first_top[0] < i < second_top[0]]
+        if (between and second_top[0] - first_top[0] >= min_sep
+                and last_i - second_top[0] <= max_after):
+            neck_i, neck = min(between, key=lambda item: item[1])
+            depth = min(first_top[1], second_top[1]) - neck
+            first_break = all(x.close >= neck for x in bars[neck_i + 1:-1])
+            if depth >= min_depth and first_break and c.close < neck:
+                symmetry = max(0, 8 - int(abs(second_top[1] - first_top[1]) / max(tol, 1e-12) * 8))
+                _add(out, "Двойная вершина", "SHORT", tf, 82 + symmetry, 78 + symmetry,
+                     "Две сопоставимые вершины сформированы; последняя свеча впервые закрылась ниже линии шеи.",
+                     neck, c, f"DT:{bars[first_top[0]].dt}:{bars[second_top[0]].dt}")
     if len(lows) >= 2 and abs(lows[-1][1] - lows[-2][1]) <= tol:
-        between = [p for i, p in highs if lows[-2][0] < i < lows[-1][0]]
-        if between and prev.close <= max(between) and c.close > max(between):
-            symmetry = max(0, 8 - int(abs(lows[-1][1] - lows[-2][1]) / max(tol, 1e-12) * 8))
-            _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry, "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.", max(between), c)
+        first_low, second_low = lows[-2], lows[-1]
+        between = [(i, p) for i, p in highs if first_low[0] < i < second_low[0]]
+        if (between and second_low[0] - first_low[0] >= min_sep
+                and last_i - second_low[0] <= max_after):
+            neck_i, neck = max(between, key=lambda item: item[1])
+            depth = neck - max(first_low[1], second_low[1])
+            first_break = all(x.close <= neck for x in bars[neck_i + 1:-1])
+            if depth >= min_depth and first_break and c.close > neck:
+                symmetry = max(0, 8 - int(abs(second_low[1] - first_low[1]) / max(tol, 1e-12) * 8))
+                _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry,
+                     "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.",
+                     neck, c, f"DB:{bars[first_low[0]].dt}:{bars[second_low[0]].dt}")
     # BOS is continuation of an already established HH/HL or LH/LL structure.
     # An opposite break is a possible MSS/CHoCH and is deliberately NOT emitted
     # here as an automatic reversal signal.  Wick-only probes never qualify:
@@ -314,14 +367,25 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     prior_structure = swing_character(bars[:-1], tf)
     allow_bull_bos = prior_structure is None or bool(prior_structure.get("prior_bullish"))
     allow_bear_bos = prior_structure is None or bool(prior_structure.get("prior_bearish"))
-    if allow_bull_bos and highs and prev.close <= highs[-1][1] and c.close > highs[-1][1] + av * .05 and _bull(c):
-        impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
-        clearance = min(6, int((c.close-highs[-1][1]) / max(av, 1e-12) * 12))
-        _add(out, "BOS вверх", "LONG", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Продолжение подтверждённой HH/HL-структуры: закрытая свеча впервые закрепилась выше структурного максимума.", highs[-1][1], c)
-    if allow_bear_bos and lows and prev.close >= lows[-1][1] and c.close < lows[-1][1] - av * .05 and _bear(c):
-        impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
-        clearance = min(6, int((lows[-1][1]-c.close) / max(av, 1e-12) * 12))
-        _add(out, "BOS вниз", "SHORT", tf, 76 + impulse + clearance, 73 + impulse + clearance, "Продолжение подтверждённой LH/LL-структуры: закрытая свеча впервые закрепилась ниже структурного минимума.", lows[-1][1], c)
+    # "Впервые" means: no close beyond this level since the pivot was formed.
+    if allow_bull_bos and highs:
+        level_i, level = highs[-1]
+        first_break = all(x.close <= level for x in bars[level_i + 1:-1])
+        if first_break and c.close > level + av * .05 and _bull(c):
+            impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
+            clearance = min(6, int((c.close-level) / max(av, 1e-12) * 12))
+            _add(out, "BOS вверх", "LONG", tf, 76 + impulse + clearance, 73 + impulse + clearance,
+                 "Продолжение подтверждённой HH/HL-структуры: закрытая свеча впервые закрепилась выше структурного максимума.",
+                 level, c, f"BOS:{bars[level_i].dt}:{level:.8f}")
+    if allow_bear_bos and lows:
+        level_i, level = lows[-1]
+        first_break = all(x.close >= level for x in bars[level_i + 1:-1])
+        if first_break and c.close < level - av * .05 and _bear(c):
+            impulse = min(10, int(_body(c) / max(av, 1e-12) * 8))
+            clearance = min(6, int((level-c.close) / max(av, 1e-12) * 12))
+            _add(out, "BOS вниз", "SHORT", tf, 76 + impulse + clearance, 73 + impulse + clearance,
+                 "Продолжение подтверждённой LH/LL-структуры: закрытая свеча впервые закрепилась ниже структурного минимума.",
+                 level, c, f"BOS:{bars[level_i].dt}:{level:.8f}")
     # Head & Shoulders: require the actual H-L-H-L-H (or inverse) geometry.
     # The neckline is a line through the two intervening pivots, not min/max of
     # every trough/peak.  Confirmation is ONLY the first closed candle beyond
@@ -330,9 +394,20 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     alt = _alternating_pivots(piv)
     if len(alt) >= 5:
         a, b, head, d, shoulder = alt[-5:]
-        shoulder_tol = av * float(getattr(cfg, "PATTERN_HS_SHOULDER_TOL_ATR", .75))
-        head_min = av * float(getattr(cfg, "PATTERN_HS_HEAD_MIN_ATR", .35))
+        # Defaults equal config.py so a renamed key cannot silently change rules.
+        shoulder_tol = av * float(getattr(cfg, "PATTERN_HS_SHOULDER_TOL_ATR", .40))
+        head_min = av * float(getattr(cfg, "PATTERN_HS_HEAD_MIN_ATR", .60))
         max_time_ratio = float(getattr(cfg, "PATTERN_HS_MAX_TIME_RATIO", 3.0))
+        max_after_shoulder = int(getattr(cfg, "PATTERN_HS_MAX_BARS_AFTER_SHOULDER", 20))
+        recent = (len(bars) - 1 - shoulder[0]) <= max_after_shoulder
+
+        def neckline_first_break(sign: int) -> bool:
+            """No close beyond the sloping neckline since the right shoulder."""
+            for j in range(shoulder[0] + 1, len(bars) - 1):
+                at = _line([(b[0], b[1]), (d[0], d[1])], j)
+                if at and (bars[j].close - at[0]) * sign > 0:
+                    return False
+            return True
         left_span = max(1, head[0] - a[0])
         right_span = max(1, shoulder[0] - head[0])
         time_ratio = max(left_span, right_span) / min(left_span, right_span)
@@ -342,24 +417,26 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
             head_ok = head[1] >= max(a[1], shoulder[1]) + head_min
             neck_prev = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-2)
             neck_now = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-1)
-            if shoulders_ok and head_ok and time_ratio <= max_time_ratio and neck_prev and neck_now:
-                first_break = prev.close >= neck_prev[0] and c.close < neck_now[0] and _bear(c)
+            if shoulders_ok and head_ok and recent and time_ratio <= max_time_ratio and neck_prev and neck_now:
+                first_break = neckline_first_break(-1) and c.close < neck_now[0] and _bear(c)
                 if first_break:
                     symmetry = max(0, 5-int(abs(a[1]-shoulder[1]) / max(shoulder_tol, 1e-12)*5))
                     _add(out, "Голова и плечи", "SHORT", tf, 88+symmetry, 83+symmetry,
-                         "Левое плечо, голова и правое плечо подтверждены; первая закрытая свеча пробила расчётную линию шеи вниз.", neck_now[0], c)
+                         "Левое плечо, голова и правое плечо подтверждены; первая закрытая свеча пробила расчётную линию шеи вниз.",
+                         neck_now[0], c, f"HS:{bars[head[0]].dt}:{bars[shoulder[0]].dt}")
 
         if (a[2], b[2], head[2], d[2], shoulder[2]) == ("L", "H", "L", "H", "L"):
             shoulders_ok = abs(a[1] - shoulder[1]) <= shoulder_tol
             head_ok = head[1] <= min(a[1], shoulder[1]) - head_min
             neck_prev = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-2)
             neck_now = _line([(b[0], b[1]), (d[0], d[1])], len(bars)-1)
-            if shoulders_ok and head_ok and time_ratio <= max_time_ratio and neck_prev and neck_now:
-                first_break = prev.close <= neck_prev[0] and c.close > neck_now[0] and _bull(c)
+            if shoulders_ok and head_ok and recent and time_ratio <= max_time_ratio and neck_prev and neck_now:
+                first_break = neckline_first_break(1) and c.close > neck_now[0] and _bull(c)
                 if first_break:
                     symmetry = max(0, 5-int(abs(a[1]-shoulder[1]) / max(shoulder_tol, 1e-12)*5))
                     _add(out, "Перевёрнутая голова и плечи", "LONG", tf, 88+symmetry, 83+symmetry,
-                         "Левое плечо, голова и правое плечо подтверждены; первая закрытая свеча пробила расчётную линию шеи вверх.", neck_now[0], c)
+                         "Левое плечо, голова и правое плечо подтверждены; первая закрытая свеча пробила расчётную линию шеи вверх.",
+                         neck_now[0], c, f"IHS:{bars[head[0]].dt}:{bars[shoulder[0]].dt}")
     return out
 
 
@@ -418,13 +495,19 @@ def _flag_pennant_patterns(tf: str, bars: list[Candle], av: float) -> list[Patte
     drift = consolidation[-1].close - consolidation[0].close
     tolerance = av * float(getattr(cfg, "PATTERN_CHART_BREAK_BUFFER_ATR", .05))
     min_body = av * float(getattr(cfg, "PATTERN_CHART_BREAK_MIN_BODY_ATR", .35))
+    # Graded, not a fixed 86/82: stronger pole, tighter consolidation and a
+    # decisive breakout body earn more (max +8, identical to the old ceiling).
+    tightness = 1.0 - min(1.0, width / max(abs(pole) * .75, 1e-12))
+    grade = int(round(min(1.0, (abs(impulse) - 1.8) / 2.2) * 3
+                      + tightness * 3
+                      + min(1.0, _body(last) / max(av, 1e-12)) * 2))
     # Price must remain near the end of the pole; don't call a deep reversal a flag.
     if (impulse >= 1.8 and drift <= av * .15
             and cons_low >= pole_end.close - abs(pole) * .65
             and last.close > cons_high + tolerance
             and _bull(last) and _body(last) >= min_body):
         name = "Бычий вымпел" if pennant else "Бычий флаг"
-        _add(out, name, "LONG", tf, 86, 82,
+        _add(out, name, "LONG", tf, 80 + grade, 76 + grade,
              "После направленного импульса короткая консолидация завершилась первым закрытым пробоем вверх.",
              cons_high, last)
     if (impulse <= -1.8 and drift >= -av * .15
@@ -432,7 +515,7 @@ def _flag_pennant_patterns(tf: str, bars: list[Candle], av: float) -> list[Patte
             and last.close < cons_low - tolerance
             and _bear(last) and _body(last) >= min_body):
         name = "Медвежий вымпел" if pennant else "Медвежий флаг"
-        _add(out, name, "SHORT", tf, 86, 82,
+        _add(out, name, "SHORT", tf, 80 + grade, 76 + grade,
              "После направленного импульса короткая консолидация завершилась первым закрытым пробоем вниз.",
              cons_low, last)
     return out
@@ -478,12 +561,22 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     min_break_body = av * float(getattr(cfg, "PATTERN_CHART_BREAK_MIN_BODY_ATR", .35))
     body = _body(last)
     # Compare each close to the *line at that bar*, not both to today's line.
-    # Otherwise a sloping wedge may falsely break or miss the first breakout.
-    previous_top = top - top_slope
-    previous_bottom = bottom - bottom_slope
-    breaks_up = (previous.close <= previous_top + tolerance and last.close > top + tolerance
+    # "First breakout" = every close since the earliest boundary touch stayed
+    # inside the figure (with tolerance); a re-break after an earlier close
+    # outside is NOT a new pattern.
+    used_points = highs[-5:] + lows[-5:]
+    start_x = min(i for i, _ in used_points)
+    # A fitted boundary may sit up to its MAE inside a real touch; allow that
+    # residual so ordinary touches are not mistaken for earlier breakouts.
+    inside_top, inside_bottom = tolerance + top_mae, tolerance + bottom_mae
+    inside_until_now = all(
+        bottom - bottom_slope * (len(history) - j) - inside_bottom
+        <= history[j].close <=
+        top - top_slope * (len(history) - j) + inside_top
+        for j in range(start_x, len(history)))
+    breaks_up = (inside_until_now and last.close > top + tolerance
                  and _bull(last) and body >= min_break_body)
-    breaks_down = (previous.close >= previous_bottom - tolerance and last.close < bottom - tolerance
+    breaks_down = (inside_until_now and last.close < bottom - tolerance
                    and _bear(last) and body >= min_break_body)
     old_x = max(0, len(history)-18)
     old_top = top-top_slope*(len(history)-old_x)
@@ -492,44 +585,53 @@ def chart_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     width = top-bottom
     converging = old_width > 0 and width < old_width * float(getattr(cfg, "PATTERN_CONVERGENCE_MAX_RATIO", .82))
     fit_bonus = int(round(((top_r2 + bottom_r2) / 2.0) * 4))
+    geometry_id = f"CHART:{history[start_x].dt}"
 
-    # Нейтральные фигуры получают направление только от фактического пробоя.
-    if abs(top_n) <= .035 and bottom_n >= .018 and converging:
+    # ONE mutually exclusive classification per boundary pair. Each boundary is
+    # flat / rising / falling by a single threshold, so the same breakout can
+    # never be an ascending AND descending AND symmetric triangle AND a rectangle.
+    flat = float(getattr(cfg, "PATTERN_BOUNDARY_FLAT_ATR", .015))
+
+    def _kind(slope_n: float) -> str:
+        return "flat" if abs(slope_n) <= flat else ("up" if slope_n > 0 else "down")
+
+    shape = (_kind(top_n), _kind(bottom_n))
+    choice = None
+    if shape == ("flat", "flat"):
         if breaks_up:
-            _add(out, "Восходящий треугольник — пробой вверх", "LONG", tf, 86+fit_bonus, 82+fit_bonus,
-                 "Горизонтальное сопротивление и растущие минимумы завершены; закрытая свеча пробила верхнюю границу.", top, last)
+            choice = ("Бычий прямоугольник", "LONG", 84, 80,
+                      "Боковой диапазон завершён закрытым пробоем верхней границы.", top)
         elif breaks_down:
-            _add(out, "Восходящий треугольник — пробой вниз", "SHORT", tf, 80+fit_bonus, 76+fit_bonus,
-                 "Цена нарушила растущую нижнюю границу закрытой свечой; бычий сценарий фигуры отменён.", bottom, last)
-    if top_n <= -.018 and abs(bottom_n) <= .035 and converging:
+            choice = ("Медвежий прямоугольник", "SHORT", 84, 80,
+                      "Боковой диапазон завершён закрытым пробоем нижней границы.", bottom)
+    elif converging and shape == ("flat", "up"):
+        if breaks_up:
+            choice = ("Восходящий треугольник — пробой вверх", "LONG", 86, 82,
+                      "Горизонтальное сопротивление и растущие минимумы завершены; закрытая свеча пробила верхнюю границу.", top)
+        elif breaks_down:
+            choice = ("Восходящий треугольник — пробой вниз", "SHORT", 80, 76,
+                      "Цена нарушила растущую нижнюю границу закрытой свечой; бычий сценарий фигуры отменён.", bottom)
+    elif converging and shape == ("down", "flat"):
         if breaks_down:
-            _add(out, "Нисходящий треугольник — пробой вниз", "SHORT", tf, 86+fit_bonus, 82+fit_bonus,
-                 "Снижающиеся максимумы и горизонтальная поддержка завершены; закрытая свеча пробила нижнюю границу.", bottom, last)
+            choice = ("Нисходящий треугольник — пробой вниз", "SHORT", 86, 82,
+                      "Снижающиеся максимумы и горизонтальная поддержка завершены; закрытая свеча пробила нижнюю границу.", bottom)
         elif breaks_up:
-            _add(out, "Нисходящий треугольник — пробой вверх", "LONG", tf, 80+fit_bonus, 76+fit_bonus,
-                 "Цена нарушила снижающуюся верхнюю границу закрытой свечой; медвежий сценарий фигуры отменён.", top, last)
-    if top_n <= -.015 and bottom_n >= .015 and converging:
-        side, level = ("LONG", top) if breaks_up else (("SHORT", bottom) if breaks_down else ("", 0))
-        if side:
-            _add(out, "Симметричный треугольник", side, tf, 84+fit_bonus, 80+fit_bonus,
-                 f"Сходящиеся границы завершены; закрытая свеча подтвердила пробой {'вверх' if side == 'LONG' else 'вниз'}.", level, last)
-
-    # Клин: обе границы наклонены в одну сторону, но диапазон сужается.
-    if converging and top_n < -.015 and bottom_n < -.015 and breaks_up:
-        _add(out, "Падающий клин", "LONG", tf, 87+fit_bonus, 83+fit_bonus,
-             "Обе границы снижались и сходились; закрытая свеча пробила верхнюю границу клина.", top, last)
-    if converging and top_n > .015 and bottom_n > .015 and breaks_down:
-        _add(out, "Восходящий клин", "SHORT", tf, 87+fit_bonus, 83+fit_bonus,
-             "Обе границы росли и сходились; закрытая свеча пробила нижнюю границу клина.", bottom, last)
-
-    # Прямоугольник: почти горизонтальные границы и не менее двух касаний.
-    if abs(top_n) <= .035 and abs(bottom_n) <= .035:
-        if breaks_up:
-            _add(out, "Бычий прямоугольник", "LONG", tf, 84+fit_bonus, 80+fit_bonus,
-                 "Боковой диапазон завершён закрытым пробоем верхней границы.", top, last)
-        elif breaks_down:
-            _add(out, "Медвежий прямоугольник", "SHORT", tf, 84+fit_bonus, 80+fit_bonus,
-                 "Боковой диапазон завершён закрытым пробоем нижней границы.", bottom, last)
+            choice = ("Нисходящий треугольник — пробой вверх", "LONG", 80, 76,
+                      "Цена нарушила снижающуюся верхнюю границу закрытой свечой; медвежий сценарий фигуры отменён.", top)
+    elif converging and shape == ("down", "up"):
+        if breaks_up or breaks_down:
+            side, level = ("LONG", top) if breaks_up else ("SHORT", bottom)
+            choice = ("Симметричный треугольник", side, 84, 80,
+                      f"Сходящиеся границы завершены; закрытая свеча подтвердила пробой {'вверх' if side == 'LONG' else 'вниз'}.", level)
+    elif converging and shape == ("down", "down") and breaks_up:
+        choice = ("Падающий клин", "LONG", 87, 83,
+                  "Обе границы снижались и сходились; закрытая свеча пробила верхнюю границу клина.", top)
+    elif converging and shape == ("up", "up") and breaks_down:
+        choice = ("Восходящий клин", "SHORT", 87, 83,
+                  "Обе границы росли и сходились; закрытая свеча пробила нижнюю границу клина.", bottom)
+    if choice:
+        name, side, q, conf, fact, level = choice
+        _add(out, name, side, tf, q + fit_bonus, conf + fit_bonus, fact, level, last, geometry_id)
 
     return out
 
@@ -550,10 +652,8 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
     # Preserve the historical per-TF limit by default; unlike a magic n+6,
     # its meaning is now explicit. Enlarging this window is a *trading-policy*
     # change and requires historical evaluation before enabling.
-    maximum_age = int(getattr(cfg, "PATTERN_123_MAX_BARS_AFTER_P3", {}).get(tf, n + 5))
-    if len(bars) - 1 - p3[0] > max(0, maximum_age):
-        return {"state": "EXPIRED", "reason": "setup_window_elapsed",
-                "p3_age_bars": len(bars) - 1 - p3[0]}
+    maximum_age = max(0, int(getattr(cfg, "PATTERN_123_MAX_BARS_AFTER_P3", {}).get(tf, n + 5)))
+    p3_age = len(bars) - 1 - p3[0]
 
     av = atr(bars, int(getattr(cfg, "PATTERN_123_ATR_LENGTH", 14))) or _range(bars[-1])
     leg = abs(p2[1] - p1[1])
@@ -582,6 +682,9 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
     pocket = av * float(getattr(cfg, "PATTERN_123_RETEST_POCKET_ATR", .20))
     after = bars[p3[0] + 1:]
     first_break_i = None
+    # The age window is checked only for a VALID geometry, and only for the
+    # wait until the first P2 break: an already-confirmed structure keeps its
+    # retest lifecycle instead of turning into EXPIRED noise.
     for i, c in enumerate(after, start=p3[0] + 1):
         if side == "LONG" and c.close < p1[1] - invalid_buffer:
             return {"state": "INVALIDATED", "reason": "p1_broken", "side": side, "trigger": trigger}
@@ -596,7 +699,20 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
             "leg_atr": leg / av if av else 0.0, "retrace": ratio, "atr": av,
             "retest_low": trigger - pocket, "retest_high": trigger + pocket}
     if first_break_i is None:
+        if p3_age > maximum_age:
+            return {"state": "EXPIRED", "reason": "setup_window_elapsed",
+                    "p3_age_bars": p3_age, **base}
         return {"state": "STRUCTURE_ARMED", **base}
+    if first_break_i - p3[0] > maximum_age:
+        # A P2 break that came after the allowed window is not a 1-2-3 signal.
+        return {"state": "EXPIRED", "reason": "break_after_setup_window",
+                "p3_age_bars": first_break_i - p3[0], **base}
+    # After the breakout, a close beyond the protective P1 still cancels it.
+    for c in bars[first_break_i + 1:]:
+        if (side == "LONG" and c.close < p1[1] - invalid_buffer) or \
+                (side == "SHORT" and c.close > p1[1] + invalid_buffer):
+            return {"state": "INVALIDATED", "reason": "p1_broken_after_break",
+                    "confirmation_index": first_break_i, **base}
     if first_break_i == len(bars) - 1:
         # A first close beyond P2 with an opposing candle body is real price
         # movement, but our trade policy requires a directional body. Record
@@ -653,6 +769,18 @@ def _ratio_quality(value: float, limits: tuple[float, float], tol: float) -> flo
     return max(0.0, 1.0-abs(value-mid)/half)
 
 
+def _no_violation_after(bars: list[Candle], d: tuple[int, float, str]) -> bool:
+    """D must remain the extreme: no later bar may trade beyond it.
+
+    Otherwise a still-unconfirmed lower low (or higher high) in the last few
+    bars would leave an already-failed D looking like a valid completion.
+    """
+    later = bars[d[0] + 1:]
+    if d[2] == "L":
+        return all(x.low >= d[1] for x in later)
+    return all(x.high <= d[1] for x in later)
+
+
 def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     """Геометрия XABCD для заявленных в настройках гармонических фигур."""
     out: list[Pattern] = []
@@ -667,19 +795,21 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
                       abs(c[1]-b[1]), abs(d[1]-c[1]))
     if min(xa, ab, bc, cd) <= 0:
         return out
+    if not _no_violation_after(bars, d):
+        return out  # price already traded beyond D: the completion failed
     xc = abs(c[1] - x[1]) / xa
     # Legacy ratio aliases: bd and cd both denote CD/BC, but separate
     # configured harmonic families consume different names. Not independent
     # measurements and never counted twice as confirmation evidence.
     bc_extension = cd / bc
     ratios = {"xb": ab/xa, "ac": bc/ab, "bd": bc_extension,
-              # XD is measured from X to D relative to XA.  The previous A→D
-              # numerator was dimensionally plausible but geometrically wrong.
-              "xd": abs(d[1]-x[1])/xa, "cd": bc_extension,
+              # XD for EVERY family in config.HARMONIC_RATIOS is the classic
+              # retracement/extension of XA measured FROM A: |A−D| / XA.
+              # Gartley 0.786, Bat 0.886, Alt Bat 1.13, Butterfly 1.27,
+              # Crab/Deep Crab 1.618, Shark 0.886–1.13 (its C on 0X).
+              "xd": abs(d[1]-a[1])/xa, "cd": bc_extension,
               # Сайфер: C относительно XA, D относительно XC.
-              "xc": xc, "dxc": cd / max(abs(c[1]-x[1]), 1e-12),
-              # Акула: расширение AB относительно XA в разметке 0-X-A-B-C.
-              "bc_xa": bc / xa}
+              "xc": xc, "dxc": cd / max(abs(c[1]-x[1]), 1e-12)}
     last = bars[-1]
     side = "LONG" if d[2] == "L" else "SHORT"
     if not (_bull(last) if side == "LONG" else _bear(last)):
@@ -692,12 +822,7 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     tol = float(getattr(cfg, "FIB_TOL", .06))
     for key, label in labels.items():
         rules = getattr(cfg, "HARMONIC_RATIOS", {}).get(key) or {}
-        # For retracement patterns Gartley/Bat, the target ~0.786/~0.886
-        # means A→D relative to XA. Extension patterns (butterfly/crab etc.)
-        # retain X→D, which is the convention already encoded in their rules.
-        local_ratios = dict(ratios)
-        if key in ("gartley", "bat"):
-            local_ratios["xd"] = abs(d[1] - a[1]) / xa
+        local_ratios = ratios
         if rules and all(name in local_ratios and _inside(local_ratios[name], limits, tol)
                          for name, limits in rules.items()):
             details = ", ".join(f"{name.upper()}={local_ratios[name]:.2f}" for name in rules)
@@ -728,6 +853,8 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
         return out
     ab, bc, cd = abs(b[1]-a[1]), abs(c[1]-b[1]), abs(d[1]-c[1])
     if min(ab, bc, cd) <= 0 or b[2] == c[2] or c[2] == d[2]:
+        return out
+    if not _no_violation_after(bars, d):
         return out
     ratio_bc, ratio_cd = bc/ab, cd/ab
     bc_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("bc", (.382, .886))
@@ -941,6 +1068,13 @@ def _pending_ttl_seconds() -> int:
 
 
 def _pending_event_closed_at(item: dict) -> datetime | None:
+    raw = item.get("event_closed_at")
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            return None
     key = str(item.get("key") or "")
     fields = key.split("|", 3)
     tf = fields[1] if len(fields) > 1 else ""
@@ -1040,7 +1174,8 @@ def _residual_potential(pattern: Pattern, by_tf: dict) -> dict:
     }
 
 
-def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", by_tf: dict | None = None) -> str:
+def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", by_tf: dict | None = None,
+         extra_lines: list[str] | None = None) -> str:
     price = f"{p.level:.3f}" if "JPY" in symbol else f"{p.level:.5f}"
     side_icon = "🟢" if p.side == "LONG" else "🔴"
     if p.name in CANDLE_PATTERN_NAMES and context_side and p.side != context_side:
@@ -1058,6 +1193,8 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
     confirmation_close = _trigger_close(p, by_tf or {})
     close_price = (f"{confirmation_close:.3f}" if "JPY" in symbol else f"{confirmation_close:.5f}") if confirmation_close else ""
     return "\n".join([
+        # The header is a routing marker for bot.py / signal_contract.py:
+        # keep it identical for every pattern kind.
         "━━━━━━━━━━━━━━━━━━", "🧩 ПАТТЕРН ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {symbol}", f"Паттерн: {p.name}", f"Таймфрейм: {p.tf} ({TF_LABEL[p.tf]})",
         f"Направление: {p.side} {side_icon}", f"Сходство фигуры: {p.quality}/100", f"Уверенность чертежа: {p.confidence}/100",
@@ -1065,7 +1202,8 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
         *([f"Цена закрытия: {close_price}"] if close_price else []),
         f"Ключевой уровень: {price}",
         *( [f"Новости: {news_note}"] if news_note else [] ),
-        "", f"Факт: {p.fact}", f"Что означает: {meaning}."
+        "", f"Факт: {p.fact}", f"Что означает: {meaning}.",
+        *(extra_lines or []),
     ])
 
 
@@ -1144,7 +1282,10 @@ def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.Bytes
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 23)
         small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
     except OSError:
-        font, small = ImageFont.load_default(size=23), ImageFont.load_default(size=17)
+        try:
+            font, small = ImageFont.load_default(size=23), ImageFont.load_default(size=17)
+        except TypeError:  # Pillow < 10.1 has no size= argument
+            font = small = ImageFont.load_default()
     left, right, top, bottom = 72, 1135, 92, 610
     values = [value for bar in bars for value in (bar.low, bar.high)] + [pattern.level]
     pmin, pmax = (min(values), max(values)) if values else (pattern.level * .99, pattern.level * 1.01)
@@ -1287,45 +1428,10 @@ def mark_card_delivered(text: str) -> None:
         log.exception("Не удалось удалить доставленную картинку паттерна")
 
 
-def _confirmation_tf(tf: str) -> str:
-    """Закрытый младший ТФ, который подтверждает сформированный паттерн."""
-    return "M5" if tf == "M15" else "M15"
-
-
 def _trigger_close(pattern: Pattern, by_tf: dict) -> float:
     bars = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
     bar = next((item for item in reversed(bars) if item.dt == pattern.dt), None)
     return float(bar.close) if bar else 0.0
-
-
-def _confirmation_bar(pattern: Pattern, by_tf: dict) -> Candle | None:
-    tf = _confirmation_tf(pattern.tf)
-    bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
-    try:
-        formed_at = datetime.fromisoformat(str(pattern.dt).replace("Z", "+00:00"))
-        closed_at = formed_at + timedelta(minutes=TF_MINUTES[pattern.tf])
-        return next((bar for bar in bars
-                     if datetime.fromisoformat(str(bar.dt).replace("Z", "+00:00")) >= closed_at), None)
-    except (TypeError, ValueError):
-        # Совместимость со старыми/нестандартными метками времени.
-        return next((bar for bar in bars if str(bar.dt) > str(pattern.dt)), None)
-
-
-def _confirmed_by_next_close(pattern: Pattern, trigger_close: float, bar: Candle) -> bool:
-    """Одна более поздняя закрытая свеча должна удержать идею паттерна."""
-    direction_ok = _bull(bar) if pattern.side == "LONG" else _bear(bar)
-    invalidated = (bar.close <= pattern.level if pattern.side == "LONG"
-                   else bar.close >= pattern.level)
-    if invalidated or not direction_ok:
-        return False
-    # Для пробойных фигур удерживаем именно пробитую границу. Для свечных и
-    # гармонических моделей уровень является защитной точкой, поэтому кроме
-    # её сохранения требуем продолжение относительно закрытия сигнальной свечи.
-    if pattern.name not in CANDLE_PATTERN_NAMES and not pattern.name.startswith("Гармонический"):
-        return bar.close > pattern.level if pattern.side == "LONG" else bar.close < pattern.level
-    if not trigger_close:
-        return True
-    return bar.close >= trigger_close if pattern.side == "LONG" else bar.close <= trigger_close
 
 
 def _pattern_news_context(symbol: str, now_utc: datetime | None = None, events=None) -> tuple[str, int]:
@@ -1355,6 +1461,74 @@ def _pattern_news_context(symbol: str, now_utc: datetime | None = None, events=N
     if event.impact == "HIGH":
         return f"ВЫСОКИЙ РИСК · {event.currency} · {title} · {when}; возможен ложный пробой/резкий пересмотр", 6
     return f"средний риск · {event.currency} · {title} · {when}", 3
+
+
+def _bar_close_epoch(bar: Candle, tf: str) -> float | None:
+    try:
+        opened = datetime.fromisoformat(str(bar.dt).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    opened = opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None else opened.astimezone(timezone.utc)
+    return (opened + timedelta(minutes=TF_MINUTES[tf])).timestamp()
+
+
+def _request_started(market, symbol: str, tf: str) -> float | None:
+    times = getattr(market, "request_started_by_series", None)
+    if not isinstance(times, dict):
+        return None
+    try:
+        value = float(times.get((symbol, tf)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def final_by_tf(market, symbol: str, by_tf: dict | None = None) -> dict:
+    """Drop bars whose close is AFTER the provider request started.
+
+    The in-process cache (H4 5 min, D1 15, W1 30) can outlive a candle's
+    closing boundary. A bar downloaded one minute before its close would
+    otherwise be treated as closed with provisional High/Low/Close. Plain
+    dicts without request times (tests, older callers) are unchanged.
+    """
+    if by_tf is None:
+        by_tf = (market or {}).get(symbol) or {}
+    out = dict(by_tf)
+    for tf, bars in by_tf.items():
+        started = _request_started(market, symbol, tf) if tf in TF_MINUTES else None
+        if started is None or not bars:
+            continue
+        kept = list(bars)
+        while kept:
+            closes = _bar_close_epoch(kept[-1], tf)
+            if closes is None or closes <= started:
+                break
+            kept.pop()  # still forming at request time: provisional OHLC
+        out[tf] = kept
+    return out
+
+
+def _event_available_at(market, symbol: str, p: Pattern, by_tf: dict) -> datetime | None:
+    """Moment the event became observable on FINAL data.
+
+    Harmonics are confirmed by a closed H1 break, so their freshness is the
+    close of that H1 bar (an H4/D1/W1 harmonic is not burned merely because
+    the H1 confirmation came an hour after the higher-TF close). A post-close
+    provider fetch moves availability to the fetch time.
+    """
+    close_at = _pattern_close_dt(p)
+    tf = p.tf
+    if p.name.startswith("Гармонический"):
+        h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+        h1_close = _bar_close_epoch(h1[-1], "H1") if h1 else None
+        if h1_close is not None:
+            candidate = datetime.fromtimestamp(h1_close, timezone.utc)
+            close_at = candidate if close_at is None else max(close_at, candidate)
+            tf = "H1"
+    started = _request_started(market, symbol, tf)
+    if close_at is not None and started is not None and started >= close_at.timestamp():
+        close_at = max(close_at, datetime.fromtimestamp(started, timezone.utc))
+    return close_at
 
 
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
@@ -1406,7 +1580,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
         pattern_events = []
     for symbol in cfg.PAIRS:
         try:
-            by_tf = market.get(symbol) or {}
+            by_tf = final_by_tf(market, symbol)
             context_side, candidates, lifecycle, cache_hit = _cached_analysis(symbol, by_tf)
             if cache_hit:
                 cache_hits += 1
@@ -1431,9 +1605,20 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 fact = p.fact
                 if p.name in CANDLE_PATTERN_NAMES:
                     fact += " " + candle_context.describe(candle_ctx) + "."
-                adjusted.append(Pattern(p.name, p.side, p.tf, max(1,min(96,p.quality+d)),
-                                        max(1,min(94,p.confidence+d)), fact, p.level, p.dt, p.geometry_id))
+                final = Pattern(p.name, p.side, p.tf, max(1,min(96,p.quality+d)),
+                                max(1,min(94,p.confidence+d)), fact, p.level, p.dt, p.geometry_id)
+                if not _passes_thresholds(final):
+                    log.info("PATTERN_BELOW_MIN_AFTER_CONTEXT pair=%s tf=%s pattern=%s q=%d conf=%d",
+                             symbol, p.tf, p.name, final.quality, final.confidence)
+                    continue
+                adjusted.append(final)
             candidates = sorted(adjusted, key=lambda p: (p.quality, p.confidence), reverse=True)
+            available_at = {_pattern_key(symbol, p): _event_available_at(market, symbol, p, by_tf)
+                            for p in candidates}
+
+            def _fresh(item: Pattern) -> bool:
+                at = available_at.get(_pattern_key(symbol, item))
+                return at is not None and 0 <= (now_utc - at).total_seconds() <= _pending_ttl_seconds()
 
             # Внутренний журнал наблюдения: бот знает, какую свежую геометрию видел,
             # но пользователь получает только полностью подтверждённую фигуру.
@@ -1458,9 +1643,20 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 group_key = _delivery_group_key(symbol, p)
                 if key in sent or (group_key and group_key in sent):
                     continue
+                if key in pending_keys:
+                    # PENDING survives between scan cycles / Railway restarts, while the
+                    # in-memory chart cache does not. Rebuild the exact chart card from
+                    # current immutable closed candles so a delayed/retried Telegram
+                    # delivery still carries its image. Checked BEFORE the group test:
+                    # otherwise grouped patterns (BOS, 1-2-3, harmonics) never rebuild.
+                    pending_item = next((item for item in pending.values()
+                                         if isinstance(item, dict) and item.get("key") == key), None)
+                    if pending_item and pending_item.get("text"):
+                        _PENDING_CARDS[pending_item["text"]] = (symbol, p, freeze_by_tf(by_tf))
+                    continue
                 if group_key and group_key in pending_groups:
                     continue
-                close_at = _pattern_close_dt(p)
+                close_at = available_at.get(key)
                 if (close_at is None or close_at > now_utc or
                         (now_utc - close_at).total_seconds() > _pending_ttl_seconds()):
                     # The unified H1 gate would reject the stale event anyway;
@@ -1471,16 +1667,6 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     expired_ledger[key] = {"reason": "event_too_old_for_new_alert", "dt": p.dt,
                                            "at": now_utc.isoformat()}
                     old_events_skipped += 1
-                    continue
-                if key in pending_keys:
-                    # PENDING survives between scan cycles / Railway restarts, while the
-                    # in-memory chart cache does not. Rebuild the exact chart card from
-                    # current immutable closed candles so a delayed/retried Telegram
-                    # delivery still carries its image.
-                    pending_item = next((item for item in pending.values()
-                                         if isinstance(item, dict) and item.get("key") == key), None)
-                    if pending_item and pending_item.get("text"):
-                        _PENDING_CARDS[pending_item["text"]] = (symbol, p, freeze_by_tf(by_tf))
                     continue
                 residual = _residual_potential(p, by_tf)
                 if not residual.get("eligible", True):
@@ -1498,11 +1684,30 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 if penalty:
                     p = Pattern(p.name, p.side, p.tf, p.quality, max(1, p.confidence-penalty),
                                 p.fact, p.level, p.dt, p.geometry_id)
-                text = _fmt(symbol, p, context_side, news_note, by_tf)
+                    if not _passes_thresholds(p):
+                        # Not consumed: if the news window passes while the
+                        # event is still fresh, it may still be published.
+                        log.info("PATTERN_BELOW_MIN_AFTER_NEWS pair=%s tf=%s pattern=%s conf=%d",
+                                 symbol, p.tf, p.name, p.confidence)
+                        continue
+                extra = []
+                same_event = [q.name for q in candidates
+                              if q.name != p.name and group_key and _delivery_group_key(symbol, q) == group_key]
+                if same_event:
+                    extra.append("На этой же свече также: " + ", ".join(dict.fromkeys(same_event)))
+                opposite = [q for q in candidates if q.side != p.side and _fresh(q)]
+                if opposite:
+                    extra.append("⚠️ Конфликт направлений по паре: " + "; ".join(
+                        f"{q.tf} {q.name} {q.side}" for q in opposite[:3]))
+                if p.name.startswith("Гармонический") and close_at is not None:
+                    extra.append("Подтверждение: закрытая H1 до " + close_at.astimezone(
+                        __import__("zoneinfo").ZoneInfo("Europe/Amsterdam")).strftime("%H:%M"))
+                text = _fmt(symbol, p, context_side, news_note, by_tf, extra)
                 digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                 if digest not in pending:
                     pending[digest] = {"key": key, "dt": p.dt, "text": text,
                                        "group_key": group_key,
+                                       "event_closed_at": close_at.isoformat(),
                                        "created_at": now_utc.isoformat()}
                     pending_keys.add(key)
                     if group_key:
@@ -1530,6 +1735,25 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     return messages
 
 
+def card_pattern_name(text: str) -> str:
+    """Exact pattern name from a card's "Паттерн:" line (not free text)."""
+    for line in (text or "").splitlines():
+        if line.startswith("Паттерн: "):
+            return line[len("Паттерн: "):].strip()
+    return ""
+
+
+def card_is_structural(text: str) -> bool:
+    """Structure/chart/harmonic cards outrank single Japanese candles.
+
+    Classification uses the exact card name, never substrings of the fact or
+    news text (the old list missed «Голова и плечи», «Двойное дно» and every
+    XABCD harmonic, and could be fooled by words like «флаг» in the text).
+    """
+    name = card_pattern_name(text)
+    return bool(name) and name not in CANDLE_PATTERN_NAMES
+
+
 def briefing_htf_card(symbol: str, by_tf: dict):
     """Read-only: лучшая подтверждённая HTF-фигура для сессионного брифинга.
 
@@ -1539,8 +1763,12 @@ def briefing_htf_card(symbol: str, by_tf: dict):
     if not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
         return None
     priority = {"W1": 0, "D1": 1, "H4": 2, "H1": 3}
-    _, candidates, _, _ = _cached_analysis(symbol, by_tf)
-    found = [p for p in candidates if p.tf in priority]
+    context_side, candidates, _, _ = _cached_analysis(symbol, by_tf)
+    # Same visibility rules as the live scanner: no counter-context candle
+    # reactions, and no harmonic without its separate H1/strength confirmation.
+    found = [p for p in candidates if p.tf in priority
+             and _pattern_allowed(p, context_side)
+             and not p.name.startswith("Гармонический")]
     if not found:
         return None
     found.sort(key=lambda p: (priority[p.tf], -p.quality, -p.confidence))

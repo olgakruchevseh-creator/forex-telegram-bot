@@ -22,7 +22,9 @@ def bars(n=35):
 
 def test_classic_abcd_rejects_d_inside_b_long_and_accepts_valid_extension():
     candles = bars(30)
-    candles[-1] = Candle(candles[-1].dt, 1.2, 1.4, 1.1, 1.3)
+    for j in range(23, 29):  # after D (index 22) price stays above D
+        candles[j] = Candle(candles[j].dt, 61.5, 62.0, 61.0, 61.5)
+    candles[-1] = Candle(candles[-1].dt, 61.2, 62.4, 61.1, 62.3)
     prefix = [(5, 100., 'H'), (10, 60., 'L'), (15, 96.8, 'H')]
     with patch.object(patterns, '_pivots', return_value=prefix + [(22, 60.8, 'L')]):
         assert patterns.harmonic_abcd('H1', candles) == []

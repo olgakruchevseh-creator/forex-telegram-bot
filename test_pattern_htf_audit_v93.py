@@ -24,12 +24,15 @@ class PatternHTFAuditV93(unittest.TestCase):
 
     def test_hs_uses_sloping_neckline_and_first_close(self):
         data = bars()
-        piv = [(8,1.200,"H"),(14,1.150,"L"),(22,1.260,"H"),(30,1.140,"L"),(38,1.202,"H")]
+        piv = [(20,1.200,"H"),(26,1.150,"L"),(34,1.260,"H"),(42,1.140,"L"),(50,1.202,"H")]
         # neckline slopes down; at current index it is below 1.14
-        # first bar stays above projected neckline, current bar closes below it.
+        # Every close after the right shoulder stays above the projected
+        # neckline; only the current bar closes below it (first break).
+        for j in range(51, len(data) - 2):
+            data[j] = Candle(data[j].dt, 1.17, 1.18, 1.16, 1.17)
         with patch.object(patterns, "_pivots", return_value=piv), patch.object(patterns, "atr", return_value=.05):
-            neck_prev = patterns._line([(14,1.150),(30,1.140)], len(data)-2)[0]
-            neck_now = patterns._line([(14,1.150),(30,1.140)], len(data)-1)[0]
+            neck_prev = patterns._line([(26,1.150),(42,1.140)], len(data)-2)[0]
+            neck_now = patterns._line([(26,1.150),(42,1.140)], len(data)-1)[0]
             data[-2] = Candle(data[-2].dt, neck_prev+.003, neck_prev+.006, neck_prev-.001, neck_prev+.002)
             data[-1] = Candle(data[-1].dt, neck_now+.002, neck_now+.003, neck_now-.006, neck_now-.003)
             found = patterns.structural_patterns("W1", data)

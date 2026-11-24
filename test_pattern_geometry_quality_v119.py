@@ -26,7 +26,9 @@ class PatternGeometryQualityV119(unittest.TestCase):
         # Bullish Gartley: XA=1.0, AB=.618, BC=.5*AB, D is 78.6% from A toward X.
         bars=[Candle(str(i),1.0,1.01,.99,1.0) for i in range(30)]
         piv=[(5,0.0,'L'),(10,1.0,'H'),(14,.382,'L'),(18,.691,'H'),(22,.214,'L')]
-        bars[-1]=Candle(bars[-1].dt,.21,.23,.20,.22)
+        # D=.214 must stay the low after its pivot (no later trade below D).
+        for j in range(23, 29): bars[j]=Candle(bars[j].dt,.30,.31,.29,.30)
+        bars[-1]=Candle(bars[-1].dt,.215,.23,.2145,.22)
         from unittest.mock import patch
         # Isolate the XD retracement convention from the other geometric ratios.
         rules={"gartley":{"xb":(.60,.64),"ac":(.45,.55),"xd":(.76,.81)}}

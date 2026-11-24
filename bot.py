@@ -1667,7 +1667,7 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
         card = None
         if patterns is not None and getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
             try:
-                card = patterns.briefing_htf_card(symbol, (market or {}).get(symbol) or {})
+                card = patterns.briefing_htf_card(symbol, patterns.final_by_tf(market, symbol))
             except Exception:
                 log.exception("PATTERN_BRIEFING_IMAGE_FAILED pair=%s", symbol)
         if card and card.get("image") is not None:
@@ -2242,10 +2242,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
                 for text in patterns.process_market(market, strength):
-                    structural = any(name in text for name in (
-                        "BOS", "Двойная", "голова и плечи", "AB=CD", "Паттерн 1-2-3",
-                        "треугольник", "клин", "флаг", "вымпел", "прямоугольник",
-                    ))
+                    structural = patterns.card_is_structural(text)
                     source_ids[text] = "patterns"
                     module_alerts.append((1 if structural else 3, text))
             except Exception:

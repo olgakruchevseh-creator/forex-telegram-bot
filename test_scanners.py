@@ -60,7 +60,9 @@ class ScannerTests(unittest.TestCase):
 
     def test_gartley_geometry_is_connected(self):
         bars = trend_bars(20, step=.0001)
-        bars[-1] = Candle(bars[-1].dt, 20.0, 24.0, 19.0, 23.0)
+        for j in range(17, 19):  # nothing after D=22 trades below it
+            bars[j] = Candle(bars[j].dt, 23.0, 24.0, 22.5, 23.0)
+        bars[-1] = Candle(bars[-1].dt, 22.5, 24.0, 22.2, 23.5)
         pivots = [(2, 0.0, "L"), (6, 100.0, "H"), (9, 40.0, "L"),
                   (13, 70.0, "H"), (16, 22.0, "L")]
         with patch.object(patterns, "_pivots", return_value=pivots):
@@ -71,6 +73,9 @@ class ScannerTests(unittest.TestCase):
         # Triangles were moved from structural_patterns() to chart_patterns().
         # Use 70 bars to satisfy the chart regression/lookback contract.
         bars = trend_bars(70, step=.0001)
+        # Price must actually trade inside the triangle before the breakout.
+        for j in range(42 + 9, len(bars) - 2):
+            bars[j] = Candle(bars[j].dt, 1.188, 1.192, 1.186, 1.190)
         bars[-2] = Candle(bars[-2].dt, 1.185, 1.195, 1.180, 1.190)
         bars[-1] = Candle(bars[-1].dt, 1.190, 1.215, 1.188, 1.210)
         pivots = [
@@ -96,7 +101,10 @@ class ScannerTests(unittest.TestCase):
             (15, 1.250, "H"), (20, 1.160, "L"), (25, 1.201, "H"),
         ]
         # Neckline through (10,1.150) and (20,1.160) reaches ~1.178 at bar 38.
-        # A first break therefore needs the preceding close ABOVE that line.
+        # A first break therefore needs every close since the right shoulder
+        # ABOVE that line.
+        for j in range(26, len(bars) - 2):
+            bars[j] = Candle(bars[j].dt, 1.188, 1.192, 1.186, 1.190)
         bars[-2] = Candle(bars[-2].dt, 1.190, 1.195, 1.180, 1.184)
         bars[-1] = Candle(bars[-1].dt, 1.184, 1.185, 1.138, 1.140)
         with patch.object(patterns, "_pivots", return_value=pivots), \
@@ -167,14 +175,21 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(last["H1"])
         self.assertIsInstance(zones, list)
 
-    def test_bullish_engulfing_is_detected(self):
-        bars = trend_bars(40, step=0.0001)
+    @staticmethod
+    def _engulfing_after(step):
+        bars = trend_bars(40, step=step)
         prev = bars[-1]
         bars[-1] = Candle(prev.dt, prev.close+.0010, prev.close+.0011, prev.close-.0002, prev.close-.0006)
         dt = (datetime.strptime(prev.dt, "%Y-%m-%d %H:%M:%S") + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         bars.append(Candle(dt, bars[-1].close-.0001, bars[-1].open+.0003, bars[-1].close-.0002, bars[-1].open+.0002))
-        names = [p.name for p in patterns.candlestick_patterns("H1", bars)]
-        self.assertIn("Бычье поглощение", names)
+        return [p.name for p in patterns.candlestick_patterns("H1", bars)]
+
+    def test_bullish_engulfing_is_detected(self):
+        # A reversal shape needs a preceding decline to reverse.
+        self.assertIn("Бычье поглощение", self._engulfing_after(-0.0004))
+
+    def test_bullish_engulfing_after_rally_is_not_a_reversal(self):
+        self.assertNotIn("Бычье поглощение", self._engulfing_after(0.0004))
 
     def test_countertrend_pinbar_is_filtered_internally(self):
         p = patterns.Pattern("Молот / бычий Pin Bar", "LONG", "H1", 76, 74,
