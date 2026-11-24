@@ -917,16 +917,22 @@ def pattern_123(tf: str, bars: list[Candle]) -> list[Pattern]:
     return out
 
 
+# Stage 19: ratios of tick-rounded prices hit a Fibonacci bound EXACTLY
+# (e.g. AB/XA = 0.78 = 0.84 − FIB_TOL). Float noise then decided in/out, and a
+# market and its mirror copy disagreed. A bound is inclusive up to 1e-9.
+_RATIO_EPS = 1e-9
+
+
 def _inside(value: float, limits: tuple[float, float], tol: float) -> bool:
     lo, hi = sorted((float(limits[0]), float(limits[1])))
-    return lo - tol <= value <= hi + tol
+    return lo - tol - _RATIO_EPS <= value <= hi + tol + _RATIO_EPS
 
 
 def _ratio_quality(value: float, limits: tuple[float, float], tol: float) -> float:
     """0..1: насколько отношение близко к ядру разрешённой Fibonacci-зоны."""
     lo, hi = sorted((float(limits[0]), float(limits[1])))
     lo, hi = lo-tol, hi+tol
-    if value < lo or value > hi:
+    if value < lo - _RATIO_EPS or value > hi + _RATIO_EPS:
         return 0.0
     mid = (lo+hi)/2.0
     half = max((hi-lo)/2.0, 1e-12)
@@ -1038,7 +1044,7 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     d_beyond_b = ((d[1] < b[1] - ab * 1e-9) if d[2] == "L"
                   else (d[1] > b[1] + ab * 1e-9))
     if (_inside(ratio_bc, bc_limits, tol) and _inside(ratio_cd, cd_limits, 0.0)
-            and abs(ratio_cd - 1.0) <= price_sym_tol and time_sym >= min_time_sym
+            and abs(ratio_cd - 1.0) <= price_sym_tol + _RATIO_EPS and time_sym >= min_time_sym - _RATIO_EPS
             and d_beyond_b):
         side = "LONG" if d[2] == "L" else "SHORT"
         last = bars[-1]
@@ -1088,11 +1094,46 @@ def _strength_confirms(symbol: str, side: str, strength: dict[str, float]) -> bo
     return gap >= minimum if side == "LONG" else gap <= -minimum
 
 
-def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[str, float]) -> bool:
+def _harmonic_d_open(p: Pattern) -> datetime | None:
+    """Open time of the D bar, taken from the detector's geometry_id."""
+    if not p or not p.geometry_id or p.geometry_id.count(":") < 2:
+        return None
+    return _parse_utc(p.geometry_id.split(":", 1)[1].rsplit(":", 1)[0])
+
+
+def _directional_break_since_d(bars: list[Candle], side: str, first_i: int) -> bool:
+    """H1 close beyond the structure built AFTER D (D bar included).
+
+    Stage 19. The plain 8-bar break also looked at the CD leg BEFORE D: for an
+    H1 harmonic (D confirmed 2 bars later, card allowed up to 4 bars after D)
+    the highest high of the previous 8 H1 sits up the CD leg, typically more
+    than HARMONIC_MAX_REACTION_ATR (2 ATR) above D. A close above it was then
+    already "too far from D" for _harmonic_still_early: the two gates excluded
+    each other and ~4 of 5 recent H1 harmonics could never be confirmed.
+    Body and ATR rules are unchanged; only bars before D are not required.
+    """
+    lookback = max(4, int(getattr(cfg, "HARMONIC_CONFIRM_LOOKBACK", 8)))
+    if len(bars) < 16 or not (0 <= first_i < len(bars) - 1):
+        return False
+    c = bars[-1]
+    previous = bars[max(first_i, len(bars) - 1 - lookback):-1]
+    if not previous:
+        return False
+    av = atr(bars, 14) or _range(c)
+    min_body = av * float(getattr(cfg, "HARMONIC_CONFIRM_BODY_ATR", .35))
+    if side == "LONG":
+        return _bull(c) and _body(c) >= min_body and c.close > max(x.high for x in previous)
+    return _bear(c) and _body(c) >= min_body and c.close < min(x.low for x in previous)
+
+
+def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[str, float],
+                          pattern: Pattern | None = None) -> bool:
     """Финальное подтверждение гармоники: только закрытый H1-пробой.
 
     M15/M5 могут использоваться внутренними контекстными фильтрами, но не
     заменяют закрытие H1 и не выпускают часовую торговую карточку раньше времени.
+    С этапа 19 (HARMONIC_CONFIRM_FROM_D) пробой считается по H1 начиная со
+    свечи D, а не по 8 H1 до неё; без pattern — прежнее правило.
     """
     # Harmonic confirmation needs the pair's actual currency strength gap;
     # a global advisory flag for ordinary signals must not silently override
@@ -1100,6 +1141,13 @@ def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[st
     if not _strength_confirms(symbol, side, strength):
         return False
     h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    d_open = _harmonic_d_open(pattern) if getattr(cfg, "HARMONIC_CONFIRM_FROM_D", True) else None
+    if d_open is not None:
+        opens = [_parse_utc(bar.dt) for bar in h1]
+        first_i = next((i for i, opened in enumerate(opens)
+                        if opened is not None and opened >= d_open), None)
+        if first_i is not None and first_i < len(h1) - 1:
+            return _directional_break_since_d(h1, side, first_i)
     return _directional_break(h1, side)
 
 
@@ -1985,7 +2033,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 p for p in candidates
                 if p not in late_harmonics and (
                     not p.name.startswith("Гармонический")
-                    or harmonic_confirmation(symbol, p.side, by_tf, strength))
+                    or harmonic_confirmation(symbol, p.side, by_tf, strength, p))
             ]
             candidates = [p for p in candidates if _pattern_allowed(p, context_side)]
             # Единый OHLC слой не создаёт паттерн сам. Он лишь не даёт одной-двум

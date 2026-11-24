@@ -720,6 +720,12 @@ HARMONIC_MAX_BARS_AFTER_D = {"H1": 4, "H4": 5, "D1": 5, "W1": 5}
 HARMONIC_MAX_REACTION_ATR = 2.0
 HARMONIC_CONFIRM_BODY_ATR = 0.35
 HARMONIC_CONFIRM_LOOKBACK = 8
+# Этап 19: пробой H1 считается по свечам начиная с D (свеча D включена),
+# а не по 8 H1 до него. Иначе для H1-гармоник подтверждающее закрытие
+# почти всегда дальше 2 ATR от D и запрещено HARMONIC_MAX_REACTION_ATR.
+# Тело, ATR и сила валют не меняются. По умолчанию ВЫКЛЮЧЕНО: H1-гармоник
+# станет примерно в 15 раз больше (синтетика), сначала сравнить на истории.
+HARMONIC_CONFIRM_FROM_D = False
 
 RETEST_CHART_ENABLED = True
 ORDER_BLOCK_CHART_IMAGES_ENABLED = True
