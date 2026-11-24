@@ -341,6 +341,39 @@ def _alternating_pivots(pivots: list[tuple[int, float, str]]) -> list[tuple[int,
     return out
 
 
+def _double_extreme(extremes: list[tuple[int, float]], opposite: list[tuple[int, float]],
+                    sign: int, tol: float, min_sep: int, max_after: int,
+                    last_i: int) -> tuple | None:
+    """Find the two tops (sign=+1) or bottoms (sign=-1) of a double formation.
+
+    Only the last two raw pivots used to be compared. A small lower-high
+    bounce inside the right leg (very common before the neckline breaks)
+    then replaced the second top and the real double top was never found.
+    The second top must dominate everything after it; minor pivots between
+    the two tops that stay clearly below them are ignored. Mirror-symmetric:
+    bottoms are handled as negated tops.
+    """
+    pts = [(i, sign * p) for i, p in extremes]
+    for j in range(len(pts) - 1, 0, -1):
+        s_i, s_p = pts[j]
+        if last_i - s_i > max_after:
+            break
+        if any(p >= s_p for _, p in pts[j + 1:]):
+            continue  # a later, equal or more extreme pivot: not the second top
+        for k in range(j - 1, -1, -1):
+            f_i, f_p = pts[k]
+            if f_p < s_p - tol:
+                continue  # minor pivot inside the M/W, below both tops
+            if abs(f_p - s_p) > tol or s_i - f_i < min_sep:
+                break
+            between = [(i, sign * p) for i, p in opposite if f_i < i < s_i]
+            if not between:
+                break
+            neck_i, neck = min(between, key=lambda item: item[1])
+            return (f_i, sign * f_p), (s_i, sign * s_p), neck_i, sign * neck
+    return None
+
+
 def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     if len(bars) < 30:
         return []
@@ -357,32 +390,26 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     # Double top/bottom: two comparable extrema separated in time, a real
     # trough/peak between them, and the FIRST close beyond the neckline since
     # that trough (not merely relative to the previous candle).
-    if len(highs) >= 2 and abs(highs[-1][1] - highs[-2][1]) <= tol:
-        first_top, second_top = highs[-2], highs[-1]
-        between = [(i, p) for i, p in lows if first_top[0] < i < second_top[0]]
-        if (between and second_top[0] - first_top[0] >= min_sep
-                and last_i - second_top[0] <= max_after):
-            neck_i, neck = min(between, key=lambda item: item[1])
-            depth = min(first_top[1], second_top[1]) - neck
-            first_break = all(x.close >= neck for x in bars[neck_i + 1:-1])
-            if depth >= min_depth and first_break and c.close < neck:
-                symmetry = max(0, 8 - int(abs(second_top[1] - first_top[1]) / max(tol, 1e-12) * 8))
-                _add(out, "Двойная вершина", "SHORT", tf, 82 + symmetry, 78 + symmetry,
-                     "Две сопоставимые вершины сформированы; последняя свеча впервые закрылась ниже линии шеи.",
-                     neck, c, f"DT:{bars[first_top[0]].dt}:{bars[second_top[0]].dt}")
-    if len(lows) >= 2 and abs(lows[-1][1] - lows[-2][1]) <= tol:
-        first_low, second_low = lows[-2], lows[-1]
-        between = [(i, p) for i, p in highs if first_low[0] < i < second_low[0]]
-        if (between and second_low[0] - first_low[0] >= min_sep
-                and last_i - second_low[0] <= max_after):
-            neck_i, neck = max(between, key=lambda item: item[1])
-            depth = neck - max(first_low[1], second_low[1])
-            first_break = all(x.close <= neck for x in bars[neck_i + 1:-1])
-            if depth >= min_depth and first_break and c.close > neck:
-                symmetry = max(0, 8 - int(abs(second_low[1] - first_low[1]) / max(tol, 1e-12) * 8))
-                _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry,
-                     "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.",
-                     neck, c, f"DB:{bars[first_low[0]].dt}:{bars[second_low[0]].dt}")
+    top = _double_extreme(highs, lows, +1, tol, min_sep, max_after, last_i)
+    if top:
+        (f_i, f_p), (s_i, s_p), neck_i, neck = top
+        depth = min(f_p, s_p) - neck
+        first_break = all(x.close >= neck for x in bars[neck_i + 1:-1])
+        if depth >= min_depth and first_break and c.close < neck:
+            symmetry = max(0, 8 - int(abs(s_p - f_p) / max(tol, 1e-12) * 8))
+            _add(out, "Двойная вершина", "SHORT", tf, 82 + symmetry, 78 + symmetry,
+                 "Две сопоставимые вершины сформированы; последняя свеча впервые закрылась ниже линии шеи.",
+                 neck, c, f"DT:{bars[f_i].dt}:{bars[s_i].dt}")
+    bottom = _double_extreme(lows, highs, -1, tol, min_sep, max_after, last_i)
+    if bottom:
+        (f_i, f_p), (s_i, s_p), neck_i, neck = bottom
+        depth = neck - max(f_p, s_p)
+        first_break = all(x.close <= neck for x in bars[neck_i + 1:-1])
+        if depth >= min_depth and first_break and c.close > neck:
+            symmetry = max(0, 8 - int(abs(s_p - f_p) / max(tol, 1e-12) * 8))
+            _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry,
+                 "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.",
+                 neck, c, f"DB:{bars[f_i].dt}:{bars[s_i].dt}")
     # BOS is continuation of an already established HH/HL or LH/LL structure.
     # An opposite break is a possible MSS/CHoCH and is deliberately NOT emitted
     # here as an automatic reversal signal.  Wick-only probes never qualify:
@@ -416,8 +443,21 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     # that line.  This is especially important on W1/D1 where a sloping
     # neckline can otherwise be missed or confirmed too early.
     alt = _alternating_pivots(piv)
-    if len(alt) >= 5:
-        a, b, head, d, shoulder = alt[-5:]
+    # A small bounce after the right shoulder (minor L + H pivots that stay
+    # inside the figure) used to shift the 5-pivot window, so a real H&S was
+    # never found. Try the newest window first, then up to N windows that end
+    # earlier, whose trailing pivots stay beyond the shoulder (below it for
+    # H&S, above it for the inverse).
+    hs_extra = max(0, int(getattr(cfg, "PATTERN_HS_MAX_TRAILING_PIVOTS", 2)))
+    for trail in range(0, hs_extra + 1):
+        if len(alt) < 5 + trail or any(p.name in ("Голова и плечи", "Перевёрнутая голова и плечи") for p in out):
+            break
+        a, b, head, d, shoulder = alt[len(alt) - 5 - trail:len(alt) - trail]
+        trailing = alt[len(alt) - trail:]
+        if shoulder[2] == "H" and any(q[2] == "H" and q[1] >= shoulder[1] for q in trailing):
+            continue
+        if shoulder[2] == "L" and any(q[2] == "L" and q[1] <= shoulder[1] for q in trailing):
+            continue
         # Defaults equal config.py so a renamed key cannot silently change rules.
         shoulder_tol = av * float(getattr(cfg, "PATTERN_HS_SHOULDER_TOL_ATR", .40))
         head_min = av * float(getattr(cfg, "PATTERN_HS_HEAD_MIN_ATR", .60))
@@ -672,7 +712,39 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
     piv = _alternating_pivots(_pivots(bars, n))
     if len(piv) < 3 or len(bars) < 3:
         return {"state": "NONE"}
-    p1, p2, p3 = piv[-3:]
+    newest = _pattern_123_triple(tf, bars, n, piv[-3], piv[-2], piv[-1])
+    # Minor pivots that form INSIDE the 1-2-3 (a small bounce and a higher
+    # low after P3) used to replace P1-P2-P3 with a micro triple. The real
+    # first close beyond P2 was then reported as "INVALIDATED SHORT" of the
+    # micro triple and the LONG 1-2-3 was never confirmed. An older triple is
+    # still the live structure while every later pivot stays inside it: highs
+    # not above P2 and lows not below P3 (mirrored for SHORT).
+    extra = max(0, int(getattr(cfg, "PATTERN_123_MAX_INNER_PIVOTS", 2)))
+    rank = {"CONFIRMED": 2, "BODY_CONFLICT": 1}
+    best = newest if newest.get("state") in rank else None
+    # end is the index of P3; k = len(piv)-1-end inner pivots, 1 <= k <= extra.
+    for end in range(len(piv) - 2, max(1, len(piv) - 2 - extra), -1):
+        p1, p2, p3 = piv[end - 2], piv[end - 1], piv[end]
+        inner = piv[end + 1:]
+        if (p1[2], p2[2], p3[2]) == ("L", "H", "L"):
+            contained = all((q[1] <= p2[1]) if q[2] == "H" else (q[1] >= p3[1]) for q in inner)
+        elif (p1[2], p2[2], p3[2]) == ("H", "L", "H"):
+            contained = all((q[1] >= p2[1]) if q[2] == "L" else (q[1] <= p3[1]) for q in inner)
+        else:
+            contained = False
+        if not contained:
+            continue
+        life = _pattern_123_triple(tf, bars, n, p1, p2, p3)
+        # On the same close prefer a clean CONFIRMED, then the larger structure.
+        if life.get("state") in rank and (best is None or
+                (rank[life["state"]], life.get("leg_atr", 0.0)) >
+                (rank[best["state"]], best.get("leg_atr", 0.0))):
+            best = life
+    return best or newest
+
+
+def _pattern_123_triple(tf: str, bars: list[Candle], n: int, p1, p2, p3) -> dict:
+    """Lifecycle of one explicit P1-P2-P3 triple (see pattern_123_lifecycle)."""
     # Preserve the historical per-TF limit by default; unlike a magic n+6,
     # its meaning is now explicit. Enlarging this window is a *trading-policy*
     # change and requires historical evaluation before enabling.
@@ -720,6 +792,7 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
             break
 
     base = {"side": side, "trigger": trigger, "p1": p1[1], "p2": p2[1], "p3": p3[1],
+            "p1_i": p1[0], "p2_i": p2[0], "p3_i": p3[0],
             "leg_atr": leg / av if av else 0.0, "retrace": ratio, "atr": av,
             "retest_low": trigger - pocket, "retest_high": trigger + pocket}
     if first_break_i is None:
@@ -1263,6 +1336,10 @@ def _chart_geometry_anchors(pattern: Pattern, bars: list[Candle]) -> list[tuple[
             return []
         if abs(float(life.get("trigger", 0)) - float(pattern.level)) > max(1e-8, abs(pattern.level) * 1e-7):
             return []
+        # The lifecycle may confirm an older triple whose inner minor pivots
+        # stayed inside it; draw exactly the triple it used.
+        if all(key in life for key in ("p1_i", "p2_i", "p3_i")):
+            return [(int(life[k + "_i"]), float(life[k]), k.upper()) for k in ("p1", "p2", "p3")]
         return [(i, value, name) for name, (i, value, _kind) in
                 zip(("P1", "P2", "P3"), piv[-3:])]
     if pattern.name.startswith("Гармонический"):

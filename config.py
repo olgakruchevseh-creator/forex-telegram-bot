@@ -671,8 +671,15 @@ PATTERN_123_RETEST_POCKET_ATR = 0.20
 # Max completed bars *after* P3 (not P3 bar itself), preserving the old
 # n+6 scanner window. Changing these values changes signal eligibility.
 PATTERN_123_MAX_BARS_AFTER_P3 = {"W1": 8, "D1": 8, "H4": 8, "H1": 7, "M15": 7, "M5": 7}
+# Up to this many minor pivots may form INSIDE a live 1-2-3 (highs not above
+# P2, lows not below P3; mirrored for SHORT) without replacing P1-P2-P3 by a
+# micro triple. 0 restores the old "last three pivots only" behaviour.
+PATTERN_123_MAX_INNER_PIVOTS = 2
 # Head & Shoulders geometry. ATR-normalized so the same rules work on W1/D1/H4/H1.
 PATTERN_HS_SHOULDER_TOL_ATR = 0.40
+# Minor pivots allowed after the right shoulder (inside the figure) before the
+# neckline break; 0 = old behaviour (the last five pivots only).
+PATTERN_HS_MAX_TRAILING_PIVOTS = 2
 PATTERN_HS_HEAD_MIN_ATR = 0.60
 PATTERN_HS_MAX_TIME_RATIO = 3.0
 PATTERN_HS_MAX_BARS_AFTER_SHOULDER = 20  # neckline break must be recent

@@ -41,13 +41,20 @@ class StructureContext:
     family: str = "structure_delivery_shift"
 
 
+_HIGH = ("HH", "LH", "EQH")
+_LOW = ("HL", "LL", "EQL")
+
+
 def _labels(sequence: str) -> list[str]:
-    return [x.strip() for x in (sequence or "").split("→") if x.strip() in {"HH", "HL", "LH", "LL"}]
+    # EQH/EQL (stage 15) must stay in the list: dropping them let an OLDER
+    # HH/LH or HL/LL decide, so ZigZag said 0 while this module said
+    # CONFIRMED for the same sequence (e.g. "LH → LL → EQH → LL").
+    return [x.strip() for x in (sequence or "").split("→") if x.strip() in _HIGH + _LOW]
 
 
 def _pair_side(labels: list[str]) -> int:
-    hi = next((x for x in reversed(labels) if x in ("HH", "LH")), "")
-    lo = next((x for x in reversed(labels) if x in ("HL", "LL")), "")
+    hi = next((x for x in reversed(labels) if x in _HIGH), "")
+    lo = next((x for x in reversed(labels) if x in _LOW), "")
     if hi == "HH" and lo == "HL": return 1
     if hi == "LH" and lo == "LL": return -1
     return 0
@@ -118,8 +125,8 @@ def analyze_symbol(symbol: str, by_tf: dict, candidate_side: int = 0) -> Structu
 
     # A mixed latest HH/LL or LH/HL pair means the old structure is threatened,
     # not that the opposite trade direction is already confirmed.
-    latest_hi = next((x for x in reversed(labels) if x in ("HH", "LH")), "")
-    latest_lo = next((x for x in reversed(labels) if x in ("HL", "LL")), "")
+    latest_hi = next((x for x in reversed(labels) if x in _HIGH), "")
+    latest_lo = next((x for x in reversed(labels) if x in _LOW), "")
     mixed = (latest_hi, latest_lo) in (("HH", "LL"), ("LH", "HL"))
     if mixed and side:
         state = "THREATENED"

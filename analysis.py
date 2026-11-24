@@ -163,16 +163,21 @@ def swing_character(candles: list[Candle], tf: str) -> dict | None:
         return None
     last_high, prev_high = highs[-1].price, highs[-2].price
     last_low, prev_low = lows[-1].price, lows[-2].price
+    # An exactly equal extreme is neither higher nor lower (same rule as the
+    # ZigZag scanner's EQH/EQL since stage 15): EQH + LL or HH + EQL is not a
+    # confirmed trend, otherwise BOS/CHoCH/MSS saw a trend ZigZag called 0.
+    bullish = last_high > prev_high and last_low > prev_low
+    bearish = last_high < prev_high and last_low < prev_low
     return {
-        "prior_bearish": last_high <= prev_high and last_low < prev_low,
-        "prior_bullish": last_high > prev_high and last_low >= prev_low,
+        "prior_bearish": bearish,
+        "prior_bullish": bullish,
         "last_high": float(last_high),
         "last_low": float(last_low),
         # Protected swing belongs to the already established structure:
         # bullish HH/HL protects the latest confirmed HL; bearish LH/LL
         # protects the latest confirmed LH.  It is context, not a new signal.
-        "protected_low": float(last_low) if (last_high > prev_high and last_low >= prev_low) else None,
-        "protected_high": float(last_high) if (last_high <= prev_high and last_low < prev_low) else None,
+        "protected_low": float(last_low) if bullish else None,
+        "protected_high": float(last_high) if bearish else None,
     }
 
 
