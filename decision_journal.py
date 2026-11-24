@@ -450,6 +450,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   'source_tf_contract':inferred_tf,'source_event_close_utc':inferred_close_utc,
   'verified_h1_close_utc':(ctx or {}).get('h1_release_close_utc'),
   'final_entry_gate':(ctx or {}).get('final_entry_gate') or {},
+  'final_significance_snapshot':(ctx or {}).get('final_significance_snapshot') or {},
   'ltf_close_evidence':_ltf_close_evidence(by_tf,direction),
   'entry_timing':('late' if 'late_' in str(reason) or (progress is not None and progress > float(getattr(cfg,'SIGNAL_INITIAL_MAX_PROGRESS_PCT',35)) and (ctx or {}).get('mode') != 'PULLBACK') else 'unknown' if progress is None else 'early' if progress<=15 else 'timely'),
   'residual_potential_pct':(round(max(0.0,100.0-progress),1) if progress is not None else None),
@@ -462,6 +463,31 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   'calibration':_calibration_metrics(text,by_tf,direction,ctx) if getattr(cfg,'NUMERICAL_CALIBRATION_ENABLED',True) else {},
   'parameter_snapshot':numerical_parameter_registry.snapshot() if getattr(cfg,'NUMERICAL_CALIBRATION_ENABLED',True) else {},
   'strength_snapshot':{k:strength.get(k) for k in pair.split('/') if k in (strength or {})} if pair else {}}
+def significance_observation_context(significance):
+ """Preserve final-gate provenance without changing decisions or log payload size.
+
+ Uses only bounded scalar fields and the explicit correlated-route snapshot.
+ Unknown keys (including credentials or large scanner objects) are ignored.
+ """
+ src=significance if isinstance(significance,dict) else {}
+ keys=('eligible','reason','remaining_h1','route_atr','final_route_atr',
+       'source_tf','source_age_min','median_body_atr','efficiency',
+       'trade_lifecycle_status','trade_lifecycle_reason','trade_lifecycle')
+ snap={key:src.get(key) for key in keys if isinstance(src.get(key),(str,int,float,bool,type(None))) and key in src}
+ correlated=src.get('correlated_route_snapshot')
+ if isinstance(correlated,dict):
+  snap['correlated_route_snapshot']={k:v for k,v in correlated.items()
+    if k in ('status','pair','detail','observed_h1_dt','observe_only')
+       and isinstance(v,(str,int,float,bool,type(None)))}
+  route=correlated.get('active_route')
+  if isinstance(route,dict):
+   allowed=('status','side','start_h1','last_h1','created_at','updated_at',
+            'anchor','target','reached_count')
+   snap['correlated_route_snapshot']['active_route']={k:v for k,v in route.items()
+        if k in allowed and isinstance(v,(str,int,float,bool,type(None)))}
+ return {'final_significance_snapshot':snap}
+
+
 def record_decision(text,market,strength,status,reason='',allies=None,ctx=None):
  if not getattr(cfg,'DECISION_JOURNAL_ENABLED',True): return
  if _already_written_stage(text,market,status,reason): return

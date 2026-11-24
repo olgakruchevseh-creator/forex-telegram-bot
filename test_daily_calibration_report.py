@@ -24,4 +24,4 @@ def test_daily_report_deduplicates_repeated_block_rows(tmp_path, monkeypatch):
     report=d._report(day)
     assert 'ЗАБЛОКИРОВАНО: 1 уникальных решений' in report
     assert 'Технические повторные записи от повторных сканов: 4' in report
-    assert 'ошибочные 1' in report
+    assert 'proxy-благоприятные 1' in report

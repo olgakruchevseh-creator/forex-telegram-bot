@@ -169,6 +169,7 @@ def record_attempt(pair, side, meta, by_tf, strength, texts, events, now_utc, *,
                "smt_peer_h1": peers, "smt_peer_snapshot_version": 1 if market is not None else 0,
                "setup_memory_snapshot": setup_context,
                "strength": {str(k): _finite(v) for k,v in (strength or {}).items()},
+               "source_input_mode": "SOURCE_CARDS_OR_MEMORY" if texts else "NO_SOURCE_CARDS",
                "source_fact_hashes": [hashlib.sha256(t.encode()).hexdigest()[:18] for t in texts],
                "source_facts": list(texts)[:35],  # reproducibility: no private tokens/headers
                "events": _event_snapshot(events), "decision_now_utc": now_utc.isoformat()}
@@ -333,6 +334,7 @@ def daily_digest(day):
     facts_unknown = sum('source_fact_hashes' not in r for r in rows)
     hunter_without_facts = sum(('source_fact_hashes' in r and
                                 not r.get('source_fact_hashes')) for r in rows)
+    documented_without_cards = sum(r.get('source_input_mode') == 'NO_SOURCE_CARDS' for r in rows)
     family_rejects = [r for r in rows if r.get('reason') == 'not_enough_independent_families']
     missing_family_counts = Counter(int(r.get('family_count') or 0)
                                     for r in family_rejects)
@@ -360,8 +362,9 @@ def daily_digest(day):
             f"Кандидаты: {len(rows)} · отклонено {status['REJECTED']} · прошли Killer {status['CANDIDATE']}\n"
             f"Основные причины: {top}\n"
             f"Проверок-вердиктов {len(rows)}, различных пара/направление/H1 {len(cohorts)} · "
-            f"без исходных карт сканеров {hunter_without_facts}"
-            + (f" · неизвестно {facts_unknown}" if facts_unknown else "") + "\n"
+            f"без исходных карт сканеров {hunter_without_facts} (совместимо с автономным Hunter; не доказательство потери данных)"
+            f" · явно без карт в новом формате {documented_without_cards}"
+            + (f" · поле отсутствует {facts_unknown}" if facts_unknown else "") + "\n"
             f"Отказы по семействам: {family_hist} (порог {getattr(cfg, 'KILLER_MIN_FAMILIES', 5)})\n"
             f"Повторный расчёт: совпал {replays['REPRODUCED']} · расхождение {replays['REPLAY_DIFFERENCE']} · ожидание {replay_pending} · итог 6H1 {outcomes}\n"
             f"Финальные отказы после Killer: {sum(final_blocks.values())} · отдельных записей {len(gates)}\n"

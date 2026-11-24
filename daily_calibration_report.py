@@ -210,6 +210,14 @@ def _report(day):
     }
     h1_guard_total = sum(str(r.get('reason') or '') in h1_guard_reasons for r in blocks)
     h1_guard_proxy_favorable = 0
+    # A correlated-USD veto is legitimate risk control. Its *forensic* value
+    # depends on knowing which active route was present at the exact decision.
+    usd_correlation_blocks = [r for r in blocks
+                              if r.get('reason') == 'final_significance_correlated_usd_exposure']
+    captured_usd_routes = [((r.get('final_significance_snapshot') or {}).get('correlated_route_snapshot') or {})
+                           for r in usd_correlation_blocks]
+    usd_route_captured = [r for r in captured_usd_routes if r.get('status') == 'CAPTURED' and r.get('pair')]
+    usd_counterpart_counts = Counter(r['pair'] for r in usd_route_captured)
     # Coarse *situations*, not independent detector events; multiple real
     # setups per pair/source/H1 are intentionally merged only for diagnostics.
     block_cohorts = {(r.get('pair'), r.get('side'), r.get('source'), r.get('observed_h1_dt'))
@@ -250,7 +258,16 @@ def _report(day):
     caltxt=', '.join(f'{k}: n={v[0]}, факт-eff {v[1]/v[0]*100:.0f}%' for k,v in sorted(cal.items())) or '—'
     qcaltxt=', '.join(f'{k}: n={v[0]}, факт-eff {v[1]/v[0]*100:.0f}%' for k,v in sorted(qcal.items())) or '—'
     master_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('master_snapshot') or {}).get('quality'),lambda v:_named_bucket(v,(0,78,81,85,101),('<78','78–80','81–84','85+','85+')))
-    killer_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('killer_score'),lambda v:_named_bucket(v,(0,84,87,91,101),('<84','84–86','87–90','91+','91+')))
+    killer_sent=[r for r in sent if str(r.get('source') or '').strip().lower()=='killer']
+    killer_scored=[r for r in killer_sent if (r.get('calibration') or {}).get('killer_score') is not None]
+    killer_ranges=_metric_eff(killer_sent,outcomes,lambda d:(d.get('calibration') or {}).get('killer_score'),lambda v:_named_bucket(v,(0,84,87,91,101),('<84','84–86','87–90','91+','91+')))
+    if not killer_sent:
+        killer_ranges=f'— (отправленных Killer 0/{len(sent)}; кандидаты Killer не равны SENT)'
+    elif not killer_scored:
+        killer_ranges=f'— (отправлено Killer {len(killer_sent)}, но балл отсутствует в исходных SENT-карточках)'
+    else:
+        killer_ranges+=f' · отправленных Killer {len(killer_sent)}/{len(sent)} · балл сохранён {len(killer_scored)}/{len(killer_sent)}'
+
     progress_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('progress_pct'),lambda v:_named_bucket(v,(0,20,35,45,101),('0–19%','20–34%','35–44%','45%+','45%+')))
     strength_ranges=_metric_eff(sent,outcomes,lambda d:(d.get('calibration') or {}).get('directed_strength_gap'),lambda v:_named_bucket(v,(-99,0,.03,.05,.12,99),('<0','0–0.02','0.03–0.04','0.05–0.11','≥0.12','≥0.12')))
     family_counts=[int(((r.get('confirmation_families') or {}).get('independent_family_count') or 0)) for r in sent]
@@ -263,7 +280,7 @@ def _report(day):
     manip_zones=manip.get('zones') or {}
     def _mh(name): return int(((manip_levels.get(name) or {}).get('touched') or 0))
     problems=[]
-    if wrong: problems.append(f'ошибочных блокировок {wrong}')
+    if wrong: problems.append(f'proxy-благоприятных отказов {wrong} (не доказанные ошибки)')
     if ambiguous: problems.append(f'неоднозначных блокировок {ambiguous}')
     if block_pending: problems.append(f'BLOCKED ещё не созрели для replay {block_pending}')
     late=sum(v for k,v in timing.items() if k=='late')
@@ -283,7 +300,7 @@ def _report(day):
       f"Манипуляционная проекция: {manip.get('setups',0)} сетапов · касания -1/-1.5/-2/-2.25/-2.5: {_mh('-1')}/{_mh('-1.5')}/{_mh('-2')}/{_mh('-2.25')}/{_mh('-2.5')}",
       f"Дальняя зона -4/-4.25/-4.5: {_mh('-4')}/{_mh('-4.25')}/{_mh('-4.5')} · входов в -2…-2.5: {manip_zones.get('primary_entered',0)} · в -4…-4.5: {manip_zones.get('extended_entered',0)}",
       f"Наблюдение проекций: ≥1 закрытой H1 {manip.get('eligible',0)}/{manip.get('setups',0)} · ≥8 H1 {manip.get('matured',0)} · без последующей H1 {manip.get('unobserved',0)}",
-      f"MFE (до 8 закрытых H1): {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
+      f"MFE (до 8 закрытых H1): {sum(mfe)/len(mfe):.2f} ATR · MAE: {sum(mae)/len(mae):.2f} ATR · n={len(mfe)}" if mfe else 'MFE/MAE: пока нет зрелых replay-данных',
       f"MFE/MAE (первые 3 H1): {sum(mfe3)/len(mfe3):.2f} / {sum(mae3)/len(mae3):.2f} ATR · n={len(mfe3)}" if mfe3 else 'MFE/MAE (первые 3 H1): —',
       (f"Пик MAE (replay): {mae_peak[0]:.2f} ATR · {mae_peak[1].get('pair') or '—'} · "
        f"ATR={mae_peak[2].get('atr_h1','—')} · вход={mae_peak[2].get('entry','—')} · "
@@ -291,10 +308,18 @@ def _report(day):
        f"вход={mae_peak[2].get('entry_source') or 'СТАРЫЙ_ФОРМАТ'} · "
        f"|вход−H1|={mae_peak[2].get('entry_gap_atr') if mae_peak[2].get('entry_gap_atr') is not None else '—'} ATR"
        if mae_peak else 'Пик MAE: —'),
+      (f"Сценарий пиковой MAE: id={mae_peak[1].get('event_id') or '—'} · "
+       f"{mae_peak[1].get('source') or '—'} {mae_peak[1].get('side') or '—'} · "
+       f"TF={mae_peak[1].get('timeframe') or 'не указан'} · "
+       f"опорная H1 (время открытия)={mae_peak[1].get('observed_h1_dt') or '—'} · "
+       f"H1-close={mae_peak[1].get('h1_close_price') if mae_peak[1].get('h1_close_price') is not None else '—'} · "
+       f"проверенное закрытие H1={mae_peak[1].get('verified_h1_close_utc') or '—'}"
+       if mae_peak else 'Сценарий пиковой MAE: —'),
       f"Вход SENT: early {sent_timing['early']} · timely {sent_timing['timely']} · late {sent_timing['late']} · неизвестно {sent_timing['unknown']}" + (f" · residual avg {sum(residual)/len(residual):.0f}%" if residual else ''),'',
       group_line('Пары',by_pair),group_line('Модули',by_src),group_line('TF',by_tf),group_line('Режим',by_reg),group_line('Сессии',by_session),'',
-      f'Блокировки (уникальные, 3H excursion proxy): полезные {useful} · ошибочные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
-      f'Ошибочные блокировки (3H proxy) по причинам: {_top(wrong_reasons)}',
+      f'Блокировки (уникальные stage-решения, 3H proxy): неблагоприятные {useful} · proxy-благоприятные {wrong} · неоднозначные {ambiguous} · ещё не созрели {block_pending} · причины: {_top(block_reasons)}',
+      f'Proxy-благоприятные отказы (не доказанные ошибки фильтра) по причинам: {_top(wrong_reasons)}',
+      f'Аудит USD-экспозиции: блокировок {len(usd_correlation_blocks)} · подтверждённых снимков конфликтующих маршрутов {len(usd_route_captured)}/{len(usd_correlation_blocks)} · пары-источники: {_top(usd_counterpart_counts, 4)} (старые записи могли не содержать снимков)',
       (f"Аудит H1: запретов по возрасту/закрытию {h1_guard_total}; из proxy-благоприятных "
        f"{h1_guard_proxy_favorable} — НЕ доказанные ошибки; групп пара/сторона/модуль/H1 {len(block_cohorts)}"),
       f'Quality → факт: {qcaltxt}',f'Probability → факт: {caltxt}',
@@ -302,11 +327,11 @@ def _report(day):
       f'Progress ranges: {progress_ranges}',f'Strength ranges: {strength_ranges}',
       (f'Подтверждения модулей: avg источников {sum(source_counts)/len(source_counts):.1f} · независимых семейств {sum(family_counts)/len(family_counts):.1f} · неклассифицированных {sum(unclassified_counts)}' if source_counts else 'Подтверждения модулей: —'),
       (f'Семейства Master: avg {sum(master_family_counts)/len(master_family_counts):.1f} · снимков {len(master_family_counts)}/{len(sent)}' if master_family_counts else f'Семейства Master: нет снимков · 0/{len(sent)}'),
-      f'Снимки целей: Navigator {sum(r.get("target_source")=="navigator_snapshot" for r in sent)}/{len(sent)} · источник/контекст {sum(r.get("target_source")=="source_or_context" for r in sent)}/{len(sent)} · неопубликованы/старый формат {sum(r.get("target_source") not in ("navigator_snapshot","source_or_context") for r in sent)}/{len(sent)}',
-      f'Таймфрейм события неизвестен: {missing_tf}/{len(sent)}',
+      f'Снимки целей: Navigator {sum(r.get("target_source")=="navigator_snapshot" for r in sent)}/{len(sent)} · источник/контекст {sum(r.get("target_source")=="source_or_context" for r in sent)}/{len(sent)} · неопубликованы/старый формат {sum(r.get("target_source") not in ("navigator_snapshot","source_or_context") for r in sent)}/{len(sent)} (Navigator и источник/контекст — альтернативные источники опубликованных TR)',
+      f'Таймфрейм события неизвестен: {missing_tf}/{len(sent)} (контракт TF источника не доказывает TF события)',
       f"Контроль: {'; '.join(problems)}",'',
       'Proxy-благоприятный отказ не является доказанной ошибкой фильтра. Количество stage-решений не равно числу сделок.',
-      'Подтверждения модулей и семейства Master — разные измерения; неизвестный TF не приравнивается к D1/H4.',
+      'Подтверждения модулей, семейства Master и порог 5 семейств Killer — разные измерения; неизвестный TF не приравнивается к D1/H4.',
       'OBSERVE_ONLY: отчёт ничего автоматически не меняет в торговой логике, порогах, ЛОНГ/ШОРТ или Navigator.'
     ])
     try:

@@ -427,6 +427,27 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
 
 
 
+def _correlated_route_snapshot(active: dict, detail: str, observed_h1: str = "") -> dict:
+    """Frozen OBSERVE_ONLY evidence; never affects the lifecycle decision.
+
+    The lifecycle gate already decided the conflicting pair and puts its
+    identity into ``detail``. Do not reimplement its USD-correlation policy.
+    """
+    parts = str(detail or "").split()
+    other_pair = parts[0] if len(parts) == 2 else ""
+    other_side = parts[1] if len(parts) == 2 else ""
+    route = (active or {}).get(other_pair) if other_pair else None
+    if not isinstance(route, dict) or route.get("status") != "ACTIVE" or route.get("side") != other_side:
+        return {"status": "COUNTERPART_NOT_RESOLVED", "detail": str(detail or "")[:120],
+                "observed_h1_dt": observed_h1, "observe_only": True}
+    keys = ("status", "side", "start_h1", "last_h1", "created_at", "updated_at",
+            "anchor", "target", "reached_count")
+    return {"status": "CAPTURED", "pair": other_pair,
+            "active_route": {key: route[key] for key in keys if key in route
+                             and isinstance(route[key], (str, int, float, bool, type(None)))},
+            "observed_h1_dt": observed_h1, "observe_only": True}
+
+
 def assess_new_signal_significance(source_text: str, market: dict, strength: dict) -> dict:
     """Estimate whether a fresh module event has enough *remaining* trade value.
 
@@ -622,6 +643,11 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
             result["trade_lifecycle"] = life.describe()
             result["trade_lifecycle_status"] = life.status
             result["trade_lifecycle_reason"] = life.reason
+            if life.reason == "correlated_usd_exposure":
+                # Capture the conflicting ACTIVE route as it appeared when the
+                # gate rejected the candidate; never fetch it at replay time.
+                result["correlated_route_snapshot"] = _correlated_route_snapshot(
+                    active, life.detail, str(h1[-1].dt) if h1 else "")
             if not life.allow_new_entry:
                 result["eligible"] = False
                 result["reason"] = life.reason

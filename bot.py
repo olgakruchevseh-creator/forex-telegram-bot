@@ -2546,6 +2546,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 else:
                     try:
                         decision_journal.record_stage(source_text, market, strength, "BLOCKED",
+                            ctx=decision_journal.significance_observation_context(significance),
                             reason="final_significance_" + str(significance.get("reason") or "unknown"))
                     except Exception:
                         log.exception("SIGNAL_GATE_AUDIT_SKIPPED")

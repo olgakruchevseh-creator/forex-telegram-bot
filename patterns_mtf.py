@@ -20,14 +20,7 @@ from analysis import closed_candles
 log = logging.getLogger("fxbot.patterns_mtf")
 ORDER = ("W1", "D1", "H4", "H1", "M15", "M5")
 LTF = ("M15", "M5")
-DETECTORS = (
-    patterns.candlestick_patterns,
-    patterns.structural_patterns,
-    patterns.chart_patterns,
-    patterns.pattern_123,
-    patterns.harmonic_abcd,
-    patterns.harmonic_xabcd,
-)
+DETECTORS = patterns.DETECTORS
 # Cache stores *only* closed-data signatures and Pattern summaries, never OHLC arrays.
 _LTF_CACHE: OrderedDict[str, tuple[bytes, tuple[patterns.Pattern, ...]]] = OrderedDict()
 
@@ -71,7 +64,12 @@ def _latest_only(tf: str, bars, found) -> list[patterns.Pattern]:
     for p in found:
         if p.tf != tf or str(p.dt) != last_dt:
             continue
-        key = (p.name, p.side, p.geometry_id or p.dt, round(float(p.level), 8))
+        # Multiple harmonic classifications of the same D are alternatives,
+        # not independent HTF confirmations. Same-bar BOS + 1-2-3 similarly
+        # describe one closed breakout. Keep the strongest visible label.
+        group = patterns._delivery_group_key("", p)
+        key = ("shared_geometry", group) if group else (
+            p.name, p.side, p.geometry_id or p.dt, round(float(p.level), 8))
         if key not in unique or (p.quality, p.confidence) > (unique[key].quality, unique[key].confidence):
             unique[key] = p
     return sorted(unique.values(), key=lambda p: (-p.quality, -p.confidence, p.name, p.side))

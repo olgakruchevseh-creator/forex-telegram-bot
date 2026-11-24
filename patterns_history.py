@@ -32,14 +32,7 @@ MAX_ARCHIVED_H1 = 12_000
 # Forex intraday observation: do not jump across missing sessions or multi-hour
 # data gaps while pretending that subsequent candles immediately followed entry.
 MAX_H1_CONTINUITY_GAP = timedelta(hours=4)
-DETECTORS = (
-    patterns.candlestick_patterns,
-    patterns.structural_patterns,
-    patterns.chart_patterns,
-    patterns.pattern_123,
-    patterns.harmonic_abcd,
-    patterns.harmonic_xabcd,
-)
+DETECTORS = patterns.DETECTORS
 
 
 @dataclass(frozen=True)

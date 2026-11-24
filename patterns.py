@@ -64,6 +64,24 @@ def _pattern_key(symbol: str, pattern: Pattern) -> str:
     return f"{symbol}|{pattern.tf}|{pattern.name}|{pattern.side}|{anchor}"
 
 
+def _delivery_group_key(symbol: str, pattern: Pattern) -> str:
+    """One published card per overlapping structure or harmonic D anchor.
+
+    The raw geometric observations remain distinct in history and MTF.
+    Grouping affects only outbound Telegram cards, not Master/Killer gates.
+    """
+    if pattern.name.startswith("Гармонический"):
+        # The scanner writes identical D timestamp + price for all competing
+        # XABCD / AB=CD classifications; their family prefixes may differ.
+        d_anchor = pattern.geometry_id.partition(":")[2] if pattern.geometry_id else ""
+        if not d_anchor:
+            d_anchor = f"{pattern.dt}:{pattern.level:.8f}"
+        return f"GROUP|{symbol}|{pattern.tf}|{pattern.side}|harmonic_d|{d_anchor}"
+    if pattern.name in {"Паттерн 1-2-3", "BOS вверх", "BOS вниз"}:
+        return f"GROUP|{symbol}|{pattern.tf}|{pattern.side}|bos_123|{pattern.dt}"
+    return ""
+
+
 def _path() -> Path:
     root = os.getenv("STATE_DIR", "").strip()
     return (Path(root) if root else Path(__file__).resolve().parent) / "patterns_state.json"
@@ -529,8 +547,13 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
     if len(piv) < 3 or len(bars) < 3:
         return {"state": "NONE"}
     p1, p2, p3 = piv[-3:]
-    if p3[0] < len(bars) - (n + 6):
-        return {"state": "NONE"}
+    # Preserve the historical per-TF limit by default; unlike a magic n+6,
+    # its meaning is now explicit. Enlarging this window is a *trading-policy*
+    # change and requires historical evaluation before enabling.
+    maximum_age = int(getattr(cfg, "PATTERN_123_MAX_BARS_AFTER_P3", {}).get(tf, n + 5))
+    if len(bars) - 1 - p3[0] > max(0, maximum_age):
+        return {"state": "EXPIRED", "reason": "setup_window_elapsed",
+                "p3_age_bars": len(bars) - 1 - p3[0]}
 
     av = atr(bars, int(getattr(cfg, "PATTERN_123_ATR_LENGTH", 14))) or _range(bars[-1])
     leg = abs(p2[1] - p1[1])
@@ -575,7 +598,14 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
     if first_break_i is None:
         return {"state": "STRUCTURE_ARMED", **base}
     if first_break_i == len(bars) - 1:
-        return {"state": "CONFIRMED", "confirmation_index": first_break_i, **base}
+        # A first close beyond P2 with an opposing candle body is real price
+        # movement, but our trade policy requires a directional body. Record
+        # the conflict explicitly rather than silently losing its reason.
+        first = bars[first_break_i]
+        body_aligned = (_bull(first) if side == "LONG" else _bear(first))
+        return {"state": "CONFIRMED" if body_aligned else "BODY_CONFLICT",
+                "reason": "" if body_aligned else "first_break_opposing_body",
+                "confirmation_index": first_break_i, **base}
 
     later = bars[first_break_i + 1:]
     touched = any(c.low <= trigger + pocket and c.high >= trigger - pocket for c in later)
@@ -594,10 +624,8 @@ def pattern_123(tf: str, bars: list[Candle]) -> list[Pattern]:
         return out
     last = bars[-1]
     side = str(life["side"])
-    if side == "LONG" and not _bull(last):
-        return out
-    if side == "SHORT" and not _bear(last):
-        return out
+    # The lifecycle checks the directional body and explicitly records
+    # BODY_CONFLICT in observed state; never issue it as a trading signal.
     leg_atr = float(life.get("leg_atr", 0.0))
     retrace = float(life.get("retrace", 0.0))
     q = min(92, 84 + int(min(4.0, max(0.0, leg_atr - .65) * 2.0)))
@@ -640,10 +668,14 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     if min(xa, ab, bc, cd) <= 0:
         return out
     xc = abs(c[1] - x[1]) / xa
-    ratios = {"xb": ab/xa, "ac": bc/ab, "bd": cd/bc,
+    # Legacy ratio aliases: bd and cd both denote CD/BC, but separate
+    # configured harmonic families consume different names. Not independent
+    # measurements and never counted twice as confirmation evidence.
+    bc_extension = cd / bc
+    ratios = {"xb": ab/xa, "ac": bc/ab, "bd": bc_extension,
               # XD is measured from X to D relative to XA.  The previous A→D
               # numerator was dimensionally plausible but geometrically wrong.
-              "xd": abs(d[1]-x[1])/xa, "cd": cd/bc,
+              "xd": abs(d[1]-x[1])/xa, "cd": bc_extension,
               # Сайфер: C относительно XA, D относительно XC.
               "xc": xc, "dxc": cd / max(abs(c[1]-x[1]), 1e-12),
               # Акула: расширение AB относительно XA в разметке 0-X-A-B-C.
@@ -672,8 +704,13 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
             ratio_q = sum(_ratio_quality(local_ratios[name], limits, tol) for name, limits in rules.items()) / len(rules)
             geometry_bonus = int(round(ratio_q * 5))
             old_count = len(out)
+            # Observable post-D age and excursion, not a new trading gate.
+            d_age = len(bars) - 1 - d[0]
+            reaction_atr = abs(last.close - d[1]) / max(atr(bars, 14) or _range(last), 1e-12)
             _add(out, f"Гармонический паттерн {label}", side, tf, 84+geometry_bonus, 79+geometry_bonus,
-                 f"Завершена зеркальная структура XABCD ({details}); закрытая свеча подтвердила реакцию от точки D.",
+                 f"Завершена зеркальная структура XABCD ({details}); закрытая свеча подтвердила реакцию от точки D. "
+                 f"С момента D: {d_age} закрытых свечей; расстояние от D: {reaction_atr:.2f} ATR "
+                 "(наблюдение, не допуск к сделке).",
                  d[1], last)
             if len(out) > old_count:
                 out[-1].geometry_id = f"XABCD:{bars[d[0]].dt}:{d[1]:.8f}" if 0 <= d[0] < len(bars) else ""
@@ -694,7 +731,7 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
         return out
     ratio_bc, ratio_cd = bc/ab, cd/ab
     bc_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("bc", (.382, .886))
-    cd_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("cd_ab", (1.0, 1.68))
+    cd_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("cd_ab", (.88, 1.12))
     tol = float(getattr(cfg, "FIB_TOL", .06))
     # AB=CD is an equality-of-legs pattern, not a generic 1.0–1.68 extension.
     # Fib tolerance applies to BC/retracements, but must not relax this core
@@ -704,22 +741,32 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     time_sym = (min(time_ab, time_cd)/max(time_ab, time_cd)
                 if min(time_ab, time_cd) > 0 else 0.0)
     min_time_sym = max(0.0, min(1.0, float(getattr(cfg, "ABCD_TIME_SYM", .45))))
-    if (_inside(ratio_bc, bc_limits, tol) and _inside(ratio_cd, cd_limits, tol)
-            and abs(ratio_cd - 1.0) <= price_sym_tol and time_sym >= min_time_sym):
+    # A legitimate completion must extend beyond the B endpoint. Otherwise
+    # a shallow C followed by a near-equal CD can produce a double bottom/top,
+    # not the classic AB=CD completion, despite CD/AB near 1.
+    d_beyond_b = ((d[1] < b[1] - ab * 1e-9) if d[2] == "L"
+                  else (d[1] > b[1] + ab * 1e-9))
+    if (_inside(ratio_bc, bc_limits, tol) and _inside(ratio_cd, cd_limits, 0.0)
+            and abs(ratio_cd - 1.0) <= price_sym_tol and time_sym >= min_time_sym
+            and d_beyond_b):
         side = "LONG" if d[2] == "L" else "SHORT"
         last = bars[-1]
         # Это только первичное подтверждение геометрии. Перед отправкой
         # harmonic_confirmation() дополнительно проверит закрытый H1 и силу.
         confirmed = last.close > last.open if side == "LONG" else last.close < last.open
         if confirmed:
-            ratio_q = (_ratio_quality(ratio_bc, bc_limits, tol) + _ratio_quality(ratio_cd, cd_limits, tol)) / 2.0
+            ratio_q = (_ratio_quality(ratio_bc, bc_limits, tol) + _ratio_quality(ratio_cd, cd_limits, 0.0)) / 2.0
             # Both price and time symmetries already passed hard validation.
             geometry = int(round(ratio_q*5 + time_sym*3))
             q = min(92, 82 + geometry)
             old_count = len(out)
+            d_age = len(bars) - 1 - d[0]
+            reaction_atr = abs(last.close - d[1]) / max(atr(bars, 14) or _range(last), 1e-12)
             _add(out, "Гармонический AB=CD", side, tf, q, min(90, 78+geometry),
                  f"Геометрия AB=CD: BC/AB={ratio_bc:.2f}, CD/AB={ratio_cd:.2f}, симметрия по времени={time_sym:.2f}; "
-                 "на последней закрытой свече обнаружена направленная реакция (не доказательство разворота тренда).",
+                 "на последней закрытой свече обнаружена направленная реакция (не доказательство разворота тренда). "
+                 f"С момента D: {d_age} закрытых свечей; расстояние от D: {reaction_atr:.2f} ATR "
+                 "(наблюдение, не допуск к сделке).",
                  d[1], last)
             if len(out) > old_count:
                 out[-1].geometry_id = f"ABCD:{bars[d[0]].dt}:{d[1]:.8f}" if 0 <= d[0] < len(bars) else ""
@@ -788,6 +835,12 @@ def pattern_123_states(by_tf: dict) -> list[dict]:
     return states
 
 
+# Single detection roster shared by the production scanner, the MTF observer
+# and historical replay; their independent filtering remains unchanged.
+DETECTORS = (candlestick_patterns, structural_patterns, chart_patterns,
+             pattern_123, harmonic_abcd, harmonic_xabcd)
+
+
 def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
     found = []
     for tf in cfg.PATTERN_MAIN_TFS:
@@ -797,12 +850,11 @@ def scan_symbol(symbol: str, by_tf: dict) -> list[Pattern]:
         if not _validated_ohlc(bars):
             log.warning("PATTERNS_OHLC_INVALID tf=%s phase=scan", tf)
             continue
-        found.extend(candlestick_patterns(tf, bars))
-        found.extend(structural_patterns(tf, bars))
-        found.extend(chart_patterns(tf, bars))
-        found.extend(pattern_123(tf, bars))
-        found.extend(harmonic_abcd(tf, bars))
-        found.extend(harmonic_xabcd(tf, bars))
+        for detector in DETECTORS:
+            # Resolve the current named function so test/mocking and dynamic
+            # detector replacement continue working with the shared roster.
+            active = globals().get(detector.__name__, detector)
+            found.extend(active(tf, bars))
     return sorted(found, key=lambda p: (p.quality, p.confidence), reverse=True)
 
 
@@ -1017,12 +1069,74 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
     ])
 
 
+def _chart_geometry_anchors(pattern: Pattern, bars: list[Candle]) -> list[tuple[int, float, str]]:
+    """Rebuild the detected geometry on the original closed-candle prefix.
+
+    The chart must not silently substitute the last 55 bars of unrelated
+    highs/lows for the A-B-C-D or P1-P2-P3 that the detector actually used.
+    """
+    if not bars:
+        return []
+    n = cfg.PATTERN_PIVOT.get(pattern.tf, 3)
+    piv = _alternating_pivots(_pivots(bars, n))
+    if pattern.name == "Паттерн 1-2-3":
+        if len(piv) < 3:
+            return []
+        life = pattern_123_lifecycle(pattern.tf, bars)
+        if life.get("state") not in {"CONFIRMED", "CONFIRMED_PRIOR", "RETEST_POCKET", "RETEST_RECLAIM"}:
+            return []
+        if abs(float(life.get("trigger", 0)) - float(pattern.level)) > max(1e-8, abs(pattern.level) * 1e-7):
+            return []
+        return [(i, value, name) for name, (i, value, _kind) in
+                zip(("P1", "P2", "P3"), piv[-3:])]
+    if pattern.name.startswith("Гармонический"):
+        count = 4 if pattern.name == "Гармонический AB=CD" else 5
+        if len(piv) < count:
+            return []
+        chosen = piv[-count:]
+        di, dp, _ = chosen[-1]
+        if not (0 <= di < len(bars)):
+            return []
+        if abs(dp - float(pattern.level)) > max(1e-8, abs(pattern.level) * 1e-7):
+            return []
+        if pattern.geometry_id:
+            expected = f"{bars[di].dt}:{dp:.8f}"
+            if pattern.geometry_id.partition(":")[2] != expected:
+                return []
+        names = ("A", "B", "C", "D") if count == 4 else ("X", "A", "B", "C", "D")
+        return [(i, value, name) for name, (i, value, _kind) in zip(names, chosen)]
+    return []
+
+
+def _chart_status_label(pattern: Pattern) -> str:
+    """Do not describe harmonic reactions or single candle shapes as BOS."""
+    if pattern.name.startswith("Гармонический"):
+        return "РЕАКЦИЯ У ТОЧКИ D"
+    if pattern.name in CANDLE_PATTERN_NAMES:
+        return "ЗАКРЫТАЯ СВЕЧНАЯ ФИГУРА"
+    return "ПОДТВЕРЖДЁННАЯ СТРУКТУРА"
+
+
 def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.BytesIO:
-    """PNG с закрытыми свечами, опорными экстремумами и точкой подтверждения."""
+    """PNG with the actual formation anchors from the detector's OHLC prefix."""
     from PIL import Image, ImageDraw, ImageFont
 
-    bars = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
-    bars = bars[-max(30, int(getattr(cfg, "PATTERN_CHART_LOOKBACK", 55))):]
+    all_bars = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
+    # If delivery is delayed, freeze the geometry at its *original* close.
+    confirmation_i = next((i for i in range(len(all_bars) - 1, -1, -1)
+                           if str(all_bars[i].dt) == str(pattern.dt)), None)
+    if confirmation_i is not None:
+        all_bars = all_bars[:confirmation_i + 1]
+    scan_length = max(30, int(cfg.PATTERN_LOOKBACK.get(pattern.tf, 160)))
+    scan = all_bars[-scan_length:]
+    anchors = _chart_geometry_anchors(pattern, scan)
+    anchors = [(i + len(all_bars) - len(scan), price, label)
+               for i, price, label in anchors]
+    default_window = max(30, int(getattr(cfg, "PATTERN_CHART_LOOKBACK", 55)))
+    needed = (len(all_bars) - min(i for i, _, _ in anchors) + 5) if anchors else 0
+    bars = all_bars[-max(default_window, needed):]
+    visible_from = len(all_bars) - len(bars)
+
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#10131d")
     draw = ImageDraw.Draw(image, "RGBA")
@@ -1033,59 +1147,75 @@ def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.Bytes
         font, small = ImageFont.load_default(size=23), ImageFont.load_default(size=17)
     left, right, top, bottom = 72, 1135, 92, 610
     values = [value for bar in bars for value in (bar.low, bar.high)] + [pattern.level]
-    pmin, pmax = min(values), max(values)
-    pad = max((pmax-pmin)*.08, abs(pattern.level)*.0001)
-    pmin, pmax = pmin-pad, pmax+pad
+    pmin, pmax = (min(values), max(values)) if values else (pattern.level * .99, pattern.level * 1.01)
+    pad = max((pmax - pmin) * .08, abs(pattern.level) * .0001)
+    pmin, pmax = pmin - pad, pmax + pad
+
     def x_at(index: float) -> float:
-        return left + index/max(1, len(bars)-1)*(right-left)
+        return left + index / max(1, len(bars) - 1) * (right - left)
+
     def y_at(price: float) -> float:
-        return bottom-(price-pmin)/max(1e-12, pmax-pmin)*(bottom-top)
+        return bottom - (price - pmin) / max(1e-12, pmax - pmin) * (bottom - top)
+
     for index in range(6):
-        y = top+index*(bottom-top)/5
+        y = top + index * (bottom - top) / 5
         draw.line((left, y, right, y), fill="#293040", width=1)
-    candle_w = max(4, int((right-left)/max(1, len(bars))*.55))
+    if not bars:
+        draw.text((left + 80, 300), "НЕТ ЗАКРЫТЫХ OHLC ДЛЯ ИЗОБРАЖЕНИЯ", fill="#f1f5fb", font=font)
+    candle_w = max(3, int((right - left) / max(1, len(bars)) * .55))
     for index, bar in enumerate(bars):
         x = x_at(index)
         color = "#37d67a" if bar.close >= bar.open else "#ff5c6c"
         draw.line((x, y_at(bar.high), x, y_at(bar.low)), fill=color, width=2)
         y1, y2 = y_at(bar.open), y_at(bar.close)
-        draw.rectangle((x-candle_w/2, min(y1, y2), x+candle_w/2, max(y1, y2)+1), fill=color)
-    # Последние подтверждённые экстремумы дают наглядный контур фигуры.
-    pivots = _pivots(bars[:-1], max(2, cfg.PATTERN_PIVOT.get(pattern.tf, 3)))
-    for kind, color in (("H", "#62b0ff"), ("L", "#ffd44d")):
-        points = [(x_at(i), y_at(price)) for i, price, value_kind in pivots if value_kind == kind][-4:]
-        if len(points) >= 2:
-            draw.line(points, fill=color, width=4)
-            for x, y in points:
-                draw.ellipse((x-5, y-5, x+5, y+5), fill=color)
-    # Для 1-2-3 подписываем фактические P1/P2/P3 и показываем динамический Retest Pocket.
-    if pattern.name == "Паттерн 1-2-3":
-        life = pattern_123_lifecycle(pattern.tf, closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf]))
-        if life.get("state") in {"CONFIRMED", "CONFIRMED_PRIOR", "RETEST_POCKET", "RETEST_RECLAIM"}:
-            full = closed_candles(by_tf.get(pattern.tf) or [], TF_MINUTES[pattern.tf])
-            shown_start = max(0, len(full) - len(bars))
-            piv = _alternating_pivots(_pivots(full, cfg.PATTERN_PIVOT.get(pattern.tf, 3)))
-            if len(piv) >= 3:
-                for label, (idx, price, _kind) in zip(("P1", "P2", "P3"), piv[-3:]):
-                    local_i = idx - shown_start
-                    if 0 <= local_i < len(bars):
-                        px, py = x_at(local_i), y_at(price)
-                        draw.ellipse((px-8, py-8, px+8, py+8), fill="#ffffff")
-                        draw.text((px+10, py-25), label, fill="#ffffff", font=small)
-            low, high = life.get("retest_low"), life.get("retest_high")
-            if low is not None and high is not None:
-                y1, y2 = y_at(float(high)), y_at(float(low))
-                draw.rectangle((left, min(y1,y2), right, max(y1,y2)), fill="#7f8cff22", outline="#7f8cff99", width=2)
-                draw.text((left+8, min(y1,y2)+4), "ЗОНА РЕТЕСТА", fill="#d7dcff", font=small)
+        draw.rectangle((x - candle_w / 2, min(y1, y2), x + candle_w / 2,
+                        max(y1, y2) + 1), fill=color)
+
+    # Harmonics and 1-2-3: one connected real chronological path, not two
+    # unrelated upper/lower envelopes. Include all anchors even beyond 55 bars.
+    on_chart = [(x_at(i - visible_from), y_at(price), label) for i, price, label in anchors
+                if visible_from <= i < len(all_bars)]
+    if on_chart:
+        if len(on_chart) >= 2:
+            draw.line([(x, y) for x, y, _ in on_chart], fill="#a9a7ff", width=4)
+        for x, y, label in on_chart:
+            draw.ellipse((x-7, y-7, x+7, y+7), fill="#a9a7ff", outline="#ffffff", width=2)
+            draw.text((min(x+9, right-35), max(top, y-30)), label,
+                      fill="#ffffff", font=small)
+    elif not pattern.name.startswith("Гармонический") and pattern.name != "Паттерн 1-2-3":
+        # Non-harmonic geometric patterns can use upper/lower boundary envelopes.
+        pivots = _pivots(bars[:-1], max(2, cfg.PATTERN_PIVOT.get(pattern.tf, 3)))
+        for kind, color in (("H", "#62b0ff"), ("L", "#ffd44d")):
+            points = [(x_at(i), y_at(price)) for i, price, value_kind in pivots if value_kind == kind][-4:]
+            if len(points) >= 2:
+                draw.line(points, fill=color, width=4)
+                for x, y in points:
+                    draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=color)
+    else:
+        draw.text((left + 7, top + 8), "ОПОРЫ НЕ ВОССТАНОВЛЕНЫ", fill="#ffd44d", font=small)
+
+    if pattern.name == "Паттерн 1-2-3" and anchors:
+        life = pattern_123_lifecycle(pattern.tf, scan)
+        low, high = life.get("retest_low"), life.get("retest_high")
+        if low is not None and high is not None:
+            y1, y2 = y_at(float(high)), y_at(float(low))
+            draw.rectangle((left, min(y1, y2), right, max(y1, y2)),
+                           fill="#7f8cff22", outline="#7f8cff99", width=2)
+            draw.text((left + 8, min(y1, y2) + 4), "ЗОНА РЕТЕСТА", fill="#d7dcff", font=small)
+
     level_y = y_at(pattern.level)
     side_color = "#42e889" if pattern.side == "LONG" else "#ff6575"
     draw.line((left, level_y, right, level_y), fill=side_color, width=3)
-    bx, by = x_at(len(bars)-1), y_at(bars[-1].close)
-    draw.ellipse((bx-11, by-11, bx+11, by+11), fill=side_color, outline="#ffffff", width=2)
-    draw.text((max(left, bx-245), max(top, by-48)), "ПОДТВЕРЖДЁННЫЙ ПРОБОЙ", fill=side_color, font=small)
+    if bars:
+        bx, by = x_at(len(bars) - 1), y_at(bars[-1].close)
+        draw.ellipse((bx - 11, by - 11, bx + 11, by + 11), fill=side_color,
+                     outline="#ffffff", width=2)
+        draw.text((max(left, bx - 310), max(top, by - 48)),
+                  _chart_status_label(pattern), fill=side_color, font=small)
     icon = "LONG" if pattern.side == "LONG" else "SHORT"
     draw.text((left, 28), f"{symbol} · {pattern.tf} · {pattern.name}", fill="#f1f5fb", font=font)
-    draw.text((left, 650), f"{icon} · фигура подтверждена закрытой свечой", fill=side_color, font=small)
+    draw.text((left, 650), f"{icon} · фигура по закрытым свечам · не гарантия продолжения",
+              fill=side_color, font=small)
     out = io.BytesIO()
     out.name = f"pattern_{symbol.replace('/', '')}_{pattern.tf}_{pattern.dt.replace(':', '-')}.png"
     image.save(out, format="PNG", optimize=True)
@@ -1147,6 +1277,8 @@ def mark_card_delivered(text: str) -> None:
     item = (state.get("pending") or {}).pop(digest, None)
     if item:
         state.setdefault("sent", {})[item["key"]] = item.get("dt") or item["key"]
+        if item.get("group_key"):
+            state["sent"][item["group_key"]] = item.get("dt") or item["group_key"]
         _save(state)
     _PENDING_CARDS.pop(text, None)
     try:
@@ -1254,6 +1386,8 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 # Consumed means "do not re-open the same old geometry"; a
                 # stale card is not silently treated as a delivered trade.
                 sent[item["key"]] = item.get("dt") or item["key"]
+                if item.get("group_key"):
+                    sent[item["group_key"]] = item.get("dt") or item["group_key"]
                 expired_ledger[item["key"]] = {"reason": "expired_pending", "dt": item.get("dt"),
                                                "at": now_utc.isoformat()}
                 expired += 1
@@ -1262,6 +1396,8 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             continue
         messages.append(item["text"])
     pending_keys = {item.get("key") for item in pending.values() if isinstance(item, dict)}
+    pending_groups = {item.get("group_key") for item in pending.values()
+                      if isinstance(item, dict) and item.get("group_key")}
     strength = strength or {}
     try:
         pattern_events = newsmod.load_events()
@@ -1311,12 +1447,18 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             if first:
                 for p in candidates:
                     sent[_pattern_key(symbol, p)] = p.dt
+                    grouped = _delivery_group_key(symbol, p)
+                    if grouped:
+                        sent[grouped] = p.dt
                 continue
 
             news_note, penalty = _pattern_news_context(symbol, now_utc, pattern_events)
             for p in candidates:
                 key = _pattern_key(symbol, p)
-                if key in sent:
+                group_key = _delivery_group_key(symbol, p)
+                if key in sent or (group_key and group_key in sent):
+                    continue
+                if group_key and group_key in pending_groups:
                     continue
                 close_at = _pattern_close_dt(p)
                 if (close_at is None or close_at > now_utc or
@@ -1324,6 +1466,8 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     # The unified H1 gate would reject the stale event anyway;
                     # consume it here to prevent repeated work and log spam.
                     sent[key] = p.dt
+                    if group_key:
+                        sent[group_key] = p.dt
                     expired_ledger[key] = {"reason": "event_too_old_for_new_alert", "dt": p.dt,
                                            "at": now_utc.isoformat()}
                     old_events_skipped += 1
@@ -1343,6 +1487,8 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     # Mark the historical event as consumed: do not leak it later merely
                     # because current price changes. Geometry remains in observed state.
                     sent[key] = p.dt
+                    if group_key:
+                        sent[group_key] = p.dt
                     log.info("PATTERN_LATE_ENTRY_BLOCKED pair=%s tf=%s pattern=%s realized=%.2f remaining=%.2f atr=%.5f",
                              symbol, p.tf, p.name, float(residual.get("realized", 0)),
                              float(residual.get("remaining", 0)), float(residual.get("atr", 0)))
@@ -1356,8 +1502,11 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                 if digest not in pending:
                     pending[digest] = {"key": key, "dt": p.dt, "text": text,
+                                       "group_key": group_key,
                                        "created_at": now_utc.isoformat()}
                     pending_keys.add(key)
+                    if group_key:
+                        pending_groups.add(group_key)
                 messages.append(text)
                 frozen = freeze_by_tf(by_tf)
                 _PENDING_CARDS[text] = (symbol, p, frozen)

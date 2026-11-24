@@ -27,7 +27,7 @@ def test_h1_not_fresh_favorable_future_is_not_proved_fault(tmp_path, monkeypatch
         for x in rows
     ])
     txt = daily._report('2026-11-20')
-    assert 'ошибочные 2' in txt  # historical proxy label preserved
+    assert 'proxy-благоприятные 2' in txt  # observation, not proved filter fault
     assert 'запретов по возрасту/закрытию 1' in txt
     assert 'из proxy-благоприятных 1 — НЕ доказанные ошибки' in txt
     assert 'групп пара/сторона/модуль/H1 1' in txt

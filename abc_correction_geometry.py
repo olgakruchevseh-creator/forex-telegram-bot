@@ -60,7 +60,12 @@ def classify(start: float, a: float, b: float | None = None,
     kind = 'UNCLASSIFIED'
     label = 'ТИП ПОКА НЕ ОПРЕДЕЛЁН'
     if b_ratio is not None:
-        if b_ratio < 0.90:
+        # An almost absent B leg should not be called a conventional zigzag,
+        # even though the three swing directions are geometrically consistent.
+        # These bounds describe OBSERVE_ONLY shape, never a trade admission.
+        if b_ratio < 0.20:
+            kind, label = 'NONSTANDARD', 'НЕТИПИЧНО МАЛЫЙ ОТКАТ B'
+        elif b_ratio < 0.90:
             kind, label = 'ZIGZAG_LIKE', 'ЗИГЗАГ-ПОДОБНАЯ'
         elif b_ratio <= 1.05:
             kind, label = 'FLAT_LIKE', 'ФЛЭТ-ПОДОБНАЯ'
@@ -69,6 +74,8 @@ def classify(start: float, a: float, b: float | None = None,
         else:
             kind, label = 'NONSTANDARD', 'НЕСТАНДАРТНЫЙ ОТКАТ B'
     if c is not None and c_ratio is not None:
+        if c_ratio > 2.618 and kind != 'NONSTANDARD':
+            kind, label = 'NONSTANDARD', 'НЕТИПИЧНО ДЛИННАЯ ВОЛНА C'
         # An extended B with C failing to exceed the end of A is running-flat
         # *like*, not an established Elliott running flat (subwaves unknown).
         if kind == 'EXPANDED_FLAT_LIKE' and impulse_side * (clean[3] - clean[1]) > 0:
