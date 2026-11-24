@@ -75,6 +75,11 @@ MARKET_MAX_CLOSED_TF_AGE_MINUTES = {
 # payload, retry only the missing symbols instead of accepting an incomplete
 # basket and silencing the whole scan.
 MARKET_RETRY_MISSING_SYMBOLS = True
+# Live view drops O=H=L=C bars opening Friday 21:00 – Sunday 22:00 UTC.
+# They have no price information but shrink ATR(14) on Monday morning several
+# times. Raw vendor rows are still kept in the cache and the OHLC archive.
+# False = previous behaviour (every vendor bar enters the indicators).
+LIVE_DROP_FLAT_WEEKEND_BARS = True
 # Upper bound on how long a *previously fetched* series may be reused after an
 # API failure. Values are minutes since fetch, NOT the timestamp of its last bar.
 # Strictness is highest on H1/M15/M5, which control intraday entries.

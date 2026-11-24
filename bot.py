@@ -127,6 +127,36 @@ class MarketBasket(dict):
         # can outlive a candle's closing boundary; this lets the historical
         # journal reject a pre-close snapshot without changing live signals.
         self.request_started_by_series: dict[tuple[str, str], float] = {}
+        # Raw vendor series for (pair, tf) whose live view dropped flat
+        # weekend placeholders; the OHLC archive keeps storing the raw rows.
+        self.raw_by_series: dict[tuple[str, str], list] = {}
+        self.dropped_flat_weekend: dict[tuple[str, str], int] = {}
+
+
+def _closed_market_hour(dt_str) -> bool:
+    """Friday from 21:00 UTC to Sunday 22:00 UTC (covers both NY DST regimes).
+
+    Used ONLY together with O=H=L=C: a flat bar at the weekly edge is a
+    closed-market placeholder; a moving bar there is always kept.
+    """
+    try:
+        opened = datetime.fromisoformat(str(dt_str).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    opened = opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None else opened.astimezone(timezone.utc)
+    wd, hour = opened.weekday(), opened.hour
+    return (wd == 4 and hour >= 21) or wd == 5 or (wd == 6 and hour < 22)
+
+
+def drop_flat_weekend_bars(candles: list) -> list:
+    """Remove O=H=L=C bars that open in closed-market hours; keep everything else."""
+    out = []
+    for bar in candles or []:
+        if (_closed_market_hour(bar.dt)
+                and max(bar.open, bar.high, bar.low, bar.close) - min(bar.open, bar.high, bar.low, bar.close) <= 0):
+            continue
+        out.append(bar)
+    return out
 SENT_H1: set[str] = set()
 LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 # Serialize complete session briefing deliveries within each chat.
@@ -379,6 +409,19 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                     market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK"
                     hit = CACHE.get((s, tf["key"])) or {}
                     market.request_started_by_series[(s, tf["key"])] = hit.get("request_started_at", hit.get("ts"))
+    # Flat closed-market placeholders (Friday 21:00 – Sunday 22:00 UTC with
+    # O=H=L=C) carry no price information but enter ATR(14), EMA, ZigZag and
+    # bar counts: on Monday morning ATR would be several times too small and
+    # every ATR threshold hypersensitive. Drop them from the LIVE view only;
+    # the raw vendor series stays in CACHE and in the OHLC archive.
+    if getattr(cfg, "LIVE_DROP_FLAT_WEEKEND_BARS", True):
+        for s in list(market):
+            for tf_key, candles in list(market[s].items()):
+                kept = drop_flat_weekend_bars(candles)
+                if len(kept) != len(candles):
+                    market.raw_by_series[(s, tf_key)] = candles
+                    market.dropped_flat_weekend[(s, tf_key)] = len(candles) - len(kept)
+                    market[s][tf_key] = kept
     # Let the per-pair series carry its request times, so modules that only
     # receive ``by_tf`` (MTF pattern view, pattern-failure context) can apply
     # the same "closed after request start = provisional" rule.
@@ -720,6 +763,27 @@ async def cmd_ohlc_conflicts(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         log.exception("OHLC_CONFLICTS_COMMAND_FAILED pair=%s", raw)
         await update.message.reply_text("Диагностика отдельных H1 сейчас недоступна.")
+
+
+def _cached_market_snapshot() -> dict:
+    """Copy of the in-process candle cache as {pair: {tf: candles}}; no API calls."""
+    out: dict[str, dict] = {s: {} for s in cfg.PAIRS}
+    for (symbol, tf_key), hit in list(CACHE.items()):
+        if symbol in out:
+            out[symbol][tf_key] = list((hit or {}).get("candles") or [])
+    return out
+
+
+async def cmd_ohlc_timebase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Where do vendor H4/D1/W1 bars really start? Read-only, cache only."""
+    _remember_effective_chat(update)
+    try:
+        from ohlc_timebase_probe import format_report
+        report = await asyncio.to_thread(format_report, _cached_market_snapshot(), list(cfg.PAIRS))
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception:
+        log.exception("OHLC_TIMEBASE_COMMAND_FAILED")
+        await update.message.reply_text("Диагностика временной основы OHLC временно недоступна.")
 
 
 async def cmd_ohlc_triplet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1950,6 +2014,21 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("OHLC_JOURNAL_SAVE_FAILED")
         memory_scan_stage8.mark("ohlc_archive")
+        # Vendor D1/W1 time basis check from the SAME fetched candles, every
+        # 6h. OBSERVE_ONLY: logs whether "label = UTC open" holds for H4/D1/W1.
+        try:
+            if time.time() - getattr(_scan_job_impl, "_timebase_at", 0.0) >= 6 * 3600:
+                from ohlc_timebase_probe import probe_pair
+                summary = {}
+                for pair in cfg.PAIRS:
+                    r = probe_pair(market.get(pair) or {})
+                    summary[pair] = {tf: [r[tf].get("verdict"), r[tf].get("best_offsets_h"),
+                                          r[tf].get("match_ratio")] for tf in ("H4", "D1", "W1")}
+                    summary[pair]["weekend_h1"] = r["weekend_h1"]
+                log.info("OHLC_TIMEBASE_OBSERVE_ONLY %s", json.dumps(summary, ensure_ascii=False))
+                _scan_job_impl._timebase_at = time.time()
+        except Exception:
+            log.exception("OHLC_TIMEBASE_OBSERVE_UNAVAILABLE")
         # Closed-H1 Livermore Market Key: isolated OBSERVE_ONLY. Never veto signals.
         try:
             from livermore_observer import observe_market
@@ -3075,6 +3154,7 @@ def main() -> None:
     app.add_handler(CommandHandler("briefing_full", cmd_briefing))
     app.add_handler(CommandHandler("patterns_history", cmd_patterns_history))
     app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
+    app.add_handler(CommandHandler("ohlc_timebase", cmd_ohlc_timebase))
     app.add_handler(CommandHandler("ohlc_conflicts", cmd_ohlc_conflicts))
     app.add_handler(CommandHandler("ohlc_triplet", cmd_ohlc_triplet))
     app.add_handler(CommandHandler("ohlc_verify", cmd_ohlc_verify))

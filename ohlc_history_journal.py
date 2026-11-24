@@ -329,10 +329,14 @@ def capture_market(market: dict, *, db_path: Path | None = None,
     with closing(init_db(db_path or db_default())) as db:
         for pair in cfg.PAIRS:
             series = (market or {}).get(pair) or {}
+            raw_series = getattr(market, "raw_by_series", None)
+            raw_series = raw_series if isinstance(raw_series, dict) else {}
             for tf in timeframes:
                 if tf not in INTERVALS:
                     raise ValueError(f"неизвестный TF {tf}")
-                bars = series.get(tf) or []
+                # Archive the vendor rows exactly as received, including flat
+                # weekend placeholders the live view may have dropped.
+                bars = raw_series.get((pair, tf)) or series.get(tf) or []
                 if not bars:
                     stats["by_tf"][tf]["missing"] += 1
                     continue
