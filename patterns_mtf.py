@@ -67,7 +67,7 @@ def _latest_only(tf: str, bars, found) -> list[patterns.Pattern]:
         # Multiple harmonic classifications of the same D are alternatives,
         # not independent HTF confirmations. Same-bar BOS + 1-2-3 similarly
         # describe one closed breakout. Keep the strongest visible label.
-        group = patterns._delivery_group_key("", p)
+        group = patterns._shared_geometry_key(p)
         key = ("shared_geometry", group) if group else (
             p.name, p.side, p.geometry_id or p.dt, round(float(p.level), 8))
         if key not in unique or (p.quality, p.confidence) > (unique[key].quality, unique[key].confidence):
@@ -109,6 +109,9 @@ def observe(symbol: str, by_tf: dict) -> MTFObservation:
     process_market(), sent, pending or the H1 trading gate.
     """
     started = time.monotonic()
+    # Same finality rule as the live scanner: a bar that closed after the
+    # provider request started carries provisional OHLC and is not shown.
+    by_tf = patterns.final_by_tf(None, symbol, by_tf or {})
     _, htf_candidates, _, _ = patterns._cached_analysis(symbol, by_tf)
     ltf_candidates = _ltfs(symbol, by_tf)
     grouped = {}

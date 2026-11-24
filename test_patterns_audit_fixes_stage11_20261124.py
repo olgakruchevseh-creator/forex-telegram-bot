@@ -272,7 +272,7 @@ def test_htf_harmonic_freshness_follows_its_h1_confirmation(scanner, monkeypatch
     h1_bars = [Candle((last_open - timedelta(hours=i)).isoformat(), 1, 1.1, .9, 1) for i in range(4, -1, -1)]
     cards = scanner([h4], {"EUR/USD": {"H1": h1_bars}})
     assert [card_name(t) for t in cards] == ["Гармонический паттерн Гартли"]
-    assert "Подтверждение: закрытая H1" in cards[0]
+    assert "Подтверждение: H1, закрытие" in cards[0]
 
 
 # ------------------------------------ B9: briefing card uses live rules

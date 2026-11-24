@@ -19,6 +19,20 @@ class Candle:
     volume: float | None = None
 
 
+class SeriesByTF(dict):
+    """Ordinary ``{tf: [Candle, ...]}`` mapping of ONE pair plus provenance.
+
+    ``request_started_by_tf[tf]`` is the epoch when the provider request for
+    that series started. A bar whose close is later than that moment was
+    still forming when downloaded (see patterns.final_by_tf). Behaves exactly
+    like a dict for every existing consumer.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.request_started_by_tf: dict[str, float] = {}
+
+
 @dataclass
 class Swing:
     index: int

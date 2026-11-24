@@ -33,6 +33,9 @@ def test_plateau_returns_single_deterministic_high():
 
 def test_three_soldiers_refuses_gap_separated_bullish_bars():
     bars = candles(12, 1.0, 1.01, .99, 1.0)
+    # Soldiers are a reversal: a preceding decline into the first candle.
+    for k, close in zip(range(-8, -3), (1.10, 1.075, 1.05, 1.025, 1.00)):
+        bars[k] = Candle(bars[k].dt, close + .02, close + .025, close - .005, close)
     bars[-3] = Candle(bars[-3].dt, 1.00, 1.11, .99, 1.10)
     bars[-2] = Candle(bars[-2].dt, 1.12, 1.23, 1.11, 1.22)
     bars[-1] = Candle(bars[-1].dt, 1.24, 1.35, 1.23, 1.34)
@@ -44,6 +47,9 @@ def test_three_soldiers_refuses_gap_separated_bullish_bars():
 
 def test_three_crows_refuses_gap_separated_bearish_bars():
     bars = candles(12, 1.4, 1.41, 1.39, 1.40)
+    # Crows are a reversal: a preceding rally into the first candle.
+    for k, close in zip(range(-8, -3), (1.30, 1.325, 1.35, 1.375, 1.40)):
+        bars[k] = Candle(bars[k].dt, close - .02, close + .005, close - .025, close)
     bars[-3] = Candle(bars[-3].dt, 1.40, 1.41, 1.28, 1.29)
     bars[-2] = Candle(bars[-2].dt, 1.27, 1.28, 1.14, 1.15)
     bars[-1] = Candle(bars[-1].dt, 1.13, 1.14, .99, 1.00)

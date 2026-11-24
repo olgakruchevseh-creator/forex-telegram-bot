@@ -27,6 +27,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 import config as cfg
 from analysis import (
     Candle,
+    SeriesByTF,
     PairStack,
     bias_word,
     build_stack,
@@ -353,6 +354,14 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                     market.source_by_series[(s, tf["key"])] = "BOT_SCAN_IN_PROCESS_CACHE_FALLBACK"
                     hit = CACHE.get((s, tf["key"])) or {}
                     market.request_started_by_series[(s, tf["key"])] = hit.get("request_started_at", hit.get("ts"))
+    # Let the per-pair series carry its request times, so modules that only
+    # receive ``by_tf`` (MTF pattern view, pattern-failure context) can apply
+    # the same "closed after request start = provisional" rule.
+    for s in list(market):
+        series = SeriesByTF(market[s])
+        series.request_started_by_tf = {tf: t for (sym, tf), t in market.request_started_by_series.items()
+                                        if sym == s and t is not None}
+        market[s] = series
     return market
 
 

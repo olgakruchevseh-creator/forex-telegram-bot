@@ -36,6 +36,8 @@ def analyze_symbol(symbol, by_tf, direction):
     if not getattr(cfg,"PATTERN_FAILURE_CONTEXT_ENABLED",True): return None
     wanted=_side(direction)
     if not wanted:return None
+    # Bars that closed after the provider request started are provisional.
+    by_tf=patterns.final_by_tf(None,symbol,by_tf or {})
     lookback=int(getattr(cfg,"PATTERN_FAILURE_LOOKBACK_BARS",8))
     best=None
     per_tf={}  # strongest failure per timeframe; the old loop kept the LAST one

@@ -84,6 +84,21 @@ def _delivery_group_key(symbol: str, pattern: Pattern) -> str:
     return f"GROUP|{symbol}|{pattern.tf}|{pattern.side}|bar|{pattern.dt}"
 
 
+def _shared_geometry_key(pattern: Pattern) -> str:
+    """Observation-level grouping (MTF view), narrower than card grouping.
+
+    Alternatives that describe ONE geometric object collapse to one label:
+    competing harmonic classifications of the same D, and BOS + 1-2-3 on the
+    same close. Independent shapes on the same bar (engulfing, rectangle,
+    flag) stay visible as separate observations.
+    """
+    if pattern.name.startswith("Гармонический"):
+        return _delivery_group_key("", pattern)
+    if pattern.name.startswith("BOS") or pattern.name == "Паттерн 1-2-3":
+        return f"BREAKOUT|{pattern.tf}|{pattern.side}|{pattern.dt}"
+    return ""
+
+
 def _path() -> Path:
     root = os.getenv("STATE_DIR", "").strip()
     return (Path(root) if root else Path(__file__).resolve().parent) / "patterns_state.json"
@@ -228,13 +243,14 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
 
     body_sequence_ok = (_opens_within_previous_body(a, b)
                         and _opens_within_previous_body(b, c))
-    if (body_sequence_ok and all(_bull(x) for x in (a, b, c))
+    # Classical reversals (Nison): soldiers after a decline, crows after a rally.
+    if (fell_before and body_sequence_ok and all(_bull(x) for x in (a, b, c))
             and a.close < b.close < c.close
             and min(_body(x) / _range(x) for x in (a, b, c)) >= .55):
         add("Три белых солдата", "LONG", 86, 82,
             "Три сильные бычьи свечи: открытия внутри предыдущих тел, закрытия последовательно выше.",
             min(a.low, b.low, c.low), .8)
-    if (body_sequence_ok and all(_bear(x) for x in (a, b, c))
+    if (rose_before and body_sequence_ok and all(_bear(x) for x in (a, b, c))
             and a.close > b.close > c.close
             and min(_body(x) / _range(x) for x in (a, b, c)) >= .55):
         add("Три чёрные вороны", "SHORT", 86, 82,
@@ -263,10 +279,10 @@ def candlestick_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     if rose_before and _bull(b) and _bear(c) and abs(c.high - b.high) <= tol and _body(c) >= av * .25:
         add("Пинцет сверху", "SHORT", 76, 73, "Два близких максимума и медвежье закрытие показывают повторное отвержение верхней цены.", max(b.high, c.high), prior_move)
 
-    # Belt Hold.
-    if _bull(c) and _body(c) >= av * .75 and (c.open - c.low) <= _range(c) * .08:
+    # Belt Hold: a reversal candle, so it also needs a preceding opposite move.
+    if fell_before and _bull(c) and _body(c) >= av * .75 and (c.open - c.low) <= _range(c) * .08:
         add("Бычий Belt Hold", "LONG", 78, 75, "Сильная бычья свеча открылась у минимума и закрылась направленным импульсом.", c.low, .5)
-    if _bear(c) and _body(c) >= av * .75 and (c.high - c.open) <= _range(c) * .08:
+    if rose_before and _bear(c) and _body(c) >= av * .75 and (c.high - c.open) <= _range(c) * .08:
         add("Медвежий Belt Hold", "SHORT", 78, 75, "Сильная медвежья свеча открылась у максимума и закрылась направленным импульсом.", c.high, .5)
     return out
 
@@ -1472,12 +1488,26 @@ def _bar_close_epoch(bar: Candle, tf: str) -> float | None:
     return (opened + timedelta(minutes=TF_MINUTES[tf])).timestamp()
 
 
-def _request_started(market, symbol: str, tf: str) -> float | None:
+def _request_started(market, symbol: str, tf: str, by_tf=None) -> float | None:
+    """Provider request start for (symbol, tf).
+
+    Source 1: MarketBasket.request_started_by_series[(symbol, tf)].
+    Source 2: the per-pair series itself (bot.SeriesByTF.request_started_by_tf),
+    so modules that only receive ``by_tf`` (MTF view, failure context) apply
+    the same finality rule without new parameters.
+    """
+    raw = None
     times = getattr(market, "request_started_by_series", None)
-    if not isinstance(times, dict):
+    if isinstance(times, dict):
+        raw = times.get((symbol, tf))
+    if raw is None:
+        own = getattr(by_tf, "request_started_by_tf", None)
+        if isinstance(own, dict):
+            raw = own.get(tf)
+    if raw is None:
         return None
     try:
-        value = float(times.get((symbol, tf)))
+        value = float(raw)
     except (TypeError, ValueError, OverflowError):
         return None
     return value if math.isfinite(value) else None
@@ -1494,8 +1524,13 @@ def final_by_tf(market, symbol: str, by_tf: dict | None = None) -> dict:
     if by_tf is None:
         by_tf = (market or {}).get(symbol) or {}
     out = dict(by_tf)
+    own_times = getattr(by_tf, "request_started_by_tf", None)
+    if isinstance(own_times, dict):
+        from analysis import SeriesByTF
+        out = SeriesByTF(out)
+        out.request_started_by_tf = dict(own_times)
     for tf, bars in by_tf.items():
-        started = _request_started(market, symbol, tf) if tf in TF_MINUTES else None
+        started = _request_started(market, symbol, tf, by_tf) if tf in TF_MINUTES else None
         if started is None or not bars:
             continue
         kept = list(bars)
@@ -1525,10 +1560,44 @@ def _event_available_at(market, symbol: str, p: Pattern, by_tf: dict) -> datetim
             candidate = datetime.fromtimestamp(h1_close, timezone.utc)
             close_at = candidate if close_at is None else max(close_at, candidate)
             tf = "H1"
-    started = _request_started(market, symbol, tf)
+    started = _request_started(market, symbol, tf, by_tf)
     if close_at is not None and started is not None and started >= close_at.timestamp():
         close_at = max(close_at, datetime.fromtimestamp(started, timezone.utc))
     return close_at
+
+
+def _adjusted_candidates(symbol: str, by_tf: dict, candidates: list[Pattern]) -> list[Pattern]:
+    """OHLC-movement gate, candle context and the FINAL threshold re-check.
+
+    One implementation for the live scanner and the briefing image, so both
+    apply the same visibility rules.
+    """
+    adjusted = []
+    for p in candidates:
+        side_i = 1 if p.side == "LONG" else -1
+        gate = ohlc_movement.setup_adjustment(by_tf, side_i) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
+        if not gate.get("allow", True):
+            continue
+        candle_ctx = candle_context.analyze_symbol(symbol, by_tf, side_i, p.tf)
+        d = int(gate.get("quality_delta", 0)) + candle_context.score_delta(candle_ctx, side_i)
+        fact = p.fact
+        if p.name in CANDLE_PATTERN_NAMES:
+            fact += " " + candle_context.describe(candle_ctx) + "."
+        final = Pattern(p.name, p.side, p.tf, max(1, min(96, p.quality+d)),
+                        max(1, min(94, p.confidence+d)), fact, p.level, p.dt, p.geometry_id)
+        if not _passes_thresholds(final):
+            log.info("PATTERN_BELOW_MIN_AFTER_CONTEXT pair=%s tf=%s pattern=%s q=%d conf=%d",
+                     symbol, p.tf, p.name, final.quality, final.confidence)
+            continue
+        adjusted.append(final)
+    return sorted(adjusted, key=lambda p: (p.quality, p.confidence), reverse=True)
+
+
+def _h1_confirmation_close(by_tf: dict) -> datetime | None:
+    """Close time of the last closed H1 bar (the harmonic confirmation bar)."""
+    h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    epoch = _bar_close_epoch(h1[-1], "H1") if h1 else None
+    return datetime.fromtimestamp(epoch, timezone.utc) if epoch is not None else None
 
 
 def process_market(market: dict, strength: dict[str, float] | None = None) -> list[str]:
@@ -1572,6 +1641,10 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     pending_keys = {item.get("key") for item in pending.values() if isinstance(item, dict)}
     pending_groups = {item.get("group_key") for item in pending.values()
                       if isinstance(item, dict) and item.get("group_key")}
+    # One card per pair: while a card of this pair is still PENDING (being
+    # re-offered every scan), no second, new card of the same pair is issued.
+    pending_symbols = {str(item.get("key")).split("|", 1)[0] for item in pending.values()
+                       if isinstance(item, dict) and item.get("key")}
     strength = strength or {}
     try:
         pattern_events = newsmod.load_events()
@@ -1594,25 +1667,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             candidates = [p for p in candidates if _pattern_allowed(p, context_side)]
             # Единый OHLC слой не создаёт паттерн сам. Он лишь не даёт одной-двум
             # слабым контр-свечам превратить локальную реакцию в готовый разворот.
-            adjusted = []
-            for p in candidates:
-                side_i = 1 if p.side == "LONG" else -1
-                gate = ohlc_movement.setup_adjustment(by_tf, side_i) if getattr(cfg, "OHLC_MOVEMENT_FILTER_ENABLED", True) else {"allow": True, "quality_delta": 0}
-                if not gate.get("allow", True):
-                    continue
-                candle_ctx = candle_context.analyze_symbol(symbol, by_tf, side_i, p.tf)
-                d = int(gate.get("quality_delta", 0)) + candle_context.score_delta(candle_ctx, side_i)
-                fact = p.fact
-                if p.name in CANDLE_PATTERN_NAMES:
-                    fact += " " + candle_context.describe(candle_ctx) + "."
-                final = Pattern(p.name, p.side, p.tf, max(1,min(96,p.quality+d)),
-                                max(1,min(94,p.confidence+d)), fact, p.level, p.dt, p.geometry_id)
-                if not _passes_thresholds(final):
-                    log.info("PATTERN_BELOW_MIN_AFTER_CONTEXT pair=%s tf=%s pattern=%s q=%d conf=%d",
-                             symbol, p.tf, p.name, final.quality, final.confidence)
-                    continue
-                adjusted.append(final)
-            candidates = sorted(adjusted, key=lambda p: (p.quality, p.confidence), reverse=True)
+            candidates = _adjusted_candidates(symbol, by_tf, candidates)
             available_at = {_pattern_key(symbol, p): _event_available_at(market, symbol, p, by_tf)
                             for p in candidates}
 
@@ -1656,9 +1711,17 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     continue
                 if group_key and group_key in pending_groups:
                     continue
+                if symbol in pending_symbols:
+                    continue  # not consumed: it may still go out once the slot frees
                 close_at = available_at.get(key)
                 if (close_at is None or close_at > now_utc or
                         (now_utc - close_at).total_seconds() > _pending_ttl_seconds()):
+                    if p.name.startswith("Гармонический"):
+                        # Freshness of a harmonic belongs to its CONFIRMING H1,
+                        # not to D. A missed H1 window must not burn D: the next
+                        # closed H1 break (with strength) can confirm it anew.
+                        old_events_skipped += 1
+                        continue
                     # The unified H1 gate would reject the stale event anyway;
                     # consume it here to prevent repeated work and log spam.
                     sent[key] = p.dt
@@ -1699,8 +1762,10 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 if opposite:
                     extra.append("⚠️ Конфликт направлений по паре: " + "; ".join(
                         f"{q.tf} {q.name} {q.side}" for q in opposite[:3]))
-                if p.name.startswith("Гармонический") and close_at is not None:
-                    extra.append("Подтверждение: закрытая H1 до " + close_at.astimezone(
+                h1_close = _h1_confirmation_close(by_tf) if p.name.startswith("Гармонический") else None
+                if h1_close is not None:
+                    # The H1 bar's own close, not the provider fetch time.
+                    extra.append("Подтверждение: H1, закрытие " + h1_close.astimezone(
                         __import__("zoneinfo").ZoneInfo("Europe/Amsterdam")).strftime("%H:%M"))
                 text = _fmt(symbol, p, context_side, news_note, by_tf, extra)
                 digest = hashlib.sha256(text.encode()).hexdigest()[:20]
@@ -1766,9 +1831,12 @@ def briefing_htf_card(symbol: str, by_tf: dict):
     context_side, candidates, _, _ = _cached_analysis(symbol, by_tf)
     # Same visibility rules as the live scanner: no counter-context candle
     # reactions, and no harmonic without its separate H1/strength confirmation.
+    # Harmonics stay out: their live confirmation needs the pair's currency
+    # strength, which the briefing image path does not receive.
     found = [p for p in candidates if p.tf in priority
              and _pattern_allowed(p, context_side)
              and not p.name.startswith("Гармонический")]
+    found = _adjusted_candidates(symbol, by_tf, found)
     if not found:
         return None
     found.sort(key=lambda p: (priority[p.tf], -p.quality, -p.confidence))
