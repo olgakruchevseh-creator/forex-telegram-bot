@@ -343,7 +343,7 @@ def _alternating_pivots(pivots: list[tuple[int, float, str]]) -> list[tuple[int,
 
 def _double_extreme(extremes: list[tuple[int, float]], opposite: list[tuple[int, float]],
                     sign: int, tol: float, min_sep: int, max_after: int,
-                    last_i: int) -> tuple | None:
+                    last_i: int, accept=None) -> tuple | None:
     """Find the two tops (sign=+1) or bottoms (sign=-1) of a double formation.
 
     Only the last two raw pivots used to be compared. A small lower-high
@@ -352,6 +352,14 @@ def _double_extreme(extremes: list[tuple[int, float]], opposite: list[tuple[int,
     The second top must dominate everything after it; minor pivots between
     the two tops that stay clearly below them are ignored. Mirror-symmetric:
     bottoms are handled as negated tops.
+
+    Stage 17: the caller's checks (depth, first neckline break) run INSIDE
+    the search via ``accept``. A small pair (the second top and a nearly equal
+    third top after a small dip) used to be returned first; it failed outside
+    (too shallow, or its small neckline was already broken before the third
+    top was confirmed), and the real formation (tops 1 and 2 around the deep
+    neckline) was never examined. A rejected candidate now moves the search to
+    the next older second top.
     """
     pts = [(i, sign * p) for i, p in extremes]
     for j in range(len(pts) - 1, 0, -1):
@@ -370,7 +378,10 @@ def _double_extreme(extremes: list[tuple[int, float]], opposite: list[tuple[int,
             if not between:
                 break
             neck_i, neck = min(between, key=lambda item: item[1])
-            return (f_i, sign * f_p), (s_i, sign * s_p), neck_i, sign * neck
+            found = (f_i, sign * f_p), (s_i, sign * s_p), neck_i, sign * neck
+            if accept is not None and not accept(*found):
+                break  # rejected M/W: try an older second top
+            return found
     return None
 
 
@@ -390,26 +401,28 @@ def structural_patterns(tf: str, bars: list[Candle]) -> list[Pattern]:
     # Double top/bottom: two comparable extrema separated in time, a real
     # trough/peak between them, and the FIRST close beyond the neckline since
     # that trough (not merely relative to the previous candle).
-    top = _double_extreme(highs, lows, +1, tol, min_sep, max_after, last_i)
+    def _top_ok(first, second, neck_i, neck) -> bool:
+        return (min(first[1], second[1]) - neck >= min_depth
+                and all(x.close >= neck for x in bars[neck_i + 1:-1]) and c.close < neck)
+
+    def _bottom_ok(first, second, neck_i, neck) -> bool:
+        return (neck - max(first[1], second[1]) >= min_depth
+                and all(x.close <= neck for x in bars[neck_i + 1:-1]) and c.close > neck)
+
+    top = _double_extreme(highs, lows, +1, tol, min_sep, max_after, last_i, _top_ok)
     if top:
         (f_i, f_p), (s_i, s_p), neck_i, neck = top
-        depth = min(f_p, s_p) - neck
-        first_break = all(x.close >= neck for x in bars[neck_i + 1:-1])
-        if depth >= min_depth and first_break and c.close < neck:
-            symmetry = max(0, 8 - int(abs(s_p - f_p) / max(tol, 1e-12) * 8))
-            _add(out, "Двойная вершина", "SHORT", tf, 82 + symmetry, 78 + symmetry,
-                 "Две сопоставимые вершины сформированы; последняя свеча впервые закрылась ниже линии шеи.",
-                 neck, c, f"DT:{bars[f_i].dt}:{bars[s_i].dt}")
-    bottom = _double_extreme(lows, highs, -1, tol, min_sep, max_after, last_i)
+        symmetry = max(0, 8 - int(abs(s_p - f_p) / max(tol, 1e-12) * 8))
+        _add(out, "Двойная вершина", "SHORT", tf, 82 + symmetry, 78 + symmetry,
+             "Две сопоставимые вершины сформированы; последняя свеча впервые закрылась ниже линии шеи.",
+             neck, c, f"DT:{bars[f_i].dt}:{bars[s_i].dt}")
+    bottom = _double_extreme(lows, highs, -1, tol, min_sep, max_after, last_i, _bottom_ok)
     if bottom:
         (f_i, f_p), (s_i, s_p), neck_i, neck = bottom
-        depth = neck - max(f_p, s_p)
-        first_break = all(x.close <= neck for x in bars[neck_i + 1:-1])
-        if depth >= min_depth and first_break and c.close > neck:
-            symmetry = max(0, 8 - int(abs(s_p - f_p) / max(tol, 1e-12) * 8))
-            _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry,
-                 "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.",
-                 neck, c, f"DB:{bars[f_i].dt}:{bars[s_i].dt}")
+        symmetry = max(0, 8 - int(abs(s_p - f_p) / max(tol, 1e-12) * 8))
+        _add(out, "Двойное дно", "LONG", tf, 82 + symmetry, 78 + symmetry,
+             "Два сопоставимых минимума сформированы; последняя свеча впервые закрылась выше линии шеи.",
+             neck, c, f"DB:{bars[f_i].dt}:{bars[s_i].dt}")
     # BOS is continuation of an already established HH/HL or LH/LL structure.
     # An opposite break is a possible MSS/CHoCH and is deliberately NOT emitted
     # here as an automatic reversal signal.  Wick-only probes never qualify:
@@ -720,6 +733,10 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
     # still the live structure while every later pivot stays inside it: highs
     # not above P2 and lows not below P3 (mirrored for SHORT).
     extra = max(0, int(getattr(cfg, "PATTERN_123_MAX_INNER_PIVOTS", 2)))
+    # Stage 17 option (default OFF): two inner pivots also need n bars each to
+    # confirm, so a window counted from P3 (7 H1) rarely survives them. When
+    # enabled, an older triple waits for the P2 break from its LAST inner pivot.
+    from_inner = bool(getattr(cfg, "PATTERN_123_WINDOW_FROM_LAST_INNER", False))
     rank = {"CONFIRMED": 2, "BODY_CONFLICT": 1}
     best = newest if newest.get("state") in rank else None
     # end is the index of P3; k = len(piv)-1-end inner pivots, 1 <= k <= extra.
@@ -734,7 +751,8 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
             contained = False
         if not contained:
             continue
-        life = _pattern_123_triple(tf, bars, n, p1, p2, p3)
+        anchor = inner[-1][0] if (inner and from_inner) else None
+        life = _pattern_123_triple(tf, bars, n, p1, p2, p3, window_anchor=anchor)
         # On the same close prefer a clean CONFIRMED, then the larger structure.
         if life.get("state") in rank and (best is None or
                 (rank[life["state"]], life.get("leg_atr", 0.0)) >
@@ -743,13 +761,15 @@ def pattern_123_lifecycle(tf: str, bars: list[Candle]) -> dict:
     return best or newest
 
 
-def _pattern_123_triple(tf: str, bars: list[Candle], n: int, p1, p2, p3) -> dict:
+def _pattern_123_triple(tf: str, bars: list[Candle], n: int, p1, p2, p3,
+                        window_anchor: int | None = None) -> dict:
     """Lifecycle of one explicit P1-P2-P3 triple (see pattern_123_lifecycle)."""
     # Preserve the historical per-TF limit by default; unlike a magic n+6,
     # its meaning is now explicit. Enlarging this window is a *trading-policy*
     # change and requires historical evaluation before enabling.
     maximum_age = max(0, int(getattr(cfg, "PATTERN_123_MAX_BARS_AFTER_P3", {}).get(tf, n + 5)))
-    p3_age = len(bars) - 1 - p3[0]
+    anchor_i = p3[0] if window_anchor is None else max(p3[0], int(window_anchor))
+    p3_age = len(bars) - 1 - anchor_i
 
     av = atr(bars, int(getattr(cfg, "PATTERN_123_ATR_LENGTH", 14))) or _range(bars[-1])
     leg = abs(p2[1] - p1[1])
@@ -800,10 +820,10 @@ def _pattern_123_triple(tf: str, bars: list[Candle], n: int, p1, p2, p3) -> dict
             return {"state": "EXPIRED", "reason": "setup_window_elapsed",
                     "p3_age_bars": p3_age, **base}
         return {"state": "STRUCTURE_ARMED", **base}
-    if first_break_i - p3[0] > maximum_age:
+    if first_break_i - anchor_i > maximum_age:
         # A P2 break that came after the allowed window is not a 1-2-3 signal.
         return {"state": "EXPIRED", "reason": "break_after_setup_window",
-                "p3_age_bars": first_break_i - p3[0], **base}
+                "p3_age_bars": first_break_i - anchor_i, **base}
     # After the breakout, a close beyond the protective P1 still cancels it.
     for c in bars[first_break_i + 1:]:
         if (side == "LONG" and c.close < p1[1] - invalid_buffer) or \

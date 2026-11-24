@@ -16,7 +16,7 @@ import logging
 log = logging.getLogger(__name__)
 
 from chart_snapshot import freeze_by_tf
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config as cfg
 from analysis import atr, closed_candles
@@ -110,10 +110,18 @@ def _pd(bars, lookback: int) -> str:
     return "DISCOUNT" if p<.5 else "PREMIUM"
 
 
+def _mday(d: datetime) -> datetime:
+    """Stage 17: Sunday-open bars belong to the new week (see market_hours.market_day)."""
+    if getattr(cfg, "WEEKLY_RHYTHM_SUNDAY_OPEN_NEW_WEEK", True):
+        import market_hours
+        return market_hours.market_day(d)
+    return d
+
+
 def _week_key(c):
     d=_dt(c.dt)
     if not d:return None
-    iso=d.isocalendar()
+    iso=_mday(d).isocalendar()
     return iso.year, iso.week
 
 
@@ -130,7 +138,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     if not current:return None
     wo=float(current[0].open); wh=max(float(c.high) for c in current); wl=min(float(c.low) for c in current)
     px=float(current[-1].close); width=max(wh-wl,1e-12); pos=max(0.0,min(1.0,(px-wl)/width))
-    iso=last_dt.isocalendar(); weekday=int(iso.weekday)
+    iso=_mday(last_dt).isocalendar(); weekday=int(iso.weekday)
     names=("ПН","ВТ","СР","ЧТ","ПТ","СБ","ВС")
 
     # Previous completed week gives a stable realization yardstick and external targets.
@@ -244,7 +252,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     if low_early: early_candidate="LOW"
     if high_early and (not early_candidate or high_early_atr>low_early_atr): early_candidate="HIGH"
     early_dt=low_dt if early_candidate=="LOW" else high_dt if early_candidate=="HIGH" else None
-    if early_dt: early_candidate_day=names[early_dt.isocalendar().weekday-1]
+    if early_dt: early_candidate_day=names[_mday(early_dt).isocalendar().weekday-1]
 
     # Candidate is retained internally.  Merely printing a fresh WH/WL is not an event.
     if low_age <= max_age and low_departed: candidate="LOW"
@@ -253,8 +261,8 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
 
     ext_dt=low_dt if candidate=="LOW" else high_dt if candidate=="HIGH" else None
     if ext_dt:
-        extreme_day=names[ext_dt.isocalendar().weekday-1]
-        ed=ext_dt.isocalendar().weekday
+        extreme_day=names[_mday(ext_dt).isocalendar().weekday-1]
+        ed=_mday(ext_dt).isocalendar().weekday
         if ed==1: rhythm_model="РАННИЙ_ЭКСТРЕМУМ_ВТОРНИК"
         elif ed==2: rhythm_model="РАЗВОРОТ_СЕРЕДИНЫ_НЕДЕЛИ"
         elif ed==3: rhythm_model="ПОЗДНИЙ_ЭКСТРЕМУМ_ЧЕТВЕРГ"
@@ -291,7 +299,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
     # never enough: require a close outside and then a closed-H4 reclaim. Two closes
     # outside mean acceptance, so the same move must not be mislabeled as a trap.
     weekly_trap=""; trap_quality=0; trap_side=0; acceptance_side=0
-    mt=[c for c in current if (_dt(c.dt) and _dt(c.dt).isocalendar().weekday in (1,2))]
+    mt=[c for c in current if (_dt(c.dt) and _mday(_dt(c.dt)).isocalendar().weekday in (1,2))]
     if mt and weekday>=2:
         mt_hi=max(float(c.high) for c in mt); mt_lo=min(float(c.low) for c in mt)
         tol=max(av,1e-12)*float(getattr(cfg,"WEEKLY_RHYTHM_TRAP_TOLERANCE_ATR",0.10))
@@ -331,7 +339,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
 
     # Monday Opening Range (MOR). Keep this separate from the Mon-Tue trap range:
     # MOR measures the first-day anchor; Mon-Tue lifecycle continues to detect traps.
-    monday=[c for c in current if (_dt(c.dt) and _dt(c.dt).isocalendar().weekday == 1)]
+    monday=[c for c in current if (_dt(c.dt) and _mday(_dt(c.dt)).isocalendar().weekday == 1)]
     monday_high=monday_low=monday_mid=None; monday_range_ratio=0.0
     monday_state="ФОРМИРУЕТСЯ" if weekday == 1 else "НЕТ_ДАННЫХ"
     monday_acceptance_side=0
@@ -342,7 +350,7 @@ def analyze_symbol(symbol: str, by_tf: dict, now_utc: datetime | None = None) ->
         monday_range_ratio=monday_range/max(baseline_range,1e-12)
         if weekday >= 2:
             tol=max(av,1e-12)*float(getattr(cfg,"WEEKLY_RHYTHM_MONDAY_TOLERANCE_ATR",0.10))
-            post=[c for c in current if (_dt(c.dt) and _dt(c.dt).isocalendar().weekday >= 2)]
+            post=[c for c in current if (_dt(c.dt) and _mday(_dt(c.dt)).isocalendar().weekday >= 2)]
             need=max(2,int(getattr(cfg,"WEEKLY_RHYTHM_MONDAY_ACCEPT_CLOSES",2)))
             up_run=dn_run=0
             for c in reversed(post):
@@ -539,7 +547,7 @@ def _market_week(by_tf: dict) -> str:
         if bars:
             date = _dt(getattr(bars[-1], "dt", ""))
             if date:
-                wk = date.isocalendar()
+                wk = _mday(date).isocalendar()
                 return f"{wk.year}-W{wk.week:02d}"
     return ""
 

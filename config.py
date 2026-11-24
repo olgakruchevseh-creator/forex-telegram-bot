@@ -80,6 +80,13 @@ MARKET_RETRY_MISSING_SYMBOLS = True
 # times. Raw vendor rows are still kept in the cache and the OHLC archive.
 # False = previous behaviour (every vendor bar enters the indicators).
 LIVE_DROP_FLAT_WEEKEND_BARS = True
+# Stage 17 (by real /ohlc_timebase data 24.11.2026): Twelve Data quotes Forex
+# through the weekend WITH price movement (80/249 H1, 58/200 D1 Sat/Sun).
+# Live view drops intraday bars ENTIRELY inside Fri 22:00 - Sun 21:00 UTC and
+# D1 labelled Saturday/Sunday; W1 unchanged; raw rows stay in cache/archive.
+# Closed-market minutes no longer age the last Friday bar (no weekend
+# "stale data" alerts). False = previous behaviour.
+LIVE_DROP_WEEKEND_BARS = True
 # Upper bound on how long a *previously fetched* series may be reused after an
 # API failure. Values are minutes since fetch, NOT the timestamp of its last bar.
 # Strictness is highest on H1/M15/M5, which control intraday entries.
@@ -675,6 +682,9 @@ PATTERN_123_MAX_BARS_AFTER_P3 = {"W1": 8, "D1": 8, "H4": 8, "H1": 7, "M15": 7, "
 # P2, lows not below P3; mirrored for SHORT) without replacing P1-P2-P3 by a
 # micro triple. 0 restores the old "last three pivots only" behaviour.
 PATTERN_123_MAX_INNER_PIVOTS = 2
+# Stage 17: count the wait for the P2 break from the LAST inner pivot instead
+# of P3 (older triples only). Default OFF: compare on history before enabling.
+PATTERN_123_WINDOW_FROM_LAST_INNER = False
 # Head & Shoulders geometry. ATR-normalized so the same rules work on W1/D1/H4/H1.
 PATTERN_HS_SHOULDER_TOL_ATR = 0.40
 # Minor pivots allowed after the right shoulder (inside the figure) before the
@@ -1160,6 +1170,9 @@ ICT_ROUTE_CONFLICT_PENALTY = 3
 
 # Weekly Rhythm — shared context only; never a standalone signal/KILLER family.
 WEEKLY_RHYTHM_ENABLED = True
+# Stage 17: the Sunday-open H4 (20:00 UTC) and later Sunday bars belong to the
+# NEW trading week and count as its Monday session. False = ISO weeks.
+WEEKLY_RHYTHM_SUNDAY_OPEN_NEW_WEEK = True
 WEEKLY_RHYTHM_EQ_BAND = 0.08
 WEEKLY_RHYTHM_H4_PD_LOOKBACK = 30
 WEEKLY_RHYTHM_D1_PD_LOOKBACK = 20

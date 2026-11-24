@@ -25,6 +25,7 @@ from telegram import Update, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import config as cfg
+import market_hours
 from analysis import (
     Candle,
     SeriesByTF,
@@ -131,6 +132,7 @@ class MarketBasket(dict):
         # weekend placeholders; the OHLC archive keeps storing the raw rows.
         self.raw_by_series: dict[tuple[str, str], list] = {}
         self.dropped_flat_weekend: dict[tuple[str, str], int] = {}
+        self.dropped_weekend: dict[tuple[str, str], int] = {}
 
 
 def _closed_market_hour(dt_str) -> bool:
@@ -421,6 +423,21 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
                 if len(kept) != len(candles):
                     market.raw_by_series[(s, tf_key)] = candles
                     market.dropped_flat_weekend[(s, tf_key)] = len(candles) - len(kept)
+                    market[s][tf_key] = kept
+    # Stage 17 (by real /ohlc_timebase data): Twelve Data quotes Forex through
+    # the weekend WITH price movement (80/249 H1, 58/200 D1 Sat/Sun, 0 flat), so
+    # the flat filter above removed nothing. Drop intraday bars entirely inside
+    # Fri 22:00 - Sun 21:00 UTC and D1 bars labelled Saturday/Sunday from the
+    # LIVE view: they shrink Monday ATR, create fake pivots, and make Sunday
+    # the "previous day" for PDH/PDL. W1 is unchanged. Raw rows stay in CACHE,
+    # in /ohlc_timebase and in the OHLC archive.
+    if getattr(cfg, "LIVE_DROP_WEEKEND_BARS", True):
+        for s in list(market):
+            for tf_key, candles in list(market[s].items()):
+                kept = market_hours.drop_weekend_bars(candles, tf_key)
+                if len(kept) != len(candles):
+                    market.raw_by_series.setdefault((s, tf_key), candles)
+                    market.dropped_weekend[(s, tf_key)] = len(candles) - len(kept)
                     market[s][tf_key] = kept
     # Let the per-pair series carry its request times, so modules that only
     # receive ``by_tf`` (MTF pattern view, pattern-failure context) can apply

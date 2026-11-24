@@ -168,8 +168,12 @@ def record_sent(text: str, market: dict, closed_h1_dt: str, *, source_text: str 
 def _future_bars(record: dict, bars: list[Candle]) -> list[Candle]:
     """Use only a contiguous prefix of full H1 after the frozen entry H1.
 
-    If hours are missing, we cannot know if targets or invalidation were hit
-    during the gap. Never jump forward and call later bars the next H1.
+    If trading hours are missing, we cannot know if targets or invalidation
+    were hit during the gap. Never jump forward and call later bars the next
+    H1. Stage 17: hours entirely inside the weekend closure (Fri 22:00 - Sun
+    21:00 UTC) are skipped, so a Friday-evening record matures on Sunday
+    evening / Monday bars instead of staying OPEN until it leaves the window.
+    Vendor weekend bars are never used as outcome bars.
     """
     entry = _parse_dt(record.get("entry_dt"))
     if entry is None or entry.minute or entry.second or entry.microsecond:
@@ -179,12 +183,20 @@ def _future_bars(record: dict, bars: list[Candle]) -> list[Candle]:
         opened = _parse_dt(bar.dt)
         if opened is not None and opened > entry:
             index[opened] = bar
+    import market_hours
+    skip_weekend = bool(getattr(cfg, "LIVE_DROP_WEEKEND_BARS", True))
     result = []
-    for hour in range(1, 9):
-        bar = index.get(entry + timedelta(hours=hour))
+    hour = entry
+    for _ in range(8 + market_hours.CLOSURE_HOURS + 1):
+        hour += timedelta(hours=1)
+        if skip_weekend and not market_hours.is_trading_h1(hour.isoformat()):
+            continue
+        bar = index.get(hour)
         if bar is None:
             break
         result.append(bar)
+        if len(result) == 8:
+            break
     return result
 
 

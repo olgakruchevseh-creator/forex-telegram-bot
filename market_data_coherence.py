@@ -100,6 +100,12 @@ def inspect(market: dict, as_of: datetime | None = None, required_tfs: tuple[str
                 history_stamps[pair] = tuple(opened_utc(c) for c in closed[-history_count:])
             closed_at = opened + timedelta(minutes=TF_MINUTES[tf])
             age = (as_of - closed_at).total_seconds() / 60.0
+            if getattr(cfg, 'LIVE_DROP_WEEKEND_BARS', True):
+                # Stage 17: the live view no longer carries vendor weekend
+                # quotes, so Friday's last bar is legitimately the newest one
+                # until Sunday reopening. Closed-market minutes do not age it.
+                import market_hours
+                age = market_hours.trading_age_minutes(closed_at, as_of)
             maximum = float(age_limits.get(tf, TF_MINUTES[tf] + 60))
             if not math.isfinite(maximum) or maximum <= 0:
                 reasons.append(f'{tf}: неверный лимит свежести')

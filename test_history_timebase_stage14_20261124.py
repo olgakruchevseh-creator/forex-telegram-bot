@@ -125,6 +125,7 @@ def test_filter_can_be_switched_off(monkeypatch):
     monkeypatch.setattr(cfg, "TIMEFRAMES", [{"key": "H1", "ttl_min": 1}])
     monkeypatch.setattr(cfg, "REQUEST_PAUSE_SEC", 0)
     monkeypatch.setattr(cfg, "LIVE_DROP_FLAT_WEEKEND_BARS", False)
+    monkeypatch.setattr(cfg, "LIVE_DROP_WEEKEND_BARS", False)
     monkeypatch.setattr(bot, "CACHE", {})
     monkeypatch.setattr(bot, "fetch_tf_batch", lambda tf, key: {"EUR/USD": list(raw)})
     assert bot.fetch_market("k")["EUR/USD"]["H1"] == raw

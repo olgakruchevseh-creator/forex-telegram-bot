@@ -29,13 +29,21 @@ def _src(texts):
         if any(x in s for x in marks):out.append(name)
     return out
 
+def _mday(d):
+    """Stage 17: Sunday-open bars count as Monday of the new trading week."""
+    if d is not None and getattr(cfg, "WEEKLY_RHYTHM_SUNDAY_OPEN_NEW_WEEK", True):
+        import market_hours
+        return market_hours.market_day(d)
+    return d
+
+
 def _monday_range(h1):
     if not h1:return None
     last=_dt(h1[-1].dt)
     if not last:return None
-    iso=last.isocalendar(); week=(iso.year,iso.week)
-    cur=[c for c in h1 if (_dt(c.dt) and (_dt(c.dt).isocalendar().year,_dt(c.dt).isocalendar().week)==week)]
-    mon=[c for c in cur if _dt(c.dt).isocalendar().weekday==1]
+    iso=_mday(last).isocalendar(); week=(iso.year,iso.week)
+    cur=[c for c in h1 if (_dt(c.dt) and (_mday(_dt(c.dt)).isocalendar().year,_mday(_dt(c.dt)).isocalendar().week)==week)]
+    mon=[c for c in cur if _mday(_dt(c.dt)).isocalendar().weekday==1]
     if len(mon)<4:return None
     return min(c.low for c in mon),max(c.high for c in mon),cur
 
@@ -45,7 +53,7 @@ def _monday_chain(by_tf, side):
     if not mr:return {'state':'NO_MONDAY_RANGE','steps':[]}
     lo,hi,cur=mr; av=atr(h1[-min(40,len(h1)):],14) if len(h1)>=15 else max(hi-lo,1e-9)
     buf=max(av,1e-9)*float(getattr(cfg,'LAYER15_MONDAY_SWEEP_ATR',0.05))
-    after=[c for c in cur if _dt(c.dt).isocalendar().weekday>=2]
+    after=[c for c in cur if _mday(_dt(c.dt)).isocalendar().weekday>=2]
     if not after:return {'state':'MONDAY_RANGE_READY','steps':['MONDAY_RANGE'] ,'monday_low':lo,'monday_high':hi}
     want=1 if side=='LONG' else -1
     sweep_i=None
