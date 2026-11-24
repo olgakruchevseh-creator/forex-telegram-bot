@@ -502,10 +502,22 @@ def cluster_tf(symbol: str, tf_key: str, candles: list[Candle], raw: list[dict])
     return clustered
 
 
-def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float], *, limit: int | None = MAX_ZONES_PAIR) -> list[Zone]:
+def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float], *, limit: int | None = MAX_ZONES_PAIR,
+                  ref_price: float | None = None) -> list[Zone]:
     if not items:
         return []
-    items = sorted(items, key=lambda x: (x["kind"], x["mid"]))
+    # Mirror-symmetric greedy clustering. The old order (kind, ascending mid)
+    # always anchored a pack on its LOWEST level, so supports and resistances
+    # were grouped differently and an inverted chart produced other zones.
+    # Anchor on the most senior / most tested level first; candidates join in
+    # order of distance to that anchor. Price direction no longer matters.
+    def _tf_rank(tf: str) -> int:
+        return TF_ORDER.index(tf) if tf in TF_ORDER else len(TF_ORDER)
+
+    centre = {kind: sum(x["mid"] for x in items if x["kind"] == kind) /
+              max(1, sum(1 for x in items if x["kind"] == kind)) for kind in {x["kind"] for x in items}}
+    items = sorted(items, key=lambda x: (x["kind"], _tf_rank(x["tf"]), -int(x.get("reactions", 1)),
+                                         -float(x.get("impulse", 0.0)), abs(x["mid"] - centre[x["kind"]])))
     used = [False] * len(items)
     zones: list[Zone] = []
     now = _now()
@@ -520,7 +532,8 @@ def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float], *, 
         h1_atr = atr_map.get("H1", 0.0)
         dynamic_cap = h1_atr * float(getattr(cfg, "LEVEL_MAX_ZONE_H1_ATR", 3.0)) if h1_atr > 0 else absolute_cap
         max_span = min(absolute_cap, dynamic_cap) if dynamic_cap > 0 else absolute_cap
-        for j in range(i + 1, len(items)):
+        for j in sorted(range(i + 1, len(items)),
+                        key=lambda k: (abs(items[k]["mid"] - a["mid"]), _tf_rank(items[k]["tf"]))):
             if used[j]:
                 continue
             b = items[j]
@@ -562,7 +575,11 @@ def merge_cluster(symbol: str, items: list[dict], atr_map: dict[str, float], *, 
                 sent_events=[],
             )
         )
-    zones.sort(key=lambda z: z.strength, reverse=True)
+    # Equal strength: the zone nearer the live price survives the cut (the old
+    # tie order was the scan order, i.e. direction-dependent).
+    ref = ref_price if ref_price is not None else (
+        sum(z.mid for z in zones) / len(zones) if zones else 0.0)
+    zones.sort(key=lambda z: (-z.strength, abs(z.mid - ref), -z.reactions))
     return zones[:limit] if limit is not None else zones
 
 
@@ -1290,7 +1307,7 @@ def build_pair_zones(symbol: str, by_tf: dict[str, list[Candle]]) -> tuple[list[
         if closed:
             last_map[tf] = closed[-1].dt
         raw_all.extend(cluster_tf(symbol, tf, closed, collect_raw_levels(symbol, tf, closed)))
-    zones = merge_cluster(symbol, raw_all, atr_map)
+    zones = merge_cluster(symbol, raw_all, atr_map, ref_price=live)
     return zones, closed_map, atr_map, live, last_map
 
 

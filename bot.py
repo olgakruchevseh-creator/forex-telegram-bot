@@ -302,6 +302,30 @@ def _cache_fallback(s: str, tf: dict, now: float) -> list[Candle]:
     return candles
 
 
+_TF_MINUTES_FOR_CACHE = {"W1": 10080, "D1": 1440, "H4": 240, "H1": 60, "M15": 15, "M5": 5}
+
+
+def _cache_outlived_bar_close(hit: dict, tf_key: str, now: float) -> bool:
+    """True when the cached series holds a bar that was still FORMING at
+    request time and has closed since (H4 cache 5 min, D1 15, W1 30).
+
+    Every module reuses this cache; without a refresh they would treat that
+    bar as closed with provisional High/Low/Close until the TTL expired.
+    """
+    candles = hit.get("candles") or []
+    minutes = _TF_MINUTES_FOR_CACHE.get(tf_key)
+    if not candles or not minutes:
+        return False
+    try:
+        started = float(hit.get("request_started_at", hit.get("ts")))
+        opened = datetime.fromisoformat(str(candles[-1].dt).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    opened = opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None else opened.astimezone(timezone.utc)
+    closes = (opened + timedelta(minutes=minutes)).timestamp()
+    return started < closes <= now
+
+
 def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[Candle]]]:
     """symbol -> {tf_key -> candles}. На платном плане — batch по каждому ТФ."""
     market: dict[str, dict[str, list[Candle]]] = MarketBasket({s: {} for s in cfg.PAIRS})
@@ -311,6 +335,7 @@ def fetch_market(api_key: str, force: bool = False) -> dict[str, dict[str, list[
             (s, tf["key"]) not in CACHE
             or now - CACHE[(s, tf["key"])]["ts"] >= tf["ttl_min"] * 60
             or not CACHE[(s, tf["key"])]["candles"]
+            or _cache_outlived_bar_close(CACHE[(s, tf["key"])], tf["key"], now)
             for s in cfg.PAIRS
         )
         if not stale:

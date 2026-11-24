@@ -417,6 +417,7 @@ def pending_reports(market: dict, events: list[newsmod.NewsEvent], state: dict) 
         gap = float(getattr(cfg, "ECHO_STRENGTH_MIN_GAP", 0.04))
         dxy_bias = 1 if usd >= gap else (-1 if usd <= -gap else 0)
     session_sides: dict[str, str] = {}
+    session_levels: dict[str, dict] = {}  # was undefined: NameError after the 1st pair
     try:
         briefs = briefing.build_pair_briefs(market, strength or {}, events, datetime.now(timezone.utc))
         for brief in briefs:

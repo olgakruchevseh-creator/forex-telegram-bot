@@ -314,8 +314,11 @@ def bias_of(structure: str, ph: str) -> int:
     # ZigZag label erase that confirmed phase direction.
     if "флэт" in ph or structure == "сужение / сжатие":
         return 0
+    # Mirror-symmetric: «коррекция в бычьем контексте» counts as up exactly as
+    # «коррекция в медвежьем контексте» counts as down (it used to be ignored,
+    # which gave every bearish correction a neutral 0 but a bullish one +1).
     up = "быч" in structure or structure in ("Higher High", "Higher Low") or "вверх" in ph or "бычь" in ph
-    down = "медвеж" in structure or structure in ("Lower High", "Lower Low") or "вниз" in ph
+    down = "медвеж" in structure or structure in ("Lower High", "Lower Low") or "вниз" in ph or "медвеж" in ph
     if up and not down:
         return 1
     if down and not up:

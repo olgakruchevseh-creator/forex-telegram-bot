@@ -1191,7 +1191,7 @@ def _residual_potential(pattern: Pattern, by_tf: dict) -> dict:
 
 
 def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", by_tf: dict | None = None,
-         extra_lines: list[str] | None = None) -> str:
+         extra_lines: list[str] | None = None, confirmation_close: datetime | None = None) -> str:
     price = f"{p.level:.3f}" if "JPY" in symbol else f"{p.level:.5f}"
     side_icon = "🟢" if p.side == "LONG" else "🔴"
     if p.name in CANDLE_PATTERN_NAMES and context_side and p.side != context_side:
@@ -1204,10 +1204,23 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
     else:
         advantage = "преимущество покупателей" if p.side == "LONG" else "преимущество продавцов"
         meaning = f"{advantage} после подтверждения закрытой свечой"
-    close_dt = _pattern_close_dt(p)
-    close_time = close_dt.astimezone(__import__("zoneinfo").ZoneInfo("Europe/Amsterdam")).strftime("%d.%m.%Y · %H:%M") if close_dt else ""
-    confirmation_close = _trigger_close(p, by_tf or {})
-    close_price = (f"{confirmation_close:.3f}" if "JPY" in symbol else f"{confirmation_close:.5f}") if confirmation_close else ""
+    ams = __import__("zoneinfo").ZoneInfo("Europe/Amsterdam")
+    figure_close = _pattern_close_dt(p)
+    figure_line = []
+    close_dt = figure_close
+    close_value = _trigger_close(p, by_tf or {})
+    if confirmation_close is not None and figure_close is not None and confirmation_close > figure_close:
+        # Harmonics: the EVENT is the confirming closed H1, not the older
+        # H4/D1/W1 bar of point D. «Время закрытия» is the event close that
+        # signal_contract / the unified H1 gate measure age from; otherwise a
+        # correct H1 confirmation 2 h after an H4 close was blocked as
+        # event_too_old (>90 min) and the HTF harmonic could never be sent.
+        close_dt = confirmation_close
+        h1 = closed_candles((by_tf or {}).get("H1") or [], TF_MINUTES["H1"])
+        close_value = float(h1[-1].close) if h1 else close_value
+        figure_line = [f"Свеча фигуры {p.tf} закрыта: {figure_close.astimezone(ams).strftime('%d.%m.%Y · %H:%M')}"]
+    close_time = close_dt.astimezone(ams).strftime("%d.%m.%Y · %H:%M") if close_dt else ""
+    close_price = (f"{close_value:.3f}" if "JPY" in symbol else f"{close_value:.5f}") if close_value else ""
     return "\n".join([
         # The header is a routing marker for bot.py / signal_contract.py:
         # keep it identical for every pattern kind.
@@ -1216,6 +1229,7 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
         f"Направление: {p.side} {side_icon}", f"Сходство фигуры: {p.quality}/100", f"Уверенность чертежа: {p.confidence}/100",
         *([f"🕐 Время закрытия: {close_time}"] if close_time else []),
         *([f"Цена закрытия: {close_price}"] if close_price else []),
+        *figure_line,
         f"Ключевой уровень: {price}",
         *( [f"Новости: {news_note}"] if news_note else [] ),
         "", f"Факт: {p.fact}", f"Что означает: {meaning}.",
@@ -1259,7 +1273,70 @@ def _chart_geometry_anchors(pattern: Pattern, bars: list[Candle]) -> list[tuple[
                 return []
         names = ("A", "B", "C", "D") if count == 4 else ("X", "A", "B", "C", "D")
         return [(i, value, name) for name, (i, value, _kind) in zip(names, chosen)]
+    if pattern.name in ("Голова и плечи", "Перевёрнутая голова и плечи") and pattern.geometry_id:
+        shoulder = next((k for k, (i, _v, _t) in enumerate(piv)
+                         if pattern.geometry_id.endswith(":" + str(bars[i].dt))), None)
+        if shoulder is None or shoulder < 4:
+            return []
+        five = piv[shoulder - 4:shoulder + 1]
+        if not pattern.geometry_id.startswith(("HS:", "IHS:") ) or \
+                f":{bars[five[2][0]].dt}:" not in pattern.geometry_id + ":":
+            return []
+        return [(i, value, name) for name, (i, value, _k) in
+                zip(("ЛП", "Ш1", "Г", "Ш2", "ПП"), five)]
+    if pattern.name in ("Двойная вершина", "Двойное дно") and pattern.geometry_id:
+        wanted = "H" if pattern.name == "Двойная вершина" else "L"
+        raw = _pivots(bars, n)
+        tops = [(i, value) for i, value, kind in raw if kind == wanted
+                and (":" + str(bars[i].dt)) in pattern.geometry_id]
+        if len(tops) != 2:
+            return []
+        neck_i = next((i for i in range(tops[0][0] + 1, tops[1][0])
+                       if abs((bars[i].low if wanted == "H" else bars[i].high) - pattern.level) <= 1e-12), None)
+        points = [(tops[0][0], tops[0][1], "1")]
+        if neck_i is not None:
+            points.append((neck_i, pattern.level, "шея"))
+        points.append((tops[1][0], tops[1][1], "2"))
+        return points
     return []
+
+
+CHART_FIGURE_NAMES = {
+    "Бычий прямоугольник", "Медвежий прямоугольник",
+    "Восходящий треугольник — пробой вверх", "Восходящий треугольник — пробой вниз",
+    "Нисходящий треугольник — пробой вниз", "Нисходящий треугольник — пробой вверх",
+    "Симметричный треугольник", "Падающий клин", "Восходящий клин",
+}
+
+
+def _chart_boundaries(pattern: Pattern, bars: list[Candle]) -> list[tuple[int, float, int, float]]:
+    """The two OLS boundaries chart_patterns() actually fitted, as segments.
+
+    Same history window, pivot parameters and fit as the detector, so the
+    picture shows the real triangle/wedge/rectangle lines instead of the last
+    four unrelated pivots of the visible window.
+    """
+    if pattern.name not in CHART_FIGURE_NAMES or len(bars) < 45:
+        return []
+    hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {}).get(pattern.tf, 42) or 42)
+    history = bars[-(hist_n + 1):-1] if len(bars) > hist_n + 1 else bars[:-1]
+    offset = len(bars) - 1 - len(history)
+    piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(pattern.tf, 3)),
+                  int(getattr(cfg, "PATTERN_CHART_PIVOT_LIMIT", 16)))
+    highs = [(i, price) for i, price, kind in piv if kind == "H"]
+    lows = [(i, price) for i, price, kind in piv if kind == "L"]
+    upper, lower = _line_fit(highs, len(history)), _line_fit(lows, len(history))
+    if not upper or not lower:
+        return []
+    if pattern.geometry_id and pattern.geometry_id != "CHART:" + str(
+            history[min(i for i, _ in highs[-5:] + lows[-5:])].dt):
+        return []  # not the geometry that was detected
+    start = min(i for i, _ in highs[-5:] + lows[-5:])
+    end = len(history)
+    out = []
+    for value, slope in ((upper[0], upper[1]), (lower[0], lower[1])):
+        out.append((start + offset, value - slope * (end - start), end + offset, value))
+    return out
 
 
 def _chart_status_label(pattern: Pattern) -> str:
@@ -1286,8 +1363,11 @@ def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.Bytes
     anchors = _chart_geometry_anchors(pattern, scan)
     anchors = [(i + len(all_bars) - len(scan), price, label)
                for i, price, label in anchors]
+    boundaries = [(i0 + len(all_bars) - len(scan), p0, i1 + len(all_bars) - len(scan), p1)
+                  for i0, p0, i1, p1 in _chart_boundaries(pattern, scan)]
     default_window = max(30, int(getattr(cfg, "PATTERN_CHART_LOOKBACK", 55)))
-    needed = (len(all_bars) - min(i for i, _, _ in anchors) + 5) if anchors else 0
+    first_anchor = min([i for i, _, _ in anchors] + [b[0] for b in boundaries], default=None)
+    needed = (len(all_bars) - first_anchor + 5) if first_anchor is not None else 0
     bars = all_bars[-max(default_window, needed):]
     visible_from = len(all_bars) - len(bars)
 
@@ -1335,19 +1415,24 @@ def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.Bytes
     if on_chart:
         if len(on_chart) >= 2:
             draw.line([(x, y) for x, y, _ in on_chart], fill="#a9a7ff", width=4)
+        if len(on_chart) == 5 and on_chart[1][2] == "Ш1" and bars:
+            # The sloping neckline the detector used: through Ш1 and Ш2 up to
+            # the confirming close, where it equals the card's key level.
+            draw.line((on_chart[1][0], on_chart[1][1], x_at(len(bars) - 1), y_at(pattern.level)),
+                      fill="#ffd44d", width=3)
         for x, y, label in on_chart:
             draw.ellipse((x-7, y-7, x+7, y+7), fill="#a9a7ff", outline="#ffffff", width=2)
             draw.text((min(x+9, right-35), max(top, y-30)), label,
                       fill="#ffffff", font=small)
-    elif not pattern.name.startswith("Гармонический") and pattern.name != "Паттерн 1-2-3":
-        # Non-harmonic geometric patterns can use upper/lower boundary envelopes.
-        pivots = _pivots(bars[:-1], max(2, cfg.PATTERN_PIVOT.get(pattern.tf, 3)))
-        for kind, color in (("H", "#62b0ff"), ("L", "#ffd44d")):
-            points = [(x_at(i), y_at(price)) for i, price, value_kind in pivots if value_kind == kind][-4:]
-            if len(points) >= 2:
-                draw.line(points, fill=color, width=4)
-                for x, y in points:
-                    draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=color)
+    elif boundaries:
+        # Triangles / wedges / rectangles: the two fitted boundaries themselves.
+        for (i0, p0, i1, p1), color in zip(boundaries, ("#62b0ff", "#ffd44d")):
+            if i0 >= visible_from:
+                draw.line((x_at(i0 - visible_from), y_at(p0), x_at(i1 - visible_from), y_at(p1)),
+                          fill=color, width=4)
+    elif pattern.name in CANDLE_PATTERN_NAMES or pattern.name.startswith(("BOS", "Бычий флаг", "Медвежий флаг",
+                                                                          "Бычий вымпел", "Медвежий вымпел")):
+        pass  # one closed candle / one level: the level line below is the geometry
     else:
         draw.text((left + 7, top + 8), "ОПОРЫ НЕ ВОССТАНОВЛЕНЫ", fill="#ffd44d", font=small)
 
@@ -1566,6 +1651,47 @@ def _event_available_at(market, symbol: str, p: Pattern, by_tf: dict) -> datetim
     return close_at
 
 
+def _availability_key(key: str, p: Pattern, by_tf: dict) -> str:
+    """Harmonic freshness belongs to its confirming H1 bar, others to the event."""
+    if p.name.startswith("Гармонический"):
+        h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+        return f"{key}|H1:{h1[-1].dt}" if h1 else key
+    return key
+
+
+def _parse_utc(raw) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _first_available(first_seen: dict, akey: str, computed: datetime | None) -> datetime | None:
+    """Pin availability to the FIRST scan that saw the event on final data.
+
+    The provider cache is refreshed every 1–30 min, so the request start keeps
+    moving forward. Using the latest request made an H1 event "fresh" for the
+    whole hour and an H4/D1 event for hours (15-min TTL defeated whenever the
+    card was not created at once: pair slot busy, news penalty, one-per-scan).
+    """
+    if computed is None:
+        return None
+    stored = _parse_utc(first_seen.get(akey))
+    if stored is None or stored > computed:
+        first_seen[akey] = computed.isoformat()
+        return computed
+    return stored
+
+
+def _prune_first_seen(first_seen: dict, now_utc: datetime) -> None:
+    horizon = now_utc - timedelta(days=9)  # a W1 bar stays the last bar for a week
+    for akey in [k for k, v in first_seen.items() if (_parse_utc(v) or horizon) <= horizon]:
+        first_seen.pop(akey, None)
+    while len(first_seen) > 3000:
+        first_seen.pop(next(iter(first_seen)))
+
+
 def _adjusted_candidates(symbol: str, by_tf: dict, candidates: list[Pattern]) -> list[Pattern]:
     """OHLC-movement gate, candle context and the FINAL threshold re-check.
 
@@ -1614,6 +1740,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     pending = state.setdefault("pending", {})
     observed = state.setdefault("observed", {})
     expired_ledger = state.setdefault("expired", {})
+    first_seen = state.setdefault("first_available", {})
     messages: list[str] = []
     now_utc = datetime.now(timezone.utc)
     expired = 0
@@ -1626,13 +1753,19 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
         stale = not invalid and _pending_is_expired(item, now_utc)
         if invalid or already_sent or stale:
             if stale:
-                # Consumed means "do not re-open the same old geometry"; a
-                # stale card is not silently treated as a delivered trade.
-                sent[item["key"]] = item.get("dt") or item["key"]
-                if item.get("group_key"):
-                    sent[item["group_key"]] = item.get("dt") or item["group_key"]
-                expired_ledger[item["key"]] = {"reason": "expired_pending", "dt": item.get("dt"),
-                                               "at": now_utc.isoformat()}
+                fields = str(item["key"]).split("|")
+                harmonic = len(fields) > 2 and fields[2].startswith("Гармонический")
+                if not harmonic:
+                    # Consumed means "do not re-open the same old geometry"; a
+                    # stale card is not silently treated as a delivered trade.
+                    sent[item["key"]] = item.get("dt") or item["key"]
+                    if item.get("group_key"):
+                        sent[item["group_key"]] = item.get("dt") or item["group_key"]
+                # A harmonic's freshness belongs to its confirming H1: an
+                # undelivered H1 confirmation does not burn D; the next closed
+                # H1 break (with strength) may confirm it again.
+                expired_ledger[item["key"]] = {"reason": "expired_pending_harmonic" if harmonic else "expired_pending",
+                                               "dt": item.get("dt"), "at": now_utc.isoformat()}
                 expired += 1
             pending.pop(digest, None)
             _discard_pending_chart(digest)
@@ -1668,8 +1801,11 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
             # Единый OHLC слой не создаёт паттерн сам. Он лишь не даёт одной-двум
             # слабым контр-свечам превратить локальную реакцию в готовый разворот.
             candidates = _adjusted_candidates(symbol, by_tf, candidates)
-            available_at = {_pattern_key(symbol, p): _event_available_at(market, symbol, p, by_tf)
-                            for p in candidates}
+            available_at = {
+                _pattern_key(symbol, p): _first_available(
+                    first_seen, _availability_key(_pattern_key(symbol, p), p, by_tf),
+                    _event_available_at(market, symbol, p, by_tf))
+                for p in candidates}
 
             def _fresh(item: Pattern) -> bool:
                 at = available_at.get(_pattern_key(symbol, item))
@@ -1767,7 +1903,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     # The H1 bar's own close, not the provider fetch time.
                     extra.append("Подтверждение: H1, закрытие " + h1_close.astimezone(
                         __import__("zoneinfo").ZoneInfo("Europe/Amsterdam")).strftime("%H:%M"))
-                text = _fmt(symbol, p, context_side, news_note, by_tf, extra)
+                text = _fmt(symbol, p, context_side, news_note, by_tf, extra, h1_close)
                 digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                 if digest not in pending:
                     pending[digest] = {"key": key, "dt": p.dt, "text": text,
@@ -1785,6 +1921,7 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
         except Exception:
             log.exception("Паттерны %s", symbol)
     state["bootstrapped"] = True
+    _prune_first_seen(first_seen, now_utc)
     if len(sent) > 1500:
         state["sent"] = dict(list(sent.items())[-1200:])
     if len(expired_ledger) > 300:

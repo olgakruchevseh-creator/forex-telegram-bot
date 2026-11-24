@@ -53,6 +53,12 @@ def _scan_tf(bars,tf):
                 state="BREAKOUT_CONFIRMED";direction=1;confirmed=True;reason="закрытие выше High Mother Bar"
             elif x.close<mother.low:
                 state="BREAKOUT_CONFIRMED";direction=-1;confirmed=True;reason="закрытие ниже Low Mother Bar"
+            elif x.high>mother.high and x.low<mother.low:
+                # Both extremes swept and the close is back inside: an outside
+                # bar. Which side was swept first is unknown inside one bar, so
+                # it is NOT a directional false break (it used to be read as
+                # a bearish sweep of the High only because that check came first).
+                reason="outside bar: оба края Mother Bar пройдены, закрытие внутри; направление не определено"
             elif x.high>mother.high and x.close<=mother.high and x.close>=mother.low:
                 state="FALSE_BREAK";direction=-1;confirmed=True;reason="sweep High Mother Bar + возврат закрытием внутрь"
             elif x.low<mother.low and x.close>=mother.low and x.close<=mother.high:

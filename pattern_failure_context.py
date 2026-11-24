@@ -66,7 +66,11 @@ def analyze_symbol(symbol, by_tf, direction):
                 last=after[-1]
                 body=abs(last.close-last.open)
                 disp=body>=av*float(getattr(cfg,"PATTERN_FAILURE_DISPLACEMENT_ATR",.40)) and ((last.close-last.open)*failure>0)
-                if closes>=1:
+                # The failure must still hold NOW: if price re-crossed the
+                # trigger back in the pattern's direction, the pattern resumed
+                # and an old reclaim is no longer a failure of it.
+                still=(last.close<trigger-tol) if original>0 else (last.close>trigger+tol)
+                if closes>=1 and still:
                     score=min(90,76+min(8,closes*3)+(6 if disp else 0))
                     state="ПРОВАЛ ПАТТЕРНА ПОДТВЕРЖДЁН" if closes>=2 or disp else "ВОЗВРАТ ЗА ТРИГГЕР ПАТТЕРНА"
                     cand=PatternFailureContext(True,state,p.name,p.side,"LONG" if failure>0 else "SHORT",tf,trigger,closes,disp,1,score,"ожидаемое продолжение паттерна не удержалось; цена вернулась за его trigger/neckline")
