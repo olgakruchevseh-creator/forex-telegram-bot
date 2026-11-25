@@ -1438,6 +1438,64 @@ def _briefing_state_label(z: Zone, synced: bool) -> str:
     return "НЕ ПРОВЕРЕНА"
 
 
+def briefing_visual_zone_groups(snapshot: dict, atr_h1: float) -> list[dict]:
+    """Group narrowly adjacent published zones for DISPLAY ONLY (Stage 28E).
+
+    Original S/R/Z rows, their lifecycle states, signal engine, and the
+    post-briefing level-watch journal are deliberately left untouched.
+    Never combine support with resistance without an intervening current Z.
+    """
+    if not getattr(cfg, "STAGE28E_ADJACENT_ZONES_DISPLAY_ONLY", True):
+        return []
+    try:
+        av = float(atr_h1)
+        if not math.isfinite(av) or av <= 0:
+            return []
+        gap_limit = av * 0.10
+        rows = []
+        for kind, key in (("support", "supports"), ("resistance", "resistances"),
+                          ("current", "current_zones")):
+            for row in (snapshot or {}).get(key) or []:
+                low, high = float(row["low"]), float(row["high"])
+                label = str(row["label"])
+                if not (math.isfinite(low) and math.isfinite(high)
+                        and 0 < low <= high and label):
+                    continue
+                rows.append((low, high, kind, label))
+    except (TypeError, ValueError, KeyError, OverflowError):
+        # Malformed display rows must never break a session briefing.
+        return []
+    rows.sort(key=lambda r: (r[0], r[1], r[3]))
+    clusters: list[list[tuple]] = []
+    for row in rows:
+        if clusters:
+            prev = clusters[-1]
+            existing_kinds = {r[2] for r in prev}
+            new_kinds = existing_kinds | {row[2]}
+            compatible = not ({"support", "resistance"} <= new_kinds and
+                              "current" not in new_kinds)
+            last_high = max(r[1] for r in prev)
+            if (compatible and row[0] - last_high <= gap_limit
+                    and len(prev) < 3):
+                prev.append(row)
+                continue
+        clusters.append([row])
+    grouped = []
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        labels = [r[3] for r in cluster]
+        kinds = {r[2] for r in cluster}
+        kind = "current" if "current" in kinds else next(iter(kinds))
+        grouped.append({
+            "label": "+".join(labels), "members": labels,
+            "low": min(r[0] for r in cluster),
+            "high": max(r[1] for r in cluster),
+            "kind": kind, "display_only": True,
+        })
+    return grouped
+
+
 def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dict:
     """Display-only closest zones, with aligned H1 facts and persisted lifecycle.
 
@@ -1610,6 +1668,7 @@ def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dic
             "resistances": select(outside_current(resistances), "R", count),
             "current_zones": chosen_current,
             "observations": sorted(observations, key=lambda r: abs(r["price"] - current))[:2]}
+    snapshot["visual_zone_groups"] = briefing_visual_zone_groups(snapshot, av)
     snapshot["movement"] = briefing_level_movement(symbol, snapshot, h1, now_utc=now_utc)
     return snapshot
 

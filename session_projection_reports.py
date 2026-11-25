@@ -520,6 +520,20 @@ def _levels_lines(symbol: str, info: dict | None) -> list[str]:
         lines.append("Текущая зона: " + fmt(current[0]))
     lines.append("Поддержка: " + ("; ".join(fmt(z) for z in supports) if supports else "рядом не определена"))
     lines.append("Сопротивление: " + ("; ".join(fmt(z) for z in resistances) if resistances else "рядом не определено"))
+    if getattr(cfg, "STAGE28E_ADJACENT_ZONES_DISPLAY_ONLY", True):
+        # One *presentation* band; original supports/resistances/current and
+        # their verified lifecycle/monitoring stay separate and visible above.
+        for group in list(info.get("visual_zone_groups") or [])[:2]:
+            try:
+                low = _fmt_level_price(symbol, float(group["low"]))
+                high = _fmt_level_price(symbol, float(group["high"]))
+                label = str(group["label"])
+                members = list(group["members"])
+                if len(members) < 2 or not group.get("display_only"):
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue
+            lines.append(f"Смежная область {label}: {low}–{high} · только визуально, исходные зоны независимы")
     if warnings:
         row = warnings[0]
         lines.append(f"Пробой/проверка: {_fmt_level_price(symbol, row['low'])}–{_fmt_level_price(symbol, row['high'])} · {row['status']}")
@@ -783,10 +797,23 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
         kind="ВЕРШИНА" if pivot.get("kind")=="high" else "ОСНОВАНИЕ"
         draw.text((max(left,zx1-15),max(top+32,y_at(zh)-26)),f"PIVOT {kind}",fill="#8cc8ff",font=small)
 
-    # Display the same zones as in the text, not an invented single-tick level.
+    # Adjacent-level presentation (28E) never rewrites the source snapshot.
+    # Text retains each S/R/Z lifecycle; the picture combines adjacent bands.
     level_specs = ([(r, "#42e889") for r in (levels_brief.get("supports") or [])[:2]]
                    + [(r, "#ff6575") for r in (levels_brief.get("resistances") or [])[:2]]
                    + [(r, "#ffd35d") for r in (levels_brief.get("current_zones") or [])[:1]])
+    if getattr(cfg, "STAGE28E_ADJACENT_ZONES_DISPLAY_ONLY", True):
+        groups = [g for g in (levels_brief.get("visual_zone_groups") or [])
+                  if isinstance(g, dict) and g.get("display_only") and len(g.get("members") or []) >= 2]
+        if groups:
+            combined_members = {member for g in groups for member in g["members"]}
+            level_specs = [(r, c) for r, c in level_specs
+                           if r.get("label") not in combined_members]
+            for g in groups:
+                c = ("#ffd35d" if g.get("kind") == "current" else
+                     "#42e889" if g.get("kind") == "support" else "#ff6575")
+                # Existing drawing logic handles this as one bounded zone.
+                level_specs.append((g, c))
     occupied_tags: list[float] = []
     for row, color in level_specs:
         try:
