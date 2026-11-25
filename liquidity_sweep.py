@@ -336,6 +336,39 @@ def _pool_already_consumed(setup: SweepSetup, memory: list[dict], h1: list[Candl
     return False
 
 
+def _stage28_pool_consumed(setup: SweepSetup, memory: list[dict], h1: list[Candle]) -> bool:
+    """Block the SAME delivered liquidity pool even after a deeper sweep.
+
+    A more extreme sweep candle/pivot is *not* a new pool. Re-arming inside
+    the 72-closed-H1 memory requires a distinct pool LEVEL beyond the old
+    sweep extreme. Unrelated pools on the other side of the original level
+    remain independent; old stage-27C API is retained for backwards tests.
+    """
+    if not (getattr(cfg, "STAGE28_LIQUIDITY_REARM_BY_NEW_LEVEL", True)
+            and getattr(cfg, "STAGE27C_LIQUIDITY_POOL_CONSUMED_ONCE", True)):
+        return False
+    av = atr(h1, 14) if len(h1) >= 15 else 0.0
+    tolerance = max(0.1 * max(0.0, av), 0.01 if "JPY" in setup.symbol else 0.0001)
+    for rec in memory:
+        if not isinstance(rec, dict) or rec.get("symbol") != setup.symbol or rec.get("side") != setup.side:
+            continue
+        if not _pool_memory_is_active(rec, h1):
+            continue
+        try:
+            level, sweep = float(rec["level"]), float(rec["sweep_price"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if setup.side == "SHORT":
+            # Existing high pool plus its swept area. Another higher high
+            # is a *new* level only if it exceeds the old sweep extreme.
+            same_consumed_area = level - tolerance <= setup.level <= sweep + tolerance
+        else:
+            same_consumed_area = sweep - tolerance <= setup.level <= level + tolerance
+        if same_consumed_area:
+            return True
+    return False
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
@@ -369,7 +402,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
 
                     _LAST_CHART_CARDS[message] = (event, freeze_by_tf(by_tf))
             fresh = detect_new_sweep(symbol, d1, h4, h1, by_tf)
-            if fresh and fresh.setup_id not in setups and not _pool_already_consumed(fresh, consumed, h1):
+            if (fresh and fresh.setup_id not in setups
+                    and not _stage28_pool_consumed(fresh, consumed, h1)
+                    and not _pool_already_consumed(fresh, consumed, h1)):
                 # Один активный sweep каждого направления на пару.
                 for old in setups.values():
                     if old.symbol == symbol and old.side == fresh.side and not old.sent:

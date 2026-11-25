@@ -1696,3 +1696,8 @@ STAGE28_EVENT_CURRENT_H1_ONLY = True
 STAGE28_CRT_PATH_TO_LAST_H1 = True
 STAGE28_PENDING_TTL_ALL_SOURCES = True
 STAGE28_RETIRE_EXPIRED_EVENTS = True
+
+# Этап 28 A5/A6 — вложенные фазы и повторное снятие уже использованного пула.
+# Независимые флаги отката, торговые пороги Master/Killer/ATR не изменяются.
+STAGE28_PHASE_NESTED_AND_STORED_DEDUP = True
+STAGE28_LIQUIDITY_REARM_BY_NEW_LEVEL = True

@@ -301,6 +301,24 @@ def _same_cross_tf_box(a: Phase, b: Phase) -> bool:
     return _box_overlap(a, b) >= .75 and boundary_shift <= .30
 
 
+def _stage28_nested_exit_box(a: Phase, b: Phase) -> bool:
+    """One lifecycle for nested price boxes, even with >30% shifted edges.
+
+    Relevance is the overlap of the *smaller* interval; do not merge
+    neighbouring non-overlapping ranges or opposite-side/other-symbol exits.
+    """
+    return (a.symbol == b.symbol and a.kind == b.kind and a.side == b.side
+            and _box_overlap(a, b) >= .75)
+
+
+def _stage28_mark_duplicate(phase: Phase, actual_exit: Phase) -> None:
+    """Permanently retire an unsent duplicate without inventing a new exit."""
+    phase.exit_sent = True
+    phase.exit_dt = actual_exit.exit_dt
+    phase.exit_price = actual_exit.exit_price
+    phase.status = "ВЫХОД ПОДТВЕРЖДЁН · ДУБЛЬ TF"
+
+
 def _recent_exited_overlapping(a: Phase, prior: Phase, by_tf: dict) -> bool:
     if not prior.exit_sent or not prior.exit_dt or a.kind != prior.kind or a.side != prior.side:
         return False
@@ -374,6 +392,22 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                             key=lambda p: (TF_RANK.get(p.tf, 0), p.quality), reverse=True)
             emitted: list[Phase] = []
             for phase in active:
+                stage28_dedup = getattr(cfg, "STAGE28_PHASE_NESTED_AND_STORED_DEDUP", True)
+                if stage28_dedup:
+                    # A formerly active H4/H1 may leave the same area a day
+                    # after a different TF already sent the exit. Retire this
+                    # stored lifecycle before attempting a second detection.
+                    recent = next((prior for prior in stored.values()
+                                   if prior is not phase and
+                                   _recent_exited_overlapping(phase, prior, by_tf)), None)
+                    if recent is not None:
+                        _stage28_mark_duplicate(phase, recent)
+                        continue
+                    nested = next((peer for peer in emitted
+                                   if _stage28_nested_exit_box(phase, peer)), None)
+                    if nested is not None:
+                        _stage28_mark_duplicate(phase, nested)
+                        continue
                 if (getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True)
                         and any(_same_cross_tf_box(phase, peer) for peer in emitted)):
                     continue  # senior TF has actually confirmed an exit; no duplicate
@@ -397,12 +431,14 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                             log.exception("AMD family priority check %s", symbol)
                     if not po3_same_event:
                         emitted.append(phase)
-                        if getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True):
+                        if (getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True) or stage28_dedup):
                             for peer in active:
-                                if peer is not phase and not peer.exit_sent and _same_cross_tf_box(phase, peer):
-                                    peer.exit_sent = True
-                                    peer.exit_dt, peer.exit_price = phase.exit_dt, phase.exit_price
-                                    peer.status = "ВЫХОД ПОДТВЕРЖДЁН · ДУБЛЬ TF"
+                                if peer is phase or peer.exit_sent:
+                                    continue
+                                if ((stage28_dedup and _stage28_nested_exit_box(phase, peer))
+                                        or (getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True)
+                                            and _same_cross_tf_box(phase, peer))):
+                                    _stage28_mark_duplicate(peer, phase)
                         saved_h1 = stage27a.closed_h1_iso(by_tf)
                         text = stage27a.stamp(format_message(phase, "exit"), saved_h1)
                         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
