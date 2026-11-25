@@ -182,7 +182,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float]) -> Sign
         og=ohlc_movement.guard_event(by_tf,sig.side,sig.quality)
         if not og.get('allow',True):
             continue
-        sig.quality=og.get('quality',sig.quality); sig.confidence=min(sig.confidence,max(0,sig.quality-4))
+        sig.quality=ohlc_movement.capped_event_quality(og,sig.quality,96); sig.confidence=min(sig.confidence,max(0,sig.quality-4))
         if sig.quality >= int(getattr(cfg, "DISBALANCE_MIN_QUALITY", 76)):
             valid.append(sig)
     if not valid:

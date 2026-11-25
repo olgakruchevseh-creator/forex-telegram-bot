@@ -45,6 +45,34 @@ def _strength(symbol: str, side: str, strength: dict[str, float]) -> tuple[bool,
     need = float(getattr(cfg, "CRT_MIN_STRENGTH_GAP", .04))
     return (gap >= need if side == "LONG" else gap <= -need), gap
 
+def _invalid_crt_path(h1: list[Candle], sweep_i: int, confirm_i: int,
+                      side: str, ref: Candle, sweep: Candle, av: float) -> str:
+    """Causal integrity of the sweep -> H1 confirmation path (inclusive)."""
+    if not getattr(cfg, "STAGE27B_CRT_SETUP_INTEGRITY", True):
+        return ""
+    if confirm_i <= sweep_i:
+        return "no_later_confirmation"
+    age_limit = max(1, int(getattr(cfg, "CRT_MAX_CONFIRM_AFTER_SWEEP_H1", 3)))
+    if confirm_i - sweep_i > age_limit:
+        return "sweep_confirmation_too_late"
+    path = h1[sweep_i + 1:confirm_i + 1]
+    # Do not accept a fresh 'reclaim' after a still deeper break of the sweep.
+    if side == "LONG" and any(b.low < sweep.low for b in path):
+        return "sweep_invalidated"
+    if side == "SHORT" and any(b.high > sweep.high for b in path):
+        return "sweep_invalidated"
+    # Opposite range border touched any time BEFORE OR DURING confirmation.
+    if side == "LONG" and any(b.high >= ref.high for b in path):
+        return "target_already_touched"
+    if side == "SHORT" and any(b.low <= ref.low for b in path):
+        return "target_already_touched"
+    target = ref.high if side == "LONG" else ref.low
+    remaining = (target - h1[confirm_i].close) * (1 if side == "LONG" else -1)
+    if remaining < max(0.0, float(getattr(cfg, "CRT_MIN_REMAINING_ATR", .35))) * av:
+        return "insufficient_remaining_distance"
+    return ""
+
+
 def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle], strength: dict[str, float]) -> dict | None:
     if len(h1) < 22 or min(len(h4), len(m15)) < 20: return None
     av = atr(h1, 14)
@@ -84,6 +112,7 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
             confirm_i = next((i for i,c in enumerate(h1) if c.dt == confirm.dt), -99)
             age = len(h1)-1-confirm_i
             if age > int(getattr(cfg, "CRT_MAX_CONFIRM_AGE_H1", 1)): continue
+            if _invalid_crt_path(h1, s, confirm_i, side, ref, sweep, av): continue
             if _bias("H4", h4) == -wanted or _bias("M15", m15) == -wanted: continue
             ok, gap = _strength(symbol, side, strength)
             if not ok and not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True): continue
@@ -190,7 +219,7 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
             if not e or e["key"] in sent or e["key"] in pkeys or e["key"] in expired_keys: continue
             og=ohlc_movement.guard_event(by,e.get("side"),e.get("quality"))
             if not og.get("allow",True): continue
-            e["quality"]=og.get("quality",e["quality"]); e["confidence"]=min(e.get("confidence",93),max(0,e["quality"]-4))
+            e["quality"]=ohlc_movement.capped_event_quality(og,e["quality"],96); e["confidence"]=min(e.get("confidence",93),max(0,e["quality"]-4))
             saved_h1=stage27a.closed_h1_iso(by); text=stage27a.stamp(format_message(e), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]
             if first: sent[e["key"]]=e["key"]
             else: pending[digest]={"key":e["key"],"event":e,"saved_h1":saved_h1}; msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(by)); pkeys.add(e["key"])

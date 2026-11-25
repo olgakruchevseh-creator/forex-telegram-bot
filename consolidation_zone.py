@@ -344,7 +344,7 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
         zone.retest_dt = ""
     og = ohlc_movement.guard_event(by_tf, side, zone.quality)
     if not og.get("allow", True): return False
-    zone.quality = og.get("quality", zone.quality)
+    zone.quality = ohlc_movement.capped_event_quality(og, zone.quality, 100)
     zone.breakout_sent = True
     zone.breakout_side = side
     zone.breakout_dt = cur.dt

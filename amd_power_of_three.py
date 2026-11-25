@@ -389,7 +389,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 continue
             og = ohlc_movement.guard_event(by_tf, event.get("side"), event.get("quality"))
             if not og.get("allow", True): continue
-            event["quality"] = og.get("quality", event["quality"]); event["confidence"] = min(event.get("confidence",91), max(0,event["quality"]-4))
+            event["quality"] = ohlc_movement.capped_event_quality(og, event["quality"], 95); event["confidence"] = min(event.get("confidence",91), max(0,event["quality"]-4))
             text = format_message(event)
             digest = hashlib.sha256(text.encode()).hexdigest()[:20]
             if first:

@@ -156,7 +156,7 @@ def detect_exit(phase: Phase, bars: list[Candle], by_tf: dict, strength: dict[st
         return False
     og = ohlc_movement.guard_event(by_tf, phase.side, phase.quality)
     if not og.get("allow", True): return False
-    phase.quality = og.get("quality", phase.quality)
+    phase.quality = ohlc_movement.capped_event_quality(og, phase.quality, 95)
     phase.exit_sent = True
     phase.status = "ВЫХОД ПОДТВЕРЖДЁН"
     phase.confidence = min(93, phase.confidence + 5)

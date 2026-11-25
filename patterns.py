@@ -1417,6 +1417,7 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
         figure_line = [f"Свеча фигуры {p.tf} закрыта: {figure_close.astimezone(ams).strftime('%d.%m.%Y · %H:%M')}"]
     close_time = close_dt.astimezone(ams).strftime("%d.%m.%Y · %H:%M") if close_dt else ""
     close_price = (f"{close_value:.3f}" if "JPY" in symbol else f"{close_value:.5f}") if close_value else ""
+    geometry_line = _measured_figure_card_line(symbol, p, by_tf)
     return "\n".join([
         # The header is a routing marker for bot.py / signal_contract.py:
         # keep it identical for every pattern kind.
@@ -1427,6 +1428,7 @@ def _fmt(symbol: str, p: Pattern, context_side: str = "", news_note: str = "", b
         *([f"Цена закрытия: {close_price}"] if close_price else []),
         *figure_line,
         f"Ключевой уровень: {price}",
+        *([geometry_line] if geometry_line else []),
         *( [f"Новости: {news_note}"] if news_note else [] ),
         "", f"Факт: {p.fact}", f"Что означает: {meaning}.",
         *(extra_lines or []),
@@ -1499,6 +1501,45 @@ def _chart_geometry_anchors(pattern: Pattern, bars: list[Candle]) -> list[tuple[
         points.append((tops[1][0], tops[1][1], "2"))
         return points
     return []
+
+
+def _measured_figure_card_line(symbol: str, pattern: Pattern, by_tf: dict | None) -> str:
+    """Export the detector's original geometry; NEVER synthesize it from ZigZag.
+
+    For H&S the neckline is sloping: ``pattern.level`` is its value on the
+    confirming close, not either individual shoulder low/high.
+    """
+    if pattern.name not in {"Двойная вершина", "Двойное дно", "Голова и плечи",
+                            "Перевёрнутая голова и плечи"}:
+        return ""
+    if not (by_tf and getattr(cfg, "STAGE27B_PATTERN_ANCHORS_FROM_CARD", True)):
+        return ""
+    tf = pattern.tf
+    bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+    # Do not look forward into bars acquired after the detector's observation.
+    event_index = next((i for i, b in enumerate(bars) if str(b.dt) == str(pattern.dt)), -1)
+    if event_index < 0:
+        return ""
+    anchors = _chart_geometry_anchors(pattern, bars[:event_index + 1])
+    if pattern.name in {"Двойная вершина", "Двойное дно"}:
+        if len(anchors) != 3 or [x[2] for x in anchors] != ["1", "шея", "2"]:
+            return ""
+        extreme = (max(anchors[0][1], anchors[2][1]) if pattern.side == "SHORT"
+                   else min(anchors[0][1], anchors[2][1]))
+    else:
+        if len(anchors) != 5 or [x[2] for x in anchors] != ["ЛП", "Ш1", "Г", "Ш2", "ПП"]:
+            return ""
+        extreme = anchors[2][1]
+    neck = float(pattern.level)
+    height = abs(neck - extreme)
+    direction = 1 if pattern.side == "LONG" else -1
+    if (not all(math.isfinite(v) and v > 0 for v in (neck, extreme, height))
+            or (neck - extreme) * direction <= 0):
+        return ""
+    # Printed geometry is the source of truth for downstream Navigator.
+    fmt = '.3f' if 'JPY' in symbol else '.5f'
+    return (f"Опоры фигуры: {format(extreme, fmt)} · шея {format(neck, fmt)}"
+            f" · высота {format(height, fmt)}")
 
 
 CHART_FIGURE_NAMES = {

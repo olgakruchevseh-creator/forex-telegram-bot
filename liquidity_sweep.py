@@ -301,7 +301,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if event and not first:
                     og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
                     if not og.get('allow',True): continue
-                    if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
+                    if 'quality' in og: event['quality']=ohlc_movement.capped_event_quality(og,event['quality'],94); event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                     saved_h1=stage27a.closed_h1_iso(by_tf)
                     message = stage27a.stamp(format_message(event), saved_h1)
 

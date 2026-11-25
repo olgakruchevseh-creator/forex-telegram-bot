@@ -164,7 +164,7 @@ def process_market(market,strength):
           if e and not first:
             og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
             if not og.get('allow',True): continue
-            if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90), max(0,e['quality']-3))
+            if 'quality' in og: e['quality']=ohlc_movement.capped_event_quality(og,e['quality'],94); e['confidence']=min(e.get('confidence',90), max(0,e['quality']-3))
             saved_h1=stage27a.closed_h1_iso(by_tf); msg=stage27a.stamp(_format(e), saved_h1); digest=hashlib.sha256(msg.encode()).hexdigest()[:20]; pending[digest]={'id':s.id,'text':msg,'saved_h1':saved_h1}; out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
         fresh=_candidate(symbol,h4,h1)
         if fresh and fresh.id not in setups:

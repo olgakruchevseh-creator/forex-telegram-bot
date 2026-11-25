@@ -128,7 +128,7 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
     # Keep the legacy two-point extensions for compatibility, but expose the
     # causal projection separately so targets are not silently reinterpreted.
     if getattr(cfg, "FIBONACCI_PROJECTION_FROM_PULLBACK_EXTREME", True):
-        # End is a CONFIRMED H1 ZigZag pivot; every later bar here is already
+        # End may be a PROVISIONAL H1 ZigZag pivot (logged OBSERVE_ONLY);
         # closed by _bars(). The reaction candle is included in the search.
         pullback_bars = h1[end.index + 1:]
         if not pullback_bars:
@@ -137,6 +137,12 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
                              else max(bar.high for bar in pullback_bars))
     else:
         projection_anchor = current.low if side == "LONG" else current.high
+    if getattr(cfg, "STAGE27B_ZIGZAG_PIVOT_OBSERVE_ONLY", True) and not getattr(end, "final", True):
+        # Do not change the event silently: old H1 ZigZag permits a provisional
+        # final pivot. Record this fact for causal replay before switching rules.
+        log.info("STAGE27B_ZIGZAG_PIVOT_OBSERVE symbol=%s end_dt=%s "
+                 "end_price=%.8f status=PROVISIONAL impulse_move_atr=%.3f",
+                 symbol, h1[end.index].dt, end.price, move / av)
     if side == "LONG":
         fib_projection = {r: projection_anchor + move * r for r in extension_ratios}
     else:
@@ -147,7 +153,7 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
                   + (4 if h4_bias == wanted else 0) + geometry_bonus)
     og = ohlc_movement.guard_event(by_tf, side, quality)
     if not og.get("allow", True): return None
-    quality = og.get("quality", quality)
+    quality = ohlc_movement.capped_event_quality(og, quality, 94)
     return {
         # Один подтверждённый сигнал на один импульс, независимо от числа
         # последующих касаний той же golden zone.

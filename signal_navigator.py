@@ -317,40 +317,73 @@ def _module_targets(symbol: str, side: str, by_tf: dict, source_text: str, ancho
     ahead = [s for s in swings if (s.kind == ("high" if direction > 0 else "low")) and (s.price - anchor) * direction > 0]
     behind = [s for s in swings if (s.price - anchor) * direction < 0]
     if family == "Patterns" and key > 0:
-        if getattr(cfg, "NAVIGATOR_PATTERN_MEASURED_FROM_EXTREME", True):
-            # A candle or a harmonic does NOT have a universal double-bottom
-            # height. Until the source publishes exact geometry anchors, infer
-            # a measured target only for a real double bottom/top from the
-            # last two corresponding opposite pivots of this source TF.
-            label = source_text.upper()
-            measured_shape = (("ДВОЙНОЕ ОСНОВАНИЕ" in label and direction > 0)
-                              or ("ДВОЙНАЯ ВЕРШИНА" in label and direction < 0))
-            lookback = int((getattr(cfg, "PATTERN_LOOKBACK", {}) or {}).get(tf, 160))
-            recent = [s for s in swings if s.kind == ("low" if direction > 0 else "high")
-                      and 0 <= s.index < len(bars) and s.index >= max(0, len(bars) - lookback)
-                      and (key - s.price) * direction > 0]
-            if measured_shape and len(recent) >= 2 and abs(recent[-1].price - recent[-2].price) <= local_atr * .35:
-                extreme = (min(recent[-1].price, recent[-2].price) if direction > 0
-                           else max(recent[-1].price, recent[-2].price))
+        label = source_text.upper()
+        measured_shape = any(name in label for name in (
+            "ДВОЙНОЕ ДНО", "ДВОЙНОЕ ОСНОВАНИЕ", "ДВОЙНАЯ ВЕРШИНА",
+            "ГОЛОВА И ПЛЕЧИ", "ПЕРЕВЁРНУТАЯ ГОЛОВА И ПЛЕЧИ"))
+        source_anchors = re.search(
+            r"^Опоры фигуры:\s*([0-9]+(?:\.[0-9]+)?)\s*·\s*шея\s*"
+            r"([0-9]+(?:\.[0-9]+)?)\s*·\s*высота\s*([0-9]+(?:\.[0-9]+)?)\s*$",
+            source_text, re.M)
+        extreme = 0.0
+        height = 0.0
+        if (getattr(cfg, "STAGE27B_PATTERN_ANCHORS_FROM_CARD", True)
+                and measured_shape and source_anchors):
+            extreme, neckline, stated_height = map(float, source_anchors.groups())
+            # Reject corrupt or contradictory source geometry: no invented TR.
+            rounding_tolerance = .002 if 'JPY' in symbol else .00002
+            if (not all(math.isfinite(v) and v > 0 for v in (extreme, neckline, stated_height))
+                    or abs(neckline - key) > rounding_tolerance
+                    or abs(abs(neckline - extreme) - stated_height) > rounding_tolerance
+                    or (neckline - extreme) * direction <= 0):
+                height = 0.0
             else:
-                extreme = 0.0  # no identifiable source geometry: no invented target
-        else:
-            extreme = max((s.price for s in behind), default=0.0) if direction > 0 else min((s.price for s in behind), default=0.0)
-            if not extreme and behind:
-                extreme = behind[-1].price
-        height = abs(extreme - key) if extreme else 0.0
+                height = stated_height
+        elif not getattr(cfg, "STAGE27B_PATTERN_ANCHORS_FROM_CARD", True) or (
+                "ДВОЙНОЕ ОСНОВАНИЕ" in label and direction > 0):
+            # Stage 26 historic alias is kept for saved cards and its regression
+            # test; REAL stage-27B cards require an actual detector anchor line.
+            # The deprecated name never comes from patterns._fmt today.
+            if getattr(cfg, "NAVIGATOR_PATTERN_MEASURED_FROM_EXTREME", True):
+                lookback = int((getattr(cfg, "PATTERN_LOOKBACK", {}) or {}).get(tf, 160))
+                recent = [s for s in swings if s.kind == ("low" if direction > 0 else "high")
+                          and getattr(s, "final", True)
+                          and 0 <= s.index < len(bars) and s.index >= max(0, len(bars)-lookback)
+                          and (key - s.price)*direction > 0]
+                if measured_shape and len(recent) >= 2 and abs(recent[-1].price - recent[-2].price) <= local_atr*.35:
+                    extreme = (min(recent[-1].price, recent[-2].price) if direction > 0
+                               else max(recent[-1].price, recent[-2].price))
+            else:
+                extreme = max((s.price for s in behind), default=0.0) if direction > 0 else min((s.price for s in behind), default=0.0)
+            height = abs(extreme - key) if extreme else 0.0
         if height >= local_atr * .35:
             _append_target(targets, key + direction * height, f"измеренная фигура {tf}", anchor, direction, tolerance)
             _append_target(targets, key + direction * height * 1.272, f"расширение 1.272 {tf}", anchor, direction, tolerance)
-    elif family == "Fibonacci" and len(swings) >= 2:
-        leg = abs(swings[-1].price - swings[-2].price)
-        if getattr(cfg, "NAVIGATOR_FIB_BASE_FROM_LEG_ORIGIN", True):
-            base = min(swings[-1].price, swings[-2].price) if direction > 0 else max(swings[-1].price, swings[-2].price)
-        else:
-            base = swings[-2].price
-        if leg >= local_atr * .35:
-            _append_target(targets, base + direction * leg * 1.272, f"Фибо 1.272 {tf}", anchor, direction, tolerance)
-            _append_target(targets, base + direction * leg * 1.618, f"Фибо 1.618 {tf}", anchor, direction, tolerance)
+    elif family == "Fibonacci":
+        projection = re.search(r"^Проекция A[–-]B[–-]C:\s*(.+)$", source_text or "", re.M)
+        if getattr(cfg, "STAGE27B_FIB_TARGETS_FROM_CARD", True) and projection:
+            # Projection A-B-C belongs to the original closed H1 event, including
+            # pullback point C; do not recalculate it from a different ZigZag.
+            ratios = {float(r): float(v) for r, v in re.findall(
+                r"(?<![\w.])(1\.272|1\.618)\s*=\s*([0-9]+(?:\.[0-9]+)?)", projection.group(1))}
+            if len(ratios) == 2 and all(math.isfinite(v) and v > 0 for v in ratios.values()):
+                _append_target(targets, ratios[1.272], f"Фибо A-B-C 1.272 {tf}", anchor, direction, tolerance)
+                _append_target(targets, ratios[1.618], f"Фибо A-B-C 1.618 {tf}", anchor, direction, tolerance)
+            # If the line exists but is invalid, FAIL CLOSED; no fake fallback.
+        elif len(swings) >= 2:
+            # Compatibility for pre-stage-26 cards without their own A-B-C line.
+            # Unconfirmed final swings cannot produce an exact geometric TR.
+            pair = ([s for s in swings if getattr(s, "final", True)]
+                    if getattr(cfg, "STAGE27B_FIB_TARGETS_FROM_CARD", True) else swings)
+            if len(pair) >= 2:
+                leg = abs(pair[-1].price - pair[-2].price)
+                if getattr(cfg, "NAVIGATOR_FIB_BASE_FROM_LEG_ORIGIN", True):
+                    base = min(pair[-1].price, pair[-2].price) if direction > 0 else max(pair[-1].price, pair[-2].price)
+                else:
+                    base = pair[-2].price
+                if leg >= local_atr * .35:
+                    _append_target(targets, base + direction * leg * 1.272, f"Фибо 1.272 {tf}", anchor, direction, tolerance)
+                    _append_target(targets, base + direction * leg * 1.618, f"Фибо 1.618 {tf}", anchor, direction, tolerance)
     elif family in {"Liquidity Sweep", "Daily High/Low"} and ahead:
         _append_target(targets, ahead[0].price, f"встречный пул {tf}", anchor, direction, tolerance)
     elif family in {"Order Block", "Breaker Block", "Imbalance/FVG", "BPR", "Disbalance"} and key > 0:

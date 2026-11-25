@@ -8,6 +8,8 @@ net/path. Главная задача — не принимать 1–2 слаб
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from analysis import atr
+import math
+import config as cfg
 
 @dataclass(frozen=True)
 class OHLCMovement:
@@ -260,3 +262,21 @@ def guard_event(by_tf: dict, side, quality: int | float | None = None) -> dict:
     if quality is not None:
         out["quality"] = int(max(0, min(100, round(float(quality) + int(adj.get("quality_delta", 0))))))
     return out
+
+
+def capped_event_quality(guard: dict, source_quality: int | float, module_cap: int) -> int:
+    """Этап 27B: do not exceed the module's OWN quality ceiling after OHLC guard.
+
+    Only call for modules with an explicit local cap. The old behavior remains
+    available through config rollback; OHLC gate veto is not changed.
+    """
+    proposed = guard.get("quality", source_quality)
+    if not getattr(cfg, "STAGE27B_MODULE_QUALITY_CAP_AFTER_GUARD", True):
+        return proposed
+    try:
+        value = float(proposed)
+        if not math.isfinite(value):
+            value = float(source_quality)
+        return max(0, min(int(module_cap), int(round(value))))
+    except (ValueError, TypeError, OverflowError):
+        return max(0, min(int(module_cap), int(source_quality)))

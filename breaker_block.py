@@ -267,7 +267,7 @@ def process_market(market: dict, strength: dict[str, float], invalidated_blocks:
                 if event:
                     og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
                     if og.get('allow',True):
-                        if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
+                        if 'quality' in og: event['quality']=ohlc_movement.capped_event_quality(og,event['quality'],96); event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
                         events.append(event)
             if events and not first:
                 best = max(events, key=lambda x: x["quality"])

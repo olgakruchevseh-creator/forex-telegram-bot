@@ -199,7 +199,7 @@ def process_market(market,strength,events=None,now_utc=None):
         if not e: continue
         og=ohlc_movement.guard_event(market.get(symbol) or {},e.get('side'),e.get('quality'))
         if not og.get('allow',True): continue
-        if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90),max(0,e['quality']-3))
+        if 'quality' in og: e['quality']=ohlc_movement.capped_event_quality(og,e['quality'],95); e['confidence']=min(e.get('confidence',90),max(0,e['quality']-3))
         key=f"{symbol}|{e['side']}|{e['window']}|{e.get('fill_dt',e['trigger_dt'])}"
         pending=st.setdefault('pending',{})
         if key in sent or key in pending: continue

@@ -166,7 +166,7 @@ def detect_event(symbol: str, by_tf: dict, strength: dict[str, float]) -> dict |
     og = ohlc_movement.guard_event(by_tf, side, quality)
     if og.get("weak_reversal"):
         return None
-    quality = og.get("quality", quality)
+    quality = ohlc_movement.capped_event_quality(og, quality, 94)
     confidence = min(91, quality - 4)
     # TR1 for the PDH/PDL card: nearest meaningful senior extremum in the
     # breakout direction; if none is available, use a conservative 0.75 H1 ATR
