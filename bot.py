@@ -628,6 +628,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/pair EUR/USD — стек таймфреймов по паре\n"
         "/briefing — брифинг текущей сессии\n"
         "/status — жив ли я\n"
+        "/storage — размеры файлов на Railway Volume (только чтение)\n"
         "/diagnostics — часовая диагностика данных и модулей (наблюдение)\n"
         "/module_replay, /strength_replay — исследовательский replay по OHLC-архиву\n"
         "/h1_backfill ДАТА ДАТА — план дозагрузки H1 в архив"
@@ -659,6 +660,24 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lines.append(f"Последний брифинг: {state.get('last_briefing_id') or '—'}")
     lines.append(f"STATE_DIR: {os.getenv('STATE_DIR', '').strip() or 'НЕ ЗАДАН'}")
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_storage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only on-demand inventory. No OHLC, SQLite or journal mutation."""
+    state = load_state()
+    expected = state.get("chat_id")
+    if expected and str(expected) != str(update.effective_chat.id):
+        await update.message.reply_text("Эта диагностика доступна только основному чату бота.")
+        return
+    _remember_effective_chat(update)
+    try:
+        import volume_status
+        output = await asyncio.wait_for(
+            asyncio.to_thread(volume_status.report_ru), timeout=8.0)
+        await _send_parts(context.application, int(update.effective_chat.id), output)
+    except Exception:
+        log.exception("STORAGE_STATUS_FAILED")
+        await update.message.reply_text("Размеры Volume сейчас недоступны. Ничего не изменено.")
 
 
 async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3319,6 +3338,7 @@ def main() -> None:
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("storage", cmd_storage))
     app.add_handler(CommandHandler("now", cmd_now))
     app.add_handler(CommandHandler("pair", cmd_pair))
     app.add_handler(CommandHandler("briefing", cmd_briefing))

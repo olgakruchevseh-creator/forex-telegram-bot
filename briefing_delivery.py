@@ -85,6 +85,12 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
                 "Главная фигура:", "Старшая обнаруженная фигура:", "Есть конфликт", "Подтверждённых фигур")):
             if line not in chart_selected:
                 chart_selected.append(line)
+    # Safety labels for observation-only imagery must survive caption
+    # compression even when six TF pattern rows consume most of Telegram's
+    # 1024 UTF-16 limit. An M5 picture is never an HTF trade confirmation.
+    critical_notes = [line for line in chart_lines if line.startswith((
+        "Наблюдение:", "Младший TF:"))]
+    chart_selected = list(dict.fromkeys(critical_notes + chart_selected))
     for line in chart_lines:
         if line.startswith("Пара:"):
             continue

@@ -2195,49 +2195,61 @@ def card_is_structural(text: str) -> bool:
 
 
 def briefing_htf_card(symbol: str, by_tf: dict):
-    """Read-only: лучшая подтверждённая HTF-фигура для сессионного брифинга.
+    """Illustrate the same latest-close figure named by the MTF briefing.
 
-    Не трогает pending/sent lifecycle обычного сканера, поэтому отдельные
-    внутридневные уведомления продолжают работать независимо.
+    This is a read-only presentation path: no pending/sent modifications, no
+    trading confirmations, and no change to the H1 signal gate. Independent
+    M15/M5 observations remain explicitly OBSERVE_ONLY.
     """
     if not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
         return None
-    priority = {"W1": 0, "D1": 1, "H4": 2, "H1": 3}
+    order = ("W1", "D1", "H4", "H1", "M15", "M5")
     context_side, candidates, _, _ = _cached_analysis(symbol, by_tf)
-    # Same visibility rules as the live scanner: no counter-context candle
-    # reactions, and no harmonic without its separate H1/strength confirmation.
-    # Harmonics stay out: their live confirmation needs the pair's currency
-    # strength, which the briefing image path does not receive.
-    found = [p for p in candidates if p.tf in priority
-             and _pattern_allowed(p, context_side)
-             and not p.name.startswith("Гармонический")]
-    found = _adjusted_candidates(symbol, by_tf, found)
+    # Trade-grade classification is for the caption only, not the sole reason
+    # to show an informational picture in a briefing.
+    trade_candidates = [p for p in candidates if p.tf in order[:4]
+                        and _pattern_allowed(p, context_side)
+                        and not p.name.startswith("Гармонический")]
+    trade_candidates = _adjusted_candidates(symbol, by_tf, trade_candidates)
+    trade_candidates.sort(key=lambda p: (order.index(p.tf), -p.quality, -p.confidence))
+    selected = None
     observed_only = False
-    if not found and getattr(cfg, "PATTERN_BRIEFING_IMAGE_OBSERVED_FALLBACK", True):
-        # Since stages 11–12 the image used only trade-grade figures, while the
-        # text block under it lists every figure confirmed on the last closed
-        # W1/D1/H4/H1 bar. A harmonic, a counter-context candle or a figure
-        # below the trade threshold left the text without its picture, and the
-        # briefing arrived as loose text cards. The picture now falls back to
-        # the SAME «старшая обнаруженная фигура» the text names. It is drawn
-        # only; nothing is sent, queued or used by any signal gate.
+    if getattr(cfg, "PATTERN_BRIEFING_IMAGE_OBSERVED_FALLBACK", True):
         try:
             import patterns_mtf
             obs = patterns_mtf.observe(symbol, by_tf)
-            if obs.primary_tf in priority and obs.patterns_by_tf.get(obs.primary_tf):
-                found = [obs.patterns_by_tf[obs.primary_tf][0]]
-                observed_only = True
+            # Use the oldest nonempty timeframe and first shape printed in the
+            # MTF caption, including M15/M5 where these are observational only.
+            observed = next((obs.patterns_by_tf[tf][0] for tf in order
+                             if obs.patterns_by_tf.get(tf)), None)
+            if observed is not None:
+                matching = next((p for p in trade_candidates
+                                 if (p.tf, p.name, p.side, str(p.dt)) ==
+                                 (observed.tf, observed.name, observed.side, str(observed.dt))), None)
+                selected = matching if matching is not None else observed
+                observed_only = matching is None
+            elif any(by_tf.get(tf) for tf in order):
+                # Avoid a stale trade candidate whose name is not visible in
+                # the current MTF observation text.
+                log.info("PATTERN_BRIEFING_NO_IMAGE pair=%s reason=no_latest_closed_pattern", symbol)
+                return None
         except Exception:
             log.exception("PATTERN_BRIEFING_OBSERVED_FALLBACK_FAILED pair=%s", symbol)
-    if not found:
-        return None
-    found.sort(key=lambda p: (priority[p.tf], -p.quality, -p.confidence))
-    p = found[0]
-    image = render_pattern_chart(symbol, p, by_tf)
-    side = "ЛОНГ" if p.side == "LONG" else "ШОРТ"
-    caption = (f"🧩 {symbol} · {p.tf} · {p.name}\nНаправление фигуры: {side} · "
-               f"геометрия {p.quality}/100 · оценка модели {p.confidence}/100 (НЕ вероятность)")
+    if selected is None:
+        if not trade_candidates:
+            log.info("PATTERN_BRIEFING_NO_IMAGE pair=%s reason=no_eligible_figure", symbol)
+            return None
+        selected = trade_candidates[0]
+
+    image = render_pattern_chart(symbol, selected, by_tf)
+    side = "ЛОНГ" if selected.side == "LONG" else "ШОРТ"
+    caption = (f"🧩 {symbol} · {selected.tf} · {selected.name}\nНаправление фигуры: {side} · "
+               f"геометрия {selected.quality}/100 · оценка модели {selected.confidence}/100 (НЕ вероятность)")
     if observed_only:
-        caption += "\nНаблюдение: фигура не прошла торговые фильтры, это не подтверждение"
-    return {"image": image, "caption": caption, "tf": p.tf, "pattern": p.name,
-            "observed_only": observed_only}
+        caption += "\nНаблюдение: это не подтверждение торгового сигнала"
+        if selected.tf in ("M15", "M5"):
+            caption += "\nМладший TF: самостоятельная фигура, не подтверждение старшего TF"
+    log.info("PATTERN_BRIEFING_IMAGE_SELECTED pair=%s tf=%s observed_only=%s name=%s",
+             symbol, selected.tf, observed_only, selected.name)
+    return {"image": image, "caption": caption, "tf": selected.tf,
+            "pattern": selected.name, "observed_only": observed_only}
