@@ -344,6 +344,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     expired_ids={item.get("setup_id") or (item.get("event") or {}).get("setup_id") for item in expired_items if isinstance(item,dict)}
     for setup in setups.values():
         if setup.setup_id in expired_ids: setup.invalid=True
+    pending_setup_ids = {item.get("setup_id") for item in pending.values()
+                         if isinstance(item, dict)}
     messages: list[str] = []
     for digest, item in list(pending.items()):
         event = item.get("event") if isinstance(item, dict) else None
@@ -361,7 +363,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 key = f"{symbol}|{tf}"
                 bars = _bars(by_tf, tf)
                 existing = setups.get(key)
-                if existing and not existing.invalid:
+                if (existing and not existing.invalid
+                        and (not getattr(cfg, "STAGE28_RETIRE_EXPIRED_EVENTS", True)
+                             or existing.setup_id not in pending_setup_ids)):
                     # BOS остаётся H1/H4, а возврат и удержание контролируются
                     # закрытой M15, чтобы не отдавать уже прошедший маршрут.
                     event = confirm_entry(existing, _bars(by_tf, "H1"), by_tf, strength, legs.get(symbol))
@@ -379,6 +383,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         text = stage27a.stamp(format_message(event, number), saved_h1)
                         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                         pending[digest] = {"event": event, "number": number,"saved_h1":saved_h1,"setup_id":existing.setup_id}
+                        pending_setup_ids.add(existing.setup_id)
                         messages.append(text)
                         _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))
                 bos = detect_bos(symbol, tf, bars)

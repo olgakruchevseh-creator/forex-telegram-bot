@@ -12,6 +12,7 @@ import io, json, logging, os
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
 from zone_reaction_confirmation import confirm_zone_reaction
@@ -214,6 +215,20 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     stored = {k: BPRZone(**v) for k,v in (state.get("zones") or {}).items()}
     pending = state.setdefault("pending_events", {})
     messages = []
+    if getattr(cfg, "STAGE28_PENDING_TTL_ALL_SOURCES", True):
+        # Keep original pending keys, including legacy rows without reaction_id.
+        old_keys = {id(raw): key for key, raw in pending.items()}
+        expired = []
+        stage27a.prune(pending, market, "bpr", expired)
+        for raw in expired:
+            if not isinstance(raw, dict) or not isinstance(raw.get("zone"), dict):
+                continue
+            z = raw["zone"]
+            # Retire exactly the original reaction key. A new confirmation at
+            # another candle close remains a genuinely new event.
+            reaction = raw.get("reaction_id") or old_keys.get(id(raw))
+            if reaction:
+                stage27a.retire_event(state, reaction, raw.get("saved_h1", ""))
     for raw in pending.values():
         z = BPRZone(**raw["zone"]); text = raw["text"]
         messages.append(text); _PENDING_CARDS[text] = (z, freeze_by_tf(market.get(z.symbol) or {}))
@@ -232,10 +247,16 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 result = _reaction(z, bars, by_tf)
                 if result and not first:
                     side, meta = result
-                    text = format_message(z, side, meta)
                     key = f"{z.zone_id}|{side}|{meta['dt'][:19]}"
-                    if key not in pending:
-                        pending[key] = {"zone": asdict(z), "text": text}
+                    if stage27a.is_retired_event(state, key):
+                        continue
+                    if key in pending:
+                        text = pending[key]["text"]  # Never rewrite the original timestamp.
+                    else:
+                        saved_h1 = stage27a.closed_h1_iso(by_tf)
+                        text = stage27a.stamp(format_message(z, side, meta), saved_h1)
+                        pending[key] = {"zone": asdict(z), "text": text,
+                                        "saved_h1": saved_h1, "reaction_id": key}
                     if text not in messages: messages.append(text)
                     _PENDING_CARDS[text] = (z, freeze_by_tf(by_tf))
     state["bootstrapped"] = True

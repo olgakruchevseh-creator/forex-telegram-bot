@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
@@ -297,6 +298,22 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
     pending = state.setdefault("pending", {})
+    # Keep backward compatibility with stage-27 persisted Fibonacci rows that
+    # carry a real reaction_dt but predate saved_h1. Their existing detector
+    # clock already expires after 90 min; NEVER stamp these as current H1.
+    legacy_recent = {}
+    if getattr(cfg, "STAGE28_PENDING_TTL_ALL_SOURCES", True):
+        for old_key, old_item in list(pending.items()):
+            ev = old_item.get("event") if isinstance(old_item, dict) else None
+            if (isinstance(ev, dict) and not old_item.get("saved_h1")
+                    and _pending_is_fresh(ev)):
+                legacy_recent[old_key] = pending.pop(old_key)
+        expired=[]
+        stage27a.prune(pending, market, "fibonacci_grid", expired)
+        pending.update(legacy_recent)
+        for item in expired:
+            if isinstance(item, dict):
+                stage27a.retire_event(state, item.get("key"), item.get("saved_h1", ""))
     messages: list[str] = []
     for digest, item in list(pending.items()):
         event = item.get("event") if isinstance(item, dict) else None
@@ -310,22 +327,25 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             log.warning("FIBONACCI_PENDING_EXPIRED symbol=%s reaction_dt=%s",
                         event.get("symbol"), event.get("reaction_dt"))
             pending.pop(digest, None)
+            stage27a.retire_event(state, event.get("key"), item.get("saved_h1", ""))
             continue
-        text = format_message(event)
+        text = stage27a.stamp(format_message(event), item.get("saved_h1", ""))
         messages.append(text)
         _PENDING_CARDS[text] = (event, freeze_by_tf(market.get(event.get("symbol")) or {}))
     pending_keys = {item.get("key") for item in pending.values() if isinstance(item, dict)}
     for symbol in cfg.PAIRS:
         try:
             event = detect_reaction(symbol, market.get(symbol) or {}, strength)
-            if not event or event["key"] in sent or event["key"] in pending_keys:
+            if (not event or event["key"] in sent or event["key"] in pending_keys
+                    or stage27a.is_retired_event(state, event["key"])):
                 continue
-            text = format_message(event)
+            saved_h1=stage27a.closed_h1_iso(market.get(symbol) or {})
+            text = stage27a.stamp(format_message(event), saved_h1)
             if first:
                 sent[event["key"]] = event["key"]
             else:
                 digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-                pending[digest] = {"key": event["key"], "event": event}
+                pending[digest] = {"key": event["key"], "event": event, "saved_h1": saved_h1}
                 pending_keys.add(event["key"])
                 messages.append(text)
                 _PENDING_CARDS[text] = (event, freeze_by_tf(market.get(symbol) or {}))

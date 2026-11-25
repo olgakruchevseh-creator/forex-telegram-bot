@@ -185,6 +185,18 @@ def review(text: str, market: dict, peers=(), source_ids=None, *, now=None, cach
                         ({"check": "closed_h1", "status": "BLOCK", "reason": h1_error},))
     checks.append({"check": "closed_h1", "status": "PASS", "close": end.isoformat()})
     if event_end is not None:
+        if getattr(cfg, "STAGE28_EVENT_CURRENT_H1_ONLY", True):
+            if tf in ("M5", "M15"):
+                is_current = (end - timedelta(hours=1)) < event_end <= end + timedelta(seconds=2)
+            elif tf == "H1":
+                is_current = abs((end - event_end).total_seconds()) <= 120
+            else:
+                # W1/D1/H4 patterns have their own event clocks and H1
+                # confirmation, not a synthetic "current H1" event clock.
+                is_current = True
+            if not is_current:
+                return Decision("BLOCK", "event_not_current_h1", pair, side, source, family,
+                                end.isoformat(), tuple(checks))
         if (end - event_end).total_seconds() > 90 * 60:
             return Decision("BLOCK", "event_too_old", pair, side, source, family, end.isoformat(), tuple(checks))
         checks.append({"check": "event_confirmation", "status": "PASS", "source_tf": tf,

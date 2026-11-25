@@ -328,7 +328,11 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
     pending = state.setdefault("pending", {})
-    stage27a.prune(pending, market, "daily_high_low")
+    expired = []
+    stage27a.prune(pending, market, "daily_high_low", expired)
+    for row in expired:
+        if isinstance(row, dict):
+            stage27a.retire_event(state, row.get("event_id"), row.get("saved_h1", ""))
     last_h1 = state.setdefault("last_h1", {})
     messages = []
     for digest,item in list(pending.items()):
@@ -347,7 +351,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 continue
             last_h1[symbol] = h1_dt
             event = detect_event(symbol, by_tf, strength)
-            if event and event["event_id"] not in sent and event["event_id"] not in pending_ids:
+            if (event and event["event_id"] not in sent and event["event_id"] not in pending_ids
+                    and not stage27a.is_retired_event(state, event["event_id"])):
                 if first:
                     sent[event["event_id"]] = h1_dt
                 else:

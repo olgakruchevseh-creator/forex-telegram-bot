@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from stage27a_event_integrity import _parse as _utc_parse, _h1_ends
+import stage27a_event_integrity as stage27a
 
 import config as cfg
 import ohlc_movement
@@ -362,7 +363,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             log.info("PHASE_PENDING_DROPPED %s %s: %s", phase.symbol, phase.phase_id, stale)
             pending.pop(digest, None)
             continue
-        text = format_message(phase, item.get("event", "exit"))
+        text = stage27a.stamp(format_message(phase, item.get("event", "exit")), item.get("saved_h1", ""))
         messages.append(text)
         _PENDING_CARDS[text] = (phase, freeze_by_tf(market.get(phase.symbol) or {}))
     for symbol in cfg.PAIRS:
@@ -402,9 +403,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                                     peer.exit_sent = True
                                     peer.exit_dt, peer.exit_price = phase.exit_dt, phase.exit_price
                                     peer.status = "ВЫХОД ПОДТВЕРЖДЁН · ДУБЛЬ TF"
-                        text = format_message(phase, "exit")
+                        saved_h1 = stage27a.closed_h1_iso(by_tf)
+                        text = stage27a.stamp(format_message(phase, "exit"), saved_h1)
                         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-                        pending[digest] = {"phase": asdict(phase), "event": "exit"}
+                        pending[digest] = {"phase": asdict(phase), "event": "exit", "saved_h1": saved_h1}
                         messages.append(text)
                         _PENDING_CARDS[text] = (phase, freeze_by_tf(by_tf))
             candidates = []

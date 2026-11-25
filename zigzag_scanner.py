@@ -12,6 +12,7 @@ from pathlib import Path
 from statistics import median
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 
 log = logging.getLogger("fxbot.zigzag")
@@ -664,6 +665,14 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
     delivered = state.setdefault("delivered", dict(state.get("signals") or {}))
     pending = state.setdefault("pending", {})
     observed = state.setdefault("observed", {})
+    if getattr(cfg, "STAGE28_PENDING_TTL_ALL_SOURCES", True):
+        expired = []
+        stage27a.prune(pending, market, "zigzag_scanner", expired)
+        # A declined structural event is retired by its original fingerprint;
+        # it may be emitted again only after an actual structural change.
+        for old in expired:
+            if isinstance(old, dict) and old.get("fingerprint") and old.get("symbol"):
+                state.setdefault("retired", {})[old["symbol"]] = old["fingerprint"]
     messages = []
     for symbol in cfg.PAIRS:
         try:
@@ -696,8 +705,14 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                     display_event = "СТРУКТУРА ПРОДОЛЖЕНА"
                 snap["event"] = display_event
                 current = pending.get(symbol) if isinstance(pending.get(symbol), dict) else {}
+                if (getattr(cfg, "STAGE28_PENDING_TTL_ALL_SOURCES", True)
+                        and state.setdefault("retired", {}).get(symbol) == fingerprint):
+                    continue
                 if current.get("fingerprint") != fingerprint:
-                    pending[symbol] = {"fingerprint": fingerprint, "message": format_message(snap)}
+                    saved_h1 = stage27a.closed_h1_iso(by_tf)
+                    pending[symbol] = {"fingerprint": fingerprint, "symbol": symbol,
+                                       "saved_h1": saved_h1,
+                                       "message": stage27a.stamp(format_message(snap), saved_h1)}
                 messages.append(pending[symbol]["message"])
                 _PENDING_CARDS[pending[symbol]["message"]] = (dict(snap), freeze_by_tf(by_tf))
         except Exception:

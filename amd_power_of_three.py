@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
 import choch
@@ -356,6 +357,12 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
     pending = state.setdefault("pending", {})
+    if getattr(cfg, "STAGE28_PENDING_TTL_ALL_SOURCES", True):
+        expired=[]
+        stage27a.prune(pending, market, "amd_power_of_three", expired)
+        for item in expired:
+            if isinstance(item, dict):
+                stage27a.retire_event(state, item.get("key"), item.get("saved_h1", ""))
     messages: list[str] = []
 
     # Сначала восстанавливаем все подтверждённые события, которые ещё не были
@@ -368,7 +375,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         if event["key"] in sent:
             pending.pop(digest, None)
             continue
-        text = format_message(event)
+        text = stage27a.stamp(format_message(event), item.get("saved_h1", ""))
         messages.append(text)
         _PENDING_CARDS[text] = (event, freeze_by_tf(market.get(event.get("symbol")) or {}))
 
@@ -385,18 +392,19 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             # Запоздалый AMD остаётся информационным статусом брифинга и не
             # передаётся Навигатору как новая торговая возможность.
             if (not event or event.get("late") or event["key"] in sent
-                    or event["key"] in pending_keys):
+                    or event["key"] in pending_keys or stage27a.is_retired_event(state, event["key"])):
                 continue
             og = ohlc_movement.guard_event(by_tf, event.get("side"), event.get("quality"))
             if not og.get("allow", True): continue
             event["quality"] = ohlc_movement.capped_event_quality(og, event["quality"], 95); event["confidence"] = min(event.get("confidence",91), max(0,event["quality"]-4))
-            text = format_message(event)
+            saved_h1=stage27a.closed_h1_iso(by_tf)
+            text = stage27a.stamp(format_message(event), saved_h1)
             digest = hashlib.sha256(text.encode()).hexdigest()[:20]
             if first:
                 # При первом запуске не рассылаем старые рыночные события.
                 sent[event["key"]] = event["key"]
             else:
-                pending[digest] = {"key": event["key"], "event": event}
+                pending[digest] = {"key": event["key"], "event": event, "saved_h1": saved_h1}
                 pending_keys.add(event["key"])
                 messages.append(text)
                 _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))

@@ -105,3 +105,22 @@ def prune(pending: dict, market: dict, module: str, expired: list | None = None)
             removed += 1
             log.warning('MODULE_PENDING_EXPIRED module=%s key=%s reason=corrupt detail=%s', module, key, type(exc).__name__)
     return removed
+
+
+def retire_event(state: dict, stable_id: str, saved_h1: str, *, limit: int = 600) -> None:
+    """Remember an EXPIRED semantic event, not its latest display timestamp.
+
+    Unlike reprising a card with a new H1 close, a durable detector ID keeps
+    rejected history out of the next scan. A different detector ID is new.
+    """
+    if not stable_id or not getattr(cfg, 'STAGE28_RETIRE_EXPIRED_EVENTS', True):
+        return
+    used = state.setdefault('retired_events_28', {})
+    used[str(stable_id)] = str(saved_h1 or '')
+    if len(used) > limit:
+        state['retired_events_28'] = dict(list(used.items())[-limit:])
+
+
+def is_retired_event(state: dict, stable_id: str) -> bool:
+    return bool(getattr(cfg, 'STAGE28_RETIRE_EXPIRED_EVENTS', True)
+                and stable_id in (state.get('retired_events_28') or {}))

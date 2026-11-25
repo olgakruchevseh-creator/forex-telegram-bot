@@ -55,7 +55,7 @@ def _invalid_crt_path(h1: list[Candle], sweep_i: int, confirm_i: int,
     age_limit = max(1, int(getattr(cfg, "CRT_MAX_CONFIRM_AFTER_SWEEP_H1", 3)))
     if confirm_i - sweep_i > age_limit:
         return "sweep_confirmation_too_late"
-    path = h1[sweep_i + 1:confirm_i + 1]
+    path = h1[sweep_i + 1:] if getattr(cfg, "STAGE28_CRT_PATH_TO_LAST_H1", True) else h1[sweep_i + 1:confirm_i + 1]
     # Do not accept a fresh 'reclaim' after a still deeper break of the sweep.
     if side == "LONG" and any(b.low < sweep.low for b in path):
         return "sweep_invalidated"
@@ -67,7 +67,8 @@ def _invalid_crt_path(h1: list[Candle], sweep_i: int, confirm_i: int,
     if side == "SHORT" and any(b.low <= ref.low for b in path):
         return "target_already_touched"
     target = ref.high if side == "LONG" else ref.low
-    remaining = (target - h1[confirm_i].close) * (1 if side == "LONG" else -1)
+    anchor_close = h1[-1].close if getattr(cfg, "STAGE28_CRT_PATH_TO_LAST_H1", True) else h1[confirm_i].close
+    remaining = (target - anchor_close) * (1 if side == "LONG" else -1)
     if remaining < max(0.0, float(getattr(cfg, "CRT_MIN_REMAINING_ATR", .35))) * av:
         return "insufficient_remaining_distance"
     return ""

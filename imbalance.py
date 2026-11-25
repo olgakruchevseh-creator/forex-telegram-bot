@@ -410,7 +410,13 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     for zone in stored.values():
         zone.fvg_class = _fvg_class(zone)
     pending_events = state.setdefault("pending_events", {})
-    stage27a.prune(pending_events, market, "imbalance")
+    expired = []
+    stage27a.prune(pending_events, market, "imbalance", expired)
+    for item in expired:
+        if isinstance(item, dict) and isinstance(item.get("zone"), dict):
+            zone_id = item["zone"].get("zone_id")
+            if zone_id:
+                stage27a.retire_event(state, f"{zone_id}|{item.get('event')}", item.get("saved_h1", ""))
     messages = []
     for raw in pending_events.values():
         zone = FvgZone(**raw["zone"])
@@ -455,6 +461,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         if not first:
                             key = f"{zone.zone_id}|{out_event}|{zone.reaction_dt[:19]}"
                             saved_h1=stage27a.closed_h1_iso(market.get(symbol) or {})
+                            if stage27a.is_retired_event(state, f"{zone.zone_id}|{out_event}"):
+                                continue
                             pending_events[key] = {"zone": asdict(zone), "event": out_event,"saved_h1":saved_h1}
                             text = stage27a.stamp(format_message(zone, out_event), saved_h1)
                             if text not in messages: messages.append(text)
@@ -467,7 +475,8 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 # delayed historical alerts when context changes later.
                 accepted = validate_zone(zone, closed_map, strength)
                 stored[zone.zone_id] = zone
-                if accepted and not first:
+                if (accepted and not first
+                        and not stage27a.is_retired_event(state, f"{zone.zone_id}|new")):
                     key = f"{zone.zone_id}|new"
                     saved_h1=stage27a.closed_h1_iso(market.get(symbol) or {})
                     pending_events[key] = {"zone": asdict(zone), "event": "new","saved_h1":saved_h1}

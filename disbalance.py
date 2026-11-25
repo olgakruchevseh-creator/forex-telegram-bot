@@ -292,7 +292,17 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     seen = state.setdefault("seen", {})
     pending = state.setdefault("pending", {})
-    stage27a.prune(pending, market, "disbalance")
+    expired = []
+    stage27a.prune(pending, market, "disbalance", expired)
+    if getattr(cfg, "STAGE28_RETIRE_EXPIRED_EVENTS", True):
+        for entry in expired:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                signal = Signal(**entry)
+                seen[f"{signal.symbol}|{signal.tf}|{signal.side}|{signal.dt}"] = signal.dt
+            except (TypeError, ValueError):
+                continue
     messages = []
     for raw in pending.values():
         signal = Signal(**raw)

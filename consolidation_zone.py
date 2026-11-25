@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 from chart_snapshot import freeze_by_tf
@@ -427,6 +428,12 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         old_zones = state.get("zones") if isinstance(state, dict) else {}
         state={"logic_version":2,"zones":old_zones or {},"pending":{},"bootstrapped":bool((state or {}).get("bootstrapped"))}
     first=not bool(state.get("bootstrapped")); pending=state.setdefault("pending",{})
+    if getattr(cfg, "STAGE28_PENDING_TTL_ALL_SOURCES", True):
+        expired = []
+        stage27a.prune(pending, market, "consolidation_zone", expired)
+        for item in expired:
+            if isinstance(item, dict):
+                stage27a.retire_event(state, item.get('event_id'), item.get('saved_h1', ''))
     stored={}
     for k,v in (state.get("zones") or {}).items():
         if isinstance(v,dict):
@@ -438,7 +445,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     for event_id,item in list(pending.items()):
         raw=item.get("zone") if isinstance(item,dict) else None
         if not isinstance(raw,dict): pending.pop(event_id,None); continue
-        z=Zone(**raw); text=format_message(z); messages.append(text)
+        z=Zone(**raw); text=stage27a.stamp(format_message(z), item.get("saved_h1", "")); messages.append(text)
         _PENDING_CARDS[text]=(z, freeze_by_tf(market.get(z.symbol) or {}))
     for symbol in cfg.PAIRS:
         try:
@@ -449,9 +456,11 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 _refresh_broken_state(z, by_tf)
             for z in [z for z in stored.values() if z.symbol==symbol and not z.breakout_sent]:
                 if detect_breakout(z, by_tf, strength) and not first:
-                    text=format_message(z); event_id=_event_id(z)
-                    if event_id not in pending:
-                        pending[event_id]={"event_id":event_id,"zone":asdict(z)}
+                    saved_h1=stage27a.closed_h1_iso(by_tf)
+                    text=stage27a.stamp(format_message(z), saved_h1); event_id=_event_id(z)
+                    if (event_id not in pending
+                            and not stage27a.is_retired_event(state, event_id)):
+                        pending[event_id]={"event_id":event_id,"zone":asdict(z),"saved_h1":saved_h1}
                         messages.append(text); _PENDING_CARDS[text]=(z,freeze_by_tf(by_tf))
             candidates=[]
             for tf in SCAN_TFS:
@@ -487,7 +496,7 @@ def event_id_for_alert(text: str) -> str:
         raw=item.get("zone") if isinstance(item,dict) else None
         if isinstance(raw,dict):
             try:
-                if format_message(Zone(**raw)) == text:
+                if stage27a.stamp(format_message(Zone(**raw)), item.get("saved_h1", "")) == text:
                     return str(item.get("event_id") or event_id)
             except Exception:
                 continue

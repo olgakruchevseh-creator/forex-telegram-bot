@@ -1690,3 +1690,9 @@ STAGE27D_DISK_RESERVE_BYTES = 200_000_000  # При нехватке места 
 # Без внешнего HTTPS PUT + обратной полной GET/SHA256 проверки удаление запрещено.
 STAGE27E_ENABLE_MANUAL_OPERATIONS = True  # False полностью блокирует export и compact
 STAGE27E_MIN_FREE_RESERVE_BYTES = 300_000_000  # Не расходовать последние 300 МБ тома
+
+# Этап 28A: устранение устаревших событий и повторов, откат по одному флагу.
+STAGE28_EVENT_CURRENT_H1_ONLY = True
+STAGE28_CRT_PATH_TO_LAST_H1 = True
+STAGE28_PENDING_TTL_ALL_SOURCES = True
+STAGE28_RETIRE_EXPIRED_EVENTS = True
