@@ -830,7 +830,10 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float | None) -> list[
         lines.append("нет данных")
         return lines
     lines.append(f"Цена: {dxy.price:.2f}")
-    lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
+    # round() + 0.0 turns -0.004 into 0.00 (not «-0.00%»), so the printed
+    # change and the impulse word below can no longer contradict each other.
+    shown_change = round(float(dxy.change_pct), 2) + 0.0
+    lines.append(f"Изменение за последнюю закрытую H1: {shown_change:+.2f}%")
     dxy_direction = _dir_word(effective_dxy_bias(dxy))
     dxy_icon = "🟢" if dxy_direction == "LONG" else ("🔴" if dxy_direction == "SHORT" else "⚪")
     # «структурное» is only true when the ZigZag structure itself agrees.
@@ -1254,9 +1257,11 @@ def build_briefing_text(
     if getattr(cfg, "PATTERNS_ENABLED", True):
         try:
             import patterns_mtf
+            import patterns as _patterns
             lines.extend(["", "🧩 МУЛЬТИТАЙМФРЕЙМОВЫЕ ПАТТЕРНЫ · OBSERVE_ONLY"])
             for b in briefs:
-                observation = patterns_mtf.observe(b.symbol, (market or {}).get(b.symbol) or {})
+                # Frozen bars only (no provisional, still-forming OHLC).
+                observation = patterns_mtf.observe(b.symbol, _patterns.final_by_tf(market, b.symbol))
                 lines.extend(["", patterns_mtf.format_observation(observation, max_per_tf=None)])
         except Exception:
             log.exception("PATTERN_MTF_FULL_BRIEFING_FAILED")

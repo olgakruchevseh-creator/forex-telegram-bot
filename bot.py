@@ -552,7 +552,9 @@ def format_signal(side: str, stack: PairStack, strength: dict[str, float]) -> st
     h1 = stack.views.get("H1") or stack.views.get("M15")
     if h1 and h1.nearby_fvg:
         kind = "бычий FVG" if h1.nearby_fvg.kind == "bull" else "медвежий FVG"
-        facts.append(f"\n• Рядом {kind}: {h1.nearby_fvg.bottom:.5f}–{h1.nearby_fvg.top:.5f}")
+        g = h1.nearby_fvg
+        where = "Цена внутри" if g.bottom <= h1.last <= g.top else "Рядом"
+        facts.append(f"\n• {where} {kind}: {g.bottom:.5f}–{g.top:.5f}")
     return "\n".join(facts)
 
 
@@ -1776,7 +1778,10 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
                 import patterns_mtf
-                mtf_patterns_text = patterns_mtf.briefing_summary(symbol, (market or {}).get(symbol) or {})
+                # Same frozen bars as the picture below: a bar still forming
+                # when it was downloaded has provisional OHLC and must not
+                # name a figure in the text that the picture cannot show.
+                mtf_patterns_text = patterns_mtf.briefing_summary(symbol, patterns.final_by_tf(market, symbol))
             except Exception:
                 log.exception("PATTERN_MTF_BRIEFING_FAILED pair=%s", symbol)
         pair_text = localize_telegram(pair_text)

@@ -39,6 +39,10 @@ class Swing:
     index: int
     price: float
     kind: str
+    # The newest swing of a ZigZag is still extendable: a later, more extreme
+    # pivot of the same kind replaces it. Every earlier swing is final.
+    # Default True keeps every existing constructor call unchanged.
+    final: bool = True
 
 
 @dataclass
@@ -263,12 +267,18 @@ def zigzag(candles: list[Candle], pct: float, min_bars: int, scale: float = 1.0)
         return out
 
     swings = normalize(1.0)
-    if len(swings) < 4:
-        # Quiet-market fallback. It is decided once per window and only while
-        # fewer than four swings exist, so it cannot rewrite an established
-        # structure of 4+ swings.
+    if len(swings) < 4 and getattr(cfg, "ZIGZAG_QUIET_FALLBACK_ENABLED", False):
+        # Legacy quiet-market fallback (off by default). Switching between the
+        # 0.65 and 1.0 chains is NOT causal: the bar on which the 1.0 chain
+        # reaches its 4th swing replaces the whole 0.65 chain (seen: 9 swings
+        # -> 4), i.e. history is repainted. A quiet window honestly has fewer
+        # swings; bias_of() then uses the EMA/ADX phase.
         swings = normalize(0.65)
-    return swings[-12:]
+    swings = swings[-12:]
+    if swings:
+        last = swings[-1]
+        swings[-1] = Swing(last.index, last.price, last.kind, final=False)
+    return swings
 
 
 def structure_from_swings(swings: list[Swing]) -> str:
@@ -297,7 +307,13 @@ def structure_from_swings(swings: list[Swing]) -> str:
     return "неясно"
 
 
-def find_fvgs(candles: list[Candle], last_n: int = 40) -> list[FVG]:
+def find_fvgs(candles: list[Candle], last_n: int = 40,
+              unfilled_only: bool = False) -> list[FVG]:
+    """Three-candle gaps of the last ``last_n`` bars, newest six.
+
+    ``unfilled_only`` drops filled gaps BEFORE the newest-six cut; filtering
+    afterwards lost an older open gap whenever the six newest were filled.
+    """
     out: list[FVG] = []
     start = max(2, len(candles) - last_n)
     for i in range(start, len(candles)):
@@ -307,6 +323,8 @@ def find_fvgs(candles: list[Candle], last_n: int = 40) -> list[FVG]:
             out.append(FVG("bull", c.low, a.high, b.dt, i))
         if a.low > c.high:
             out.append(FVG("bear", a.low, c.high, b.dt, i))
+    if unfilled_only:
+        out = [g for g in out if not is_fvg_filled(g, candles)]
     return out[-6:]
 
 
@@ -340,6 +358,24 @@ def nearest_unfilled(fvgs: list[FVG], price: float) -> Optional[FVG]:
     return best
 
 
+def _ema_gap_is_flat(fast: float, slow: float, candles: list[Candle]) -> bool:
+    """EMA(21)–EMA(50) gap small enough to call the market flat.
+
+    The old fixed 0.08 % of price is not scale-invariant: on D1/W1 it is a
+    small fraction of one bar's range (flat almost never fired), on M5 it is
+    several bars' range (flat fired on directional drift). The gap is now
+    measured in ATR(14) of the SAME timeframe; 0.8 ATR reproduces the old
+    0.08 % on a typical EUR/USD H1. PHASE_FLAT_ATR_MULT <= 0 restores 0.08 %.
+    """
+    mult = float(getattr(cfg, "PHASE_FLAT_ATR_MULT", 0.8))
+    if mult <= 0:
+        return abs(fast - slow) / slow * 100 < 0.08
+    a = atr(candles, cfg.ATR_PERIOD)
+    if not a or not math.isfinite(a):
+        return abs(fast - slow) / slow * 100 < 0.08
+    return abs(fast - slow) < mult * a
+
+
 def phase(candles: list[Candle]) -> tuple[str, float]:
     closes = [c.close for c in candles]
     fast = _ema(closes, cfg.EMA_FAST)
@@ -353,7 +389,7 @@ def phase(candles: list[Candle]) -> tuple[str, float]:
         return "импульс / тренд вверх", a
     if trending and f < s:
         return "импульс / тренд вниз", a
-    if not trending and s and abs(f - s) / s * 100 < 0.08:
+    if not trending and s and _ema_gap_is_flat(f, s, candles):
         return "флэт / консолидация", a
     if f > s:
         return "коррекция в бычьем контексте", a
@@ -601,8 +637,11 @@ def analyze_tf(tf_key: str, label: str, candles: list[Candle]) -> Optional[TfVie
     ph, adx_v = phase(candles)
     # «nearest_unfilled» used to skip only a gap containing the current price:
     # a gap fully traded through hours ago was still shown as «Рядом FVG».
-    fvgs = [g for g in find_fvgs(candles) if not is_fvg_filled(g, candles)]
-    near = nearest_unfilled(fvgs, last)
+    fvgs = find_fvgs(candles, unfilled_only=True)
+    # An open gap that price is trading inside is the most relevant one;
+    # nearest_unfilled() skips it by design, so it is checked first.
+    inside = [g for g in fvgs if g.bottom <= last <= g.top]
+    near = inside[-1] if inside else nearest_unfilled(fvgs, last)
     a = atr(candles, cfg.ATR_PERIOD)
     if near and a:
         mid = (near.top + near.bottom) / 2

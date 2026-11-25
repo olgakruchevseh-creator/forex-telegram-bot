@@ -1377,6 +1377,33 @@ def _briefing_saved_levels(symbol: str, closed_h1_dt: str,
         return [], False
 
 
+def _briefing_saved_dt(symbol: str) -> str:
+    """Last H1 the scanner persisted for ``symbol`` ('' if unknown)."""
+    try:
+        saved = json.loads(levels_state_path().read_text(encoding="utf-8"))
+        return str((saved.get("last_closed") or {}).get(f"{symbol}:H1") or "")
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ""
+
+
+def _newest_bar_crossed(z: Zone, bar: Candle) -> bool:
+    """True when the newest closed H1 CLOSED through the zone against its role.
+
+    A wick alone is not counted: the scanner itself needs a close beyond the
+    boundary. Only the bar the lagging state has not processed is checked.
+    """
+    try:
+        close = float(bar.close)
+        low, high = float(z.low), float(z.high)
+    except (TypeError, ValueError):
+        return True
+    if z.kind == "support":
+        return close < low
+    if z.kind == "resistance":
+        return close > high
+    return False
+
+
 def _briefing_matching_saved(fresh: Zone, old: list[Zone], used: set[str]) -> Zone | None:
     matches = []
     for z in old:
@@ -1459,10 +1486,17 @@ def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dic
     # keeping all candidates here prevents weak-but-nearby zones disappearing.
     fresh = merge_cluster(symbol, raw, atr_map, limit=None)
     persisted, synced = _briefing_saved_levels(symbol, h1[-1].dt, h1[-2].dt)
+    # The scanner state may be exactly one closed H1 behind (stage 22). That
+    # state is causal, but it has not seen the newest bar: a zone that this
+    # bar closed through must not keep «ОТБОЙ ПОДТВЕРЖДЁН» from before it.
+    lag_h1 = int(synced and _briefing_saved_dt(symbol) != str(h1[-1].dt))
+    newest = h1[-1]
     used: set[str] = set()
     combined: list[Zone] = []
     for z in fresh:
         match = _briefing_matching_saved(z, persisted, used) if synced else None
+        if match and lag_h1 and _newest_bar_crossed(match, newest):
+            match = None
         if match:
             # Scanner owns lifecycle/role; fresh calculation owns current geometry.
             z.kind = match.kind
@@ -1482,6 +1516,8 @@ def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dic
     # Retain role-changed zones that a fresh swing scan did not rediscover.
     if synced:
         for z in persisted:
+            if lag_h1 and _newest_bar_crossed(z, newest):
+                continue
             if z.zone_id not in used and z.state == "роль изменена":
                 z._brief_synced = True
                 combined.append(z)
@@ -1569,6 +1605,7 @@ def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dic
             min(r["high"], z["high"]) >= max(r["low"], z["low"]) for z in chosen_current)]
     snapshot = {"symbol": symbol, "current_price": current,
             "as_of_h1": h1[-1].dt, "lifecycle_synced": synced,
+            "lifecycle_lag_h1": lag_h1,
             "supports": select(outside_current(supports), "S", count),
             "resistances": select(outside_current(resistances), "R", count),
             "current_zones": chosen_current,

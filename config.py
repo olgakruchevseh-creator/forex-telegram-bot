@@ -119,6 +119,9 @@ ZIGZAG_PCT = {
     "M5": 0.08,
 }
 ZIGZAG_MIN_BARS = 3
+# Legacy 0.65 quiet-market fallback repainted history when the 1.0 chain
+# reached 4 swings (stage 23). Off: a quiet window keeps fewer swings.
+ZIGZAG_QUIET_FALLBACK_ENABLED = False
 # Ансамбль ZigZag: быстрый / базовый / медленный масштабы. Итоговое
 # направление разрешается только при согласии минимум 2 из 3.
 ZIGZAG_ENSEMBLE_FACTORS = (0.72, 1.00, 1.45)
@@ -146,6 +149,9 @@ EMA_SLOW = 50
 
 FVG_NEAR_ATR = 1.2
 ATR_PERIOD = 14
+# Flat phase: |EMA21-EMA50| < k*ATR14 of the same TF (scale-invariant across
+# W1..M5). 0 = legacy fixed 0.08 % of price.
+PHASE_FLAT_ATR_MULT = 0.8
 
 # HTF IRL (Internal Range Liquidity): внутренний контекст Master Direction.
 # Не создаёт отдельные сигналы и не дублирует Imbalance/FVG.
