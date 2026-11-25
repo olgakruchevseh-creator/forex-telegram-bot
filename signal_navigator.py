@@ -310,16 +310,37 @@ def _module_targets(symbol: str, side: str, by_tf: dict, source_text: str, ancho
     ahead = [s for s in swings if (s.kind == ("high" if direction > 0 else "low")) and (s.price - anchor) * direction > 0]
     behind = [s for s in swings if (s.price - anchor) * direction < 0]
     if family == "Patterns" and key > 0:
-        extreme = max((s.price for s in behind), default=0.0) if direction > 0 else min((s.price for s in behind), default=0.0)
-        if not extreme and behind:
-            extreme = behind[-1].price
+        if getattr(cfg, "NAVIGATOR_PATTERN_MEASURED_FROM_EXTREME", True):
+            # A candle or a harmonic does NOT have a universal double-bottom
+            # height. Until the source publishes exact geometry anchors, infer
+            # a measured target only for a real double bottom/top from the
+            # last two corresponding opposite pivots of this source TF.
+            label = source_text.upper()
+            measured_shape = (("ДВОЙНОЕ ОСНОВАНИЕ" in label and direction > 0)
+                              or ("ДВОЙНАЯ ВЕРШИНА" in label and direction < 0))
+            lookback = int((getattr(cfg, "PATTERN_LOOKBACK", {}) or {}).get(tf, 160))
+            recent = [s for s in swings if s.kind == ("low" if direction > 0 else "high")
+                      and 0 <= s.index < len(bars) and s.index >= max(0, len(bars) - lookback)
+                      and (key - s.price) * direction > 0]
+            if measured_shape and len(recent) >= 2 and abs(recent[-1].price - recent[-2].price) <= local_atr * .35:
+                extreme = (min(recent[-1].price, recent[-2].price) if direction > 0
+                           else max(recent[-1].price, recent[-2].price))
+            else:
+                extreme = 0.0  # no identifiable source geometry: no invented target
+        else:
+            extreme = max((s.price for s in behind), default=0.0) if direction > 0 else min((s.price for s in behind), default=0.0)
+            if not extreme and behind:
+                extreme = behind[-1].price
         height = abs(extreme - key) if extreme else 0.0
         if height >= local_atr * .35:
             _append_target(targets, key + direction * height, f"измеренная фигура {tf}", anchor, direction, tolerance)
             _append_target(targets, key + direction * height * 1.272, f"расширение 1.272 {tf}", anchor, direction, tolerance)
     elif family == "Fibonacci" and len(swings) >= 2:
         leg = abs(swings[-1].price - swings[-2].price)
-        base = swings[-2].price
+        if getattr(cfg, "NAVIGATOR_FIB_BASE_FROM_LEG_ORIGIN", True):
+            base = min(swings[-1].price, swings[-2].price) if direction > 0 else max(swings[-1].price, swings[-2].price)
+        else:
+            base = swings[-2].price
         if leg >= local_atr * .35:
             _append_target(targets, base + direction * leg * 1.272, f"Фибо 1.272 {tf}", anchor, direction, tolerance)
             _append_target(targets, base + direction * leg * 1.618, f"Фибо 1.618 {tf}", anchor, direction, tolerance)
@@ -395,6 +416,13 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     # Сначала геометрия самого сигнала и его таймфрейма. Общая лестница H4/D1
     # только дополняет её отдельными уровнями. Третья цель не добирается ATR.
     for item in _module_targets(symbol, side, by_tf, source_text, anchor, av):
+        # Keep explicit source TR1 unchanged: this is the source's reported
+        # target, not a Navigator-invented milestone. All other module targets
+        # obey the same TR1 minimum distance as senior swing targets.
+        if (getattr(cfg, "NAVIGATOR_MODULE_TARGETS_MIN_DISTANCE", True)
+                and not str(item.get("tf", "")).startswith("TR1 источника")
+                and abs(float(item["price"]) - anchor) < min_target_distance):
+            continue
         if not any(abs(item["price"] - float(old["price"])) <= tolerance for old in targets):
             targets.append(item)
     targets.sort(key=lambda item: abs(float(item["price"]) - anchor))

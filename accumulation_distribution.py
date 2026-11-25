@@ -342,14 +342,36 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     candidates.append(phase)
             if candidates:
                 phase = max(candidates, key=lambda p: (TF_RANK[p.tf], p.quality))
-                # Approximate clustering may shift edges slightly. One active
-                # phase per pair/TF/kind prevents repeated cards.
-                same = next((p for p in stored.values() if p.symbol == symbol and p.tf == phase.tf and p.kind == phase.kind and not p.exit_sent), None)
-                if same:
-                    same.low, same.high = phase.low, phase.high
-                    same.quality = max(same.quality, phase.quality)
-                    same.touches_low, same.touches_high = phase.touches_low, phase.touches_high
+                # A completed phase is immutable as a signal lifecycle.  The
+                # current price may keep trading the same box for many days:
+                # rediscovery must not resurrect a previously delivered exit.
+                if getattr(cfg, "PHASE_EXITED_RANGE_DEDUP", True):
+                    peers = [p for p in stored.values()
+                             if p.symbol == symbol and p.tf == phase.tf and p.kind == phase.kind]
+                    def distance(prior):
+                        width = max(prior.high - prior.low, phase.high - phase.low, 1e-12)
+                        return max(abs(prior.low - phase.low), abs(prior.high - phase.high)) / width
+                    similar = [p for p in peers if distance(p) <= .30]
+                    same = min(similar, key=distance) if similar else None
                 else:
+                    same = next((p for p in stored.values()
+                                 if p.symbol == symbol and p.tf == phase.tf
+                                 and p.kind == phase.kind and not p.exit_sent), None)
+                if same:
+                    if same.exit_sent:
+                        # Only observational timestamp can advance; do not
+                        # clear exit_sent, exit_price, exit_dt or recreate id.
+                        if phase.last_dt > same.last_dt:
+                            same.last_dt = phase.last_dt
+                    else:
+                        same.low, same.high = phase.low, phase.high
+                        same.quality = max(same.quality, phase.quality)
+                        same.touches_low, same.touches_high = phase.touches_low, phase.touches_high
+                else:
+                    # Rounded phase IDs can coincide even if ranges differ.
+                    # A terminal lifecycle may never be overwritten.
+                    if phase.phase_id in stored and stored[phase.phase_id].exit_sent:
+                        continue
                     stored[phase.phase_id] = phase
                     # A range after a prior move is context, not a confirmed
                     # trading direction. Notify only after a closed-candle exit.

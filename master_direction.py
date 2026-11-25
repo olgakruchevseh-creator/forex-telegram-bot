@@ -84,6 +84,13 @@ def _lower_timeframes_fresh(by_tf: dict) -> bool:
 
 
 def _consensus(stack: PairStack, keys: tuple[str, ...], minimum: int) -> int:
+    """Master majority of HTF votes, not analysis._vote unanimity.
+
+    A dissenting TF does not silently disappear: Master still checks the
+    individual timeframe context and veto layers after this majority vote.
+    Keep both policies distinct; changing one to match the other would alter
+    signal admission, not just display.
+    """
     votes = [stack.views[k].bias for k in keys if k in stack.views]
     up = sum(v > 0 for v in votes)
     down = sum(v < 0 for v in votes)

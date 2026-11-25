@@ -245,7 +245,7 @@ def _observe_calibration(state: dict, symbol: str, bars: list[Candle]) -> None:
     It never gates or changes the live EDGE message. Each candidate forecast is
     settled on the next closed H1 bar and stored per symbol/configuration.
     """
-    if not bool(getattr(cfg, "EDGE_CALIBRATION_OBSERVE_ONLY", False)) or len(bars) < 40:
+    if not bool(getattr(cfg, "EDGE_CALIBRATION_OBSERVE_ONLY", True)) or len(bars) < 40:
         return
     root = state.setdefault("calibration_observe", {})
     pair = root.setdefault(symbol, {"candidates": {}})

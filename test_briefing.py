@@ -888,7 +888,7 @@ class BriefingVisualPairHeaderTests(unittest.TestCase):
         )
         text = "\n".join(briefing.format_board([b]))
         self.assertIn("━━━ 💱 EUR/USD ━━━", text)
-        self.assertIn("🟢 НАПРАВЛЕНИЕ: ЛОНГ", text)
+        self.assertIn("🟢 НАПРАВЛЕНИЕ СЕССИИ: ЛОНГ", text)
 
     def test_unconfirmed_session_direction_is_neutral_not_wait(self):
         b = briefing.PairBrief(
@@ -897,4 +897,4 @@ class BriefingVisualPairHeaderTests(unittest.TestCase):
             state="RANGE", side=None, score=0, news_near=False,
         )
         text = "\n".join(briefing.format_board([b]))
-        self.assertIn("⚪ НАПРАВЛЕНИЕ: НЕЙТРАЛЬНО", text)
+        self.assertIn("⚪ НАПРАВЛЕНИЕ СЕССИИ: НЕЙТРАЛЬНО", text)

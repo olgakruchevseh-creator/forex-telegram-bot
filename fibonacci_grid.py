@@ -127,7 +127,16 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
     # Three-point A-B-C projection starts from the confirmed pullback extreme.
     # Keep the legacy two-point extensions for compatibility, but expose the
     # causal projection separately so targets are not silently reinterpreted.
-    projection_anchor = current.low if side == "LONG" else current.high
+    if getattr(cfg, "FIBONACCI_PROJECTION_FROM_PULLBACK_EXTREME", True):
+        # End is a CONFIRMED H1 ZigZag pivot; every later bar here is already
+        # closed by _bars(). The reaction candle is included in the search.
+        pullback_bars = h1[end.index + 1:]
+        if not pullback_bars:
+            return None
+        projection_anchor = (min(bar.low for bar in pullback_bars) if side == "LONG"
+                             else max(bar.high for bar in pullback_bars))
+    else:
+        projection_anchor = current.low if side == "LONG" else current.high
     if side == "LONG":
         fib_projection = {r: projection_anchor + move * r for r in extension_ratios}
     else:

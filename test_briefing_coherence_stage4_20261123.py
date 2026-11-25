@@ -58,7 +58,7 @@ def test_forecast_numbers_are_scores_not_historical_probabilities(monkeypatch):
     monkeypatch.setattr(briefing.divergence_context, "analyze_symbol", lambda *_: None)
     monkeypatch.setattr(briefing.divergence_context, "score_delta", lambda *_: 0)
     report="\n".join(briefing.format_next_session_bias([b], {}))
-    assert "оценка согласования" in report
+    assert "балл прогноза сессии" in report
     assert "/100" in report and "%" not in report
     assert "НЕ статистическая вероятность" in report
 

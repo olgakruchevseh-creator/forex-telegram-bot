@@ -1177,7 +1177,7 @@ async def _send_parts(app: Application, chat_id: int, text: str) -> None:
 async def _deliver_scheduled_reports(app: Application, chat_id: int) -> None:
     """Reports are operationally independent from trade-basket completeness."""
     if getattr(cfg, "SIGNAL_JOURNAL_ENABLED", True) and getattr(
-        cfg, "SIGNAL_JOURNAL_REPORTS_ENABLED", False
+        cfg, "SIGNAL_JOURNAL_REPORTS_ENABLED", True
     ):
         try:
             for report_id, report_text in signal_journal.pending_reports(datetime.now(timezone.utc)):
@@ -2777,7 +2777,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Верхний предел новых карточек за H1. 0 = без лимита.
         # AMD, обязательный пробой уровня и KILLER идут отдельно и лимит не едят.
-        hourly_cap = int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 7) or 0)
+        hourly_cap = int(getattr(cfg, "MAX_MODULE_ALERTS_PER_H1", 0) or 0)
         killer_cards = []
         trade_pool = list(module_alerts)
         if getattr(cfg, "KILLER_BYPASS_HOURLY_CAP", True):
@@ -3154,7 +3154,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             briefing.just_opened(
                 window_min=int(getattr(cfg, "SESSION_PROJECTIONS_OPEN_WINDOW_MIN", 20))
             )
-            or bool(getattr(cfg, "SESSION_PROJECTIONS_CATCH_UP", False))
+            or bool(getattr(cfg, "SESSION_PROJECTIONS_CATCH_UP", True))
         )
         if getattr(cfg, "SESSION_PROJECTIONS_ENABLED", True) and session_projection_due:
             try:

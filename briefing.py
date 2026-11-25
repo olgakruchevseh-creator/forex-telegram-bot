@@ -249,6 +249,11 @@ def classify_state(stack: Optional[PairStack]) -> str:
         if dv and "смена" in (dv.structure or ""):
             return f"ПОДТВЕРЖДЁННЫЙ РАЗВОРОТ {_dir_word(d1)}"
         return f"ТРЕНД {_dir_word(d1)}"
+    if getattr(cfg, "BRIEFING_STATE_D1_NEUTRAL_BRANCHES", True):
+        if not d1 and h4 and h1 == h4:
+            return f"ИМПУЛЬС H4 {_dir_word(h4)} · D1 НЕЙТРАЛЕН"
+        if d1 and not h4 and h1 == d1:
+            return f"ТРЕНД D1 {_dir_word(d1)} · H4 НЕЙТРАЛЕН"
     # Один M15 среди нейтральных H1/M5 — ещё не локальный импульс.
     # Требуется настоящее большинство двух младших таймфреймов из трёх.
     lower = (h1, m15, m5)
@@ -1034,7 +1039,10 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         direction = b.side or session_pair_side(b)
         direction_icon = "🟢" if direction == "LONG" else ("🔴" if direction == "SHORT" else "⚪")
         direction_text = _ru_display(direction) if direction else "НЕЙТРАЛЬНО"
-        lines.append(f"{direction_icon} НАПРАВЛЕНИЕ: {direction_text}")
+        if getattr(cfg, "BRIEFING_RELATION_TO_HEADLINE", True):
+            lines.append(f"{direction_icon} НАПРАВЛЕНИЕ СЕССИИ: {direction_text}")
+        else:
+            lines.append(f"{direction_icon} НАПРАВЛЕНИЕ: {direction_text}")
         lines.append(f"W1 {_ru_display(b.w1)} · D1 {_ru_display(b.d1)} · H4 {_ru_display(b.h4)} · H1 {_ru_display(b.h1)} · M15 {_ru_display(b.m15)} · M5 {_ru_display(b.m5)}")
         disagreements = _direction_method_disagreements(b)
         if disagreements:
@@ -1072,8 +1080,20 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
         lines.append(f"Согласие D1/H4/H1: {agree_label}")
         session_side = session_pair_side(b)
         lines.append(f"Направление текущей сессии: {_ru_display(session_side) if session_side else 'НЕ ПОДТВЕРЖДЕНО'}")
-        relation = ("не оценивается" if not b.strength_known
-                    else b.strength_relation or _strength_relation(b.gap, technical_pair_side(b)))
+        if not b.strength_known:
+            relation = "не оценивается"
+        elif getattr(cfg, "BRIEFING_RELATION_TO_HEADLINE", True):
+            # The displayed strength relation must refer to the displayed
+            # session side, NOT the separate D1/H4/H1 majority used for scoring.
+            if direction:
+                relation = _strength_relation(b.gap, direction)
+            elif technical_side:
+                relation = (f"к D1/H4/H1 {_ru_display(technical_side)}: "
+                            f"{_strength_relation(b.gap, technical_side)}")
+            else:
+                relation = "нейтрально · нет направленного сценария"
+        else:
+            relation = b.strength_relation or _strength_relation(b.gap, technical_side)
         lines.append(f"Сила: {force} · {relation}")
         try:
             import session_projection_reports as projection_reports
@@ -1179,7 +1199,7 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
         tech=technical_pair_side(b)
         if not tech:
             lines.append(
-                f"{b.symbol}: ⚪ нет направленного прогноза · согласие {b.agree} · состояние {b.state}"
+                f"{b.symbol}: ⚪ нет направленного прогноза · согласие {b.agree} · состояние {_ru_display(b.state)}"
             )
             continue
         direction=1 if tech=="LONG" else -1
@@ -1190,9 +1210,9 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
         score=max(45,min(82,int(round(score))))
         note=(f" · {div.kind}" if div and div.confirmed else "")
         tech_icon = "🟢" if tech == "LONG" else "🔴"
-        lines.append(f"{b.symbol}: сценарий {tech_icon} {_ru_display(tech)} · оценка согласования {score}/100 · текущая разница силы {b.gap:+.2f}{note}")
+        lines.append(f"{b.symbol}: сценарий {tech_icon} {_ru_display(tech)} · балл прогноза сессии {score}/100 · текущая разница силы {b.gap:+.2f}{note}")
     if len(lines)==3: lines.append("Нет подтверждённого прогнозного направления")
-    lines.append("Оценка 0–100 — эвристический балл согласования, НЕ статистическая вероятность и НЕ сигнал.")
+    lines.append("Балл прогноза сессии 0–100 — отдельная эвристическая шкала, НЕ статистическая вероятность и НЕ сигнал.")
     return lines
 
 def build_briefing_text(

@@ -476,6 +476,29 @@ def _levels_lines(symbol: str, info: dict | None) -> list[str]:
     resistances = list(info.get("resistances") or [])[:2]
     current = list(info.get("current_zones") or [])[:1]
     warnings = list(info.get("observations") or [])[:1]
+    if getattr(cfg, "BRIEFING_LEVELS_NO_OVERLAP", True) and warnings:
+        # Display coherence ONLY: never mutate the underlying level snapshot,
+        # lifecycle or scanner state. A role-change observation that overlaps
+        # a published S/R zone is attached to that zone, not a contradictory
+        # separate line with the same price range.
+        supports = [dict(x) for x in supports]
+        resistances = [dict(x) for x in resistances]
+        current = [dict(x) for x in current]
+        remaining = []
+        for observation in warnings:
+            overlapping = False
+            try:
+                o_low, o_high = float(observation["low"]), float(observation["high"])
+                for z in supports + resistances + current:
+                    if (min(o_high, float(z["high"])) >=
+                            max(o_low, float(z["low"]))):
+                        z["status"] = str(z.get("status") or "НЕ ПРОВЕРЕНА") + " · роль под вопросом"
+                        overlapping = True
+            except (TypeError, ValueError, KeyError):
+                pass
+            if not overlapping:
+                remaining.append(observation)
+        warnings = remaining
     if info.get("current_price") is None and not (supports or resistances or current):
         return ["Уровни S/R: нет закрытой H1 для расчёта"]
     def fmt(row: dict) -> str:

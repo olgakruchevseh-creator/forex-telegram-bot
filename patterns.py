@@ -1141,7 +1141,7 @@ def harmonic_confirmation(symbol: str, side: str, by_tf: dict, strength: dict[st
     if not _strength_confirms(symbol, side, strength):
         return False
     h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
-    d_open = _harmonic_d_open(pattern) if getattr(cfg, "HARMONIC_CONFIRM_FROM_D", True) else None
+    d_open = _harmonic_d_open(pattern) if getattr(cfg, "HARMONIC_CONFIRM_FROM_D", False) else None
     if d_open is not None:
         opens = [_parse_utc(bar.dt) for bar in h1]
         first_i = next((i for i, opened in enumerate(opens)

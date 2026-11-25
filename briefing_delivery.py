@@ -35,7 +35,7 @@ def _relevant_lines(pair_text: str) -> list[str]:
     raw = [line.strip() for line in (pair_text or "").splitlines() if line.strip()]
     selectors = (
         lambda x: "💱" in x and "━━" in x,
-        lambda x: "НАПРАВЛЕНИЕ:" in x,
+        lambda x: "НАПРАВЛЕНИЕ:" in x or "НАПРАВЛЕНИЕ СЕССИИ:" in x,
         lambda x: x.startswith("W1 "),
         lambda x: x.startswith("⚠️ РАСХОЖДЕНИЕ МЕТОДОВ:"),
         lambda x: x.startswith("Текущая зона:"),

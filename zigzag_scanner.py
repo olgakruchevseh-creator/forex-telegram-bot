@@ -331,7 +331,7 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float] | None =
         except Exception:
             log.exception("ZIGZAG_CORRECTION_STRUCTURE_FAILED symbol=%s", symbol)
     elliott = {}
-    if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", False):
+    if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", True):
         try:
             import elliott_waves
             # Independent degrees: do not combine D1 pivots with H1 pivots.
@@ -412,7 +412,7 @@ def briefing_status(symbol: str, by_tf: dict, *, snapshot: dict | None = None) -
     direction = _word(structural_dirs.get(snap.get("tf"), 0))
     if seq:
         result = f"{snap['tf']}: {seq}" + (f" · {direction}" if direction else " · структура смешанная")
-        if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", False):
+        if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", True):
             try:
                 waves = snap.get("elliott_observation") or {}
                 wave_tf = next((key for key in ("H1", "H4", "D1", "W1")
@@ -474,7 +474,7 @@ def format_message(s: dict) -> str:
             lines.extend(zigzag_correction_structure.compact_lines(s.get("correction_structure")))
         except Exception:
             pass
-    if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", False):
+    if getattr(cfg, "ELLIOTT_WAVES_OBSERVE_ONLY_ENABLED", True):
         try:
             import elliott_waves
             lines.extend(elliott_waves.compact_lines(s.get("elliott_observation")))
