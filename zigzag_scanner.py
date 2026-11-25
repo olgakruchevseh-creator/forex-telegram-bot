@@ -451,7 +451,10 @@ def format_message(s: dict) -> str:
     tf_line = " · ".join(f"{tf} {_word(dirs.get(tf, 0)) or 'RANGE'}" for tf in SCAN_TFS if tf in dirs)
     lines = [
         "━━━━━━━━━━━━━━━━━━",
-        f"↕️ ZIGZAG — {s['event']}",
+        (f"↕️ ZIGZAG — {s['event']} · НАБЛЮДЕНИЕ"
+         if getattr(cfg, 'STAGE28_ZIGZAG_PULLBACK_INFO_ONLY', True)
+         and s['event'] in ('ОТКАТ', 'ОТКАТ ПРОДОЛЖАЕТСЯ')
+         else f"↕️ ZIGZAG — {s['event']}"),
         "━━━━━━━━━━━━━━━━━━",
         "",
         f"Пара: {s['symbol']}",
@@ -459,7 +462,14 @@ def format_message(s: dict) -> str:
         f"Основное направление: {main_side or side}",
         f"Таймфреймы: {tf_line}",
         f"Структура {s['tf']}: {s['structure']}",
-        f"Фаза: {s['phase']} · ADX {s['adx']}",
+        (f"Фаза {s.get('tf') or 'H1'} по EMA/ADX: {s['phase']} · ADX {s['adx']}" +
+         (" · расходится со структурой (EMA/ADX запаздывает)"
+          if (s.get('directions') or {}).get(s.get('tf')) in (-1, 1)
+          and ((s['phase'].lower().find('вверх') >= 0 and (s.get('directions') or {})[s.get('tf')] == -1)
+               or (s['phase'].lower().find('вниз') >= 0 and (s.get('directions') or {})[s.get('tf')] == 1))
+          else "")
+         if getattr(cfg, 'STAGE28_ZIGZAG_PHASE_TF_LABEL', True)
+         else f"Фаза: {s['phase']} · ADX {s['adx']}"),
     ]
     ensemble = (s.get("zigzag_ensemble") or {}).get(s.get("tf")) or {}
     if ensemble.get("agreement"):

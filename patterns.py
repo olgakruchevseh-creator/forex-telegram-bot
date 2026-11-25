@@ -1531,15 +1531,32 @@ def _measured_figure_card_line(symbol: str, pattern: Pattern, by_tf: dict | None
             return ""
         extreme = anchors[2][1]
     neck = float(pattern.level)
-    height = abs(neck - extreme)
+    # For a sloping H&S neckline the *vertical* distance is measured beneath
+    # the head, but the target is projected from the confirmed breakout neck.
+    head_neck = None
+    if (pattern.name in {"Голова и плечи", "Перевёрнутая голова и плечи"}
+            and getattr(cfg, "STAGE28_HS_HEIGHT_AT_HEAD", True)):
+        i1, v1, _ = anchors[1]
+        ih, _, _ = anchors[2]
+        i2, v2, _ = anchors[3]
+        if i1 >= ih or ih >= i2:
+            return ""
+        head_neck = v1 + (v2-v1) * (ih-i1)/(i2-i1)
+    measuring_neck = head_neck if head_neck is not None else neck
+    height = abs(measuring_neck - extreme)
     direction = 1 if pattern.side == "LONG" else -1
-    if (not all(math.isfinite(v) and v > 0 for v in (neck, extreme, height))
-            or (neck - extreme) * direction <= 0):
+    if (not all(math.isfinite(v) and v > 0 for v in (neck, extreme, height, measuring_neck))
+            or (measuring_neck - extreme) * direction <= 0):
         return ""
     # Printed geometry is the source of truth for downstream Navigator.
     fmt = '.3f' if 'JPY' in symbol else '.5f'
+    # Keep the original flat-neckline card exactly unchanged, so older parsers
+    # and stage27B tests remain valid. Extra geometry appears for sloping necks.
+    suffix = (f" · шея под головой {format(head_neck, fmt)}"
+              if head_neck is not None and abs(head_neck - neck) >= (0.00001 if 'JPY' not in symbol else 0.001)
+              else "")
     return (f"Опоры фигуры: {format(extreme, fmt)} · шея {format(neck, fmt)}"
-            f" · высота {format(height, fmt)}")
+            f" · высота {format(height, fmt)}{suffix}")
 
 
 CHART_FIGURE_NAMES = {

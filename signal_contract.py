@@ -34,6 +34,7 @@ SOURCE_MARKERS = (
     ("УДЕРЖАНИЕ ПОДТВЕРЖДЕНО", "levels"), ("РЕТТЕСТ УРОВНЯ", "levels"),
     ("РЕТЕСТ УРОВНЯ", "levels"), ("СМЕНА РОЛИ УРОВНЯ", "levels"),
     ("ЛОЖНЫЙ ПРОБОЙ", "levels"), ("ПРОБОЙ УРОВНЯ", "levels"),
+    ("УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН", "levels"), ("ПОДХОД К СТАРШЕЙ ЗОНЕ", "levels"),
     ("ОТБОЙ ОТ", "levels"), ("СИЛЬНЫЙ УРОВЕНЬ", "levels"),
     ("СТРУКТУРНЫЙ РЕТЕСТ", "retest_confirmation"),
     ("СТРУКТУРНЫЙ РЕТТЕСТ", "retest_confirmation"),
@@ -45,6 +46,9 @@ def infer_source_header(text: str) -> str:
              if ln.strip() and not ln.strip().startswith("━")]
     header = "\n".join(lines[:3])
     for marker, source in SOURCE_MARKERS:
+        if (not getattr(__import__('config'), 'STAGE28_SOURCE_LEVELS_INFO_MARKERS', True)
+                and marker in ('УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН', 'ПОДХОД К СТАРШЕЙ ЗОНЕ')):
+            continue
         if marker in header:
             return source
     return ""
@@ -81,6 +85,11 @@ def side_of(text: str) -> str:
 def is_information_card(text: str) -> bool:
     upper = (text or "").upper()
     import config as cfg
+    if getattr(cfg, "STAGE28_ZIGZAG_PULLBACK_INFO_ONLY", True):
+        import re as _re
+        header = "\n".join((text or "").splitlines()[:4]).upper()
+        if _re.search(r"ZIGZAG\s*[—-]\s*ОТКАТ(?:\s+ПРОДОЛЖАЕТСЯ)?(?:\s*·\s*НАБЛЮДЕНИЕ)?\s*$", header, _re.M):
+            return True
     if getattr(cfg, "STAGE27A_NEW_FVG_INFO_ONLY", True) and (
             "IMBALANCE — НОВАЯ FVG" in upper or "НОВАЯ FVG · ЗОНА ИНТЕРЕСА" in upper):
         return True

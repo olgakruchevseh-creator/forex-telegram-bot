@@ -173,6 +173,8 @@ def _reaction(z,bars,by_tf):
     early=ohlc_movement.early_entry_check(by_tf,z.side)
     if not early.get('allow',True):return None
     quality=_quality(z,{'score':score},bars,av)
+    if getattr(cfg, 'STAGE28_QUALITY_CAP_REMAINING', True):
+        quality = ohlc_movement.capped_event_quality(guard, quality, 95)
     if quality<int(getattr(cfg,'QUASIMODO_MIN_QUALITY',78)): return None
     z.delivered=True
     return {'dt':c.dt,'close':c.close,'guard':guard,'directional':directional,'net_atr':net,'score':score,'early':early,'quality':quality,'confluence':z.confluence_score,'touch_count':z.touch_count}

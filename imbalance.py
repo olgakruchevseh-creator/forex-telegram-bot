@@ -449,6 +449,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     meaningful = meaningful or (net >= float(getattr(cfg, "IMBALANCE_REACTION_EQUIVALENT_MOVE_ATR", .85)) and score >= 68)
                     early = ohlc_movement.early_entry_check(market.get(symbol) or {}, side_i)
                     if og.get("allow", True) and not og.get("range_like") and meaningful and early.get("allow", True):
+                        if getattr(cfg, 'STAGE28_QUALITY_CAP_REMAINING', True):
+                            zone.quality = ohlc_movement.capped_event_quality(og, zone.quality, 95)
+                            zone.confidence = min(zone.confidence, max(0, zone.quality - 4))
                         out_event = "ifvg_retest" if event == "ifvg_reaction_pending" else "retest"
                         if out_event == "ifvg_retest":
                             zone.ifvg_retest_sent = True

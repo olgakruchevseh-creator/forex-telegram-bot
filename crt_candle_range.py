@@ -158,6 +158,13 @@ def format_message(e: dict) -> str:
     icon = "🟢" if e["side"] == "LONG" else "🔴"
     swept = "LOW" if e["side"] == "LONG" else "HIGH"
     amd = "ПОДТВЕРЖДЕНО — AMD совпадает" if e["amd_match"] else "CRT подтверждён самостоятельно"
+    risk = abs(float(e['confirm_price']) - float(e['sweep_price']))
+    reward = (float(e['target']) - float(e['confirm_price'])) * (1 if e['side'] == 'LONG' else -1)
+    rr = reward/risk if risk > 0 else 0.0
+    details = ([f"Отмена / SL: {_p(e['symbol'], e['sweep_price'])}",
+                f"TR1: {_p(e['symbol'], e['target'])}",
+                f"Риск/цель до границы CRT: 1:{rr:.2f}"]
+               if getattr(cfg, 'STAGE28_CRT_EXPLICIT_TR1_SL', True) and risk > 0 and reward > 0 else [])
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", f"🕯 CRT — CANDLE RANGE THEORY · {e['side']}", "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {e['symbol']}", "📊 Рабочий диапазон: H1", f"Направление: {e['side']} {icon}",
@@ -165,7 +172,7 @@ def format_message(e: dict) -> str:
         f"50% диапазона: {_p(e['symbol'],e['mid'])}", f"🧹 Манипуляция: снят {swept} до {_p(e['symbol'],e['sweep_price'])}",
         f"✅ Подтверждение: возврат + displacement через 50% · {_p(e['symbol'],e['confirm_price'])}",
         f"Фаза: {e.get('phase','P3_DELIVERY_CONFIRMED')} · возврат внутрь {e.get('close_back',0)*100:.0f}% · sweep {e.get('sweep_depth_range',0)*100:.0f}% диапазона",
-        f"🎯 Противоположная граница CRT: {_p(e['symbol'],e['target'])}", f"🔗 Связка AMD: {amd}",
+        f"🎯 Противоположная граница CRT: {_p(e['symbol'],e['target'])}", *details, f"🔗 Связка AMD: {amd}",
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", f"Вероятность: {e['confidence']}%", "",
         "Факт: CRT отправлен только после закрытого sweep, возврата в диапазон и подтверждённого движения через середину диапазона."
     ])

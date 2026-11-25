@@ -194,6 +194,8 @@ def _reaction(zone: BPRZone, bars: list[Candle], by_tf: dict) -> tuple[str, dict
 def format_message(zone: BPRZone, side: str, meta: dict) -> str:
     module_evidence_bus.publish('BPR', zone, side=side, **meta)
     quality = max(74, min(96, int(round(72 + zone.width_atr*18 + max(0, meta['score']-50)*.22))))
+    if getattr(cfg, 'STAGE28_QUALITY_CAP_REMAINING', True):
+        quality = ohlc_movement.capped_event_quality(meta.get('guard') or {}, quality, 90)
     confidence = max(70, min(92, quality-4))
     return "\n".join([
         "━━━━━━━━━━━━━━━━━━", "⚖️ BPR — BALANCED PRICE RANGE · РЕАКЦИЯ ПОДТВЕРЖДЕНА", "━━━━━━━━━━━━━━━━━━", "",

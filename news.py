@@ -413,6 +413,10 @@ def map_impact(raw: str) -> str:
 
 def classify_effect(title: str) -> str:
     t = (title or "").lower()
+    if getattr(cfg, "STAGE28_NEWS_RATE_CLASSIFICATION", True):
+        if any(word in t for word in ("funds rate", "policy rate", "overnight rate",
+                                      "durable goods", "ifo", "business climate")):
+            return "higher_is_positive"
     if getattr(cfg, "STAGE27C_NEWS_EVENT_CLASSIFICATION", True):
         if "claimant count" in t:
             return "higher_is_negative"
@@ -700,7 +704,10 @@ def scenario_before(event: NewsEvent, ccy_score: float | None,
     # The same CPI/interest-rate surprise can strengthen or weaken a currency
     # depending on repricing and positioning. Never promise a causal direction.
     title = (event.title or "").lower()
-    if is_cpi_event(event) or any(x in title for x in ("interest rate", "cash rate", "bank rate", "federal funds rate")):
+    existing_rate = any(x in title for x in ("interest rate", "cash rate", "bank rate", "federal funds rate"))
+    new_rate = (getattr(cfg, 'STAGE28_NEWS_RATE_CLASSIFICATION', True)
+                and any(x in title for x in ("funds rate", "policy rate", "overnight rate", "refinancing rate")))
+    if is_cpi_event(event) or existing_rate or new_rate:
         return (f"Сравниваем факт и прогноз по {event.currency}, но направление не выводим автоматически. "
                 "Оцениваем ожидания ставок, другие показатели релиза и реакцию цены после закрытой H1.")
     # None = no verified strength: never claim a rank position.

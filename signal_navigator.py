@@ -323,19 +323,22 @@ def _module_targets(symbol: str, side: str, by_tf: dict, source_text: str, ancho
             "ГОЛОВА И ПЛЕЧИ", "ПЕРЕВЁРНУТАЯ ГОЛОВА И ПЛЕЧИ"))
         source_anchors = re.search(
             r"^Опоры фигуры:\s*([0-9]+(?:\.[0-9]+)?)\s*·\s*шея\s*"
-            r"([0-9]+(?:\.[0-9]+)?)\s*·\s*высота\s*([0-9]+(?:\.[0-9]+)?)\s*$",
+            r"([0-9]+(?:\.[0-9]+)?)\s*·\s*высота\s*([0-9]+(?:\.[0-9]+)?)"
+            r"(?:\s*·\s*шея под головой\s*([0-9]+(?:\.[0-9]+)?))?\s*$",
             source_text, re.M)
         extreme = 0.0
         height = 0.0
         if (getattr(cfg, "STAGE27B_PATTERN_ANCHORS_FROM_CARD", True)
                 and measured_shape and source_anchors):
-            extreme, neckline, stated_height = map(float, source_anchors.groups())
+            extreme, neckline, stated_height = map(float, source_anchors.groups()[:3])
+            under_head = source_anchors.group(4)
+            vertical_neck = float(under_head) if under_head is not None else neckline
             # Reject corrupt or contradictory source geometry: no invented TR.
             rounding_tolerance = .002 if 'JPY' in symbol else .00002
-            if (not all(math.isfinite(v) and v > 0 for v in (extreme, neckline, stated_height))
+            if (not all(math.isfinite(v) and v > 0 for v in (extreme, neckline, stated_height, vertical_neck))
                     or abs(neckline - key) > rounding_tolerance
-                    or abs(abs(neckline - extreme) - stated_height) > rounding_tolerance
-                    or (neckline - extreme) * direction <= 0):
+                    or abs(abs(vertical_neck - extreme) - stated_height) > rounding_tolerance
+                    or (vertical_neck - extreme) * direction <= 0):
                 height = 0.0
             else:
                 height = stated_height
