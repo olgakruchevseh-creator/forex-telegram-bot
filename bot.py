@@ -661,6 +661,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/briefing — брифинг текущей сессии\n"
         "/status — жив ли я\n"
         "/storage — размеры файлов на Railway Volume (только чтение)\n"
+        "/storage_archive status — статус архивации 27E (без удаления)\n"
         "/diagnostics — часовая диагностика данных и модулей (наблюдение)\n"
         "/module_replay, /strength_replay — исследовательский replay по OHLC-архиву\n"
         "/h1_backfill ДАТА ДАТА — план дозагрузки H1 в архив"
@@ -710,6 +711,51 @@ async def cmd_storage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:
         log.exception("STORAGE_STATUS_FAILED")
         await update.message.reply_text("Размеры Volume сейчас недоступны. Ничего не изменено.")
+
+
+# Этап 27E: защищённый ручной экспорт на внешнее хранилище.
+# Не запускается на старте, не меняет торговую логику и архивы без команды.
+_STORAGE_27E_RUNNING = False
+
+
+async def cmd_storage_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _STORAGE_27E_RUNNING
+    # В дополнение к _owner_handler проверяем доступ прямо здесь.
+    if not _owner_allowed(update):
+        await update.message.reply_text("Доступ только основному Telegram-чату.")
+        return
+    import storage_archive_27e as archive
+    args = list(getattr(context, 'args', None) or [])
+    if not args or args == ['status']:
+        await update.message.reply_text(archive.status())
+        return
+    if len(args) != 3 or args[0] not in ('export', 'compact') or args[1] not in ('decision', 'killer') or args[2] != 'CONFIRM':
+        await update.message.reply_text(
+            '27E · Команды:\n/storage_archive status\n'
+            '/storage_archive export decision CONFIRM\n'
+            '/storage_archive compact decision CONFIRM\n'
+            'Вместо decision можно killer.\n'
+            'Выполнять compact только ПОСЛЕ подтверждения export.')
+        return
+    if _STORAGE_27E_RUNNING:
+        await update.message.reply_text('Операция 27E уже выполняется. Проверь логи Railway.')
+        return
+    _STORAGE_27E_RUNNING = True
+    action, alias = args[:2]
+    try:
+        await update.message.reply_text(
+            f'27E: {action} {alias} запущено вручную; это может занять длительное время. '
+            'Торговые решения не изменяются. Не перезапускай worker во время операции.')
+        result = await asyncio.to_thread(archive.run, action, alias)
+        await update.message.reply_text(result)
+    except archive.SafetyAbort as exc:
+        await update.message.reply_text('27E: остановлено безопасно. ' + str(exc))
+    except Exception as exc:
+        log.error('STAGE27E_JOB_FAILED operation=%s alias=%s error_type=%s',
+                  action, alias, type(exc).__name__)  # не раскрывать HTTPS-токены
+        await update.message.reply_text('27E: операция не завершена; исходные данные не следует удалять.')
+    finally:
+        _STORAGE_27E_RUNNING = False
 
 
 async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3398,6 +3444,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", _owner_handler(cmd_start)))
     app.add_handler(CommandHandler("status", _owner_handler(cmd_status)))
     app.add_handler(CommandHandler("storage", _owner_handler(cmd_storage)))
+    app.add_handler(CommandHandler("storage_archive", _owner_handler(cmd_storage_archive)))
     app.add_handler(CommandHandler("now", _owner_handler(cmd_now)))
     app.add_handler(CommandHandler("pair", _owner_handler(cmd_pair)))
     app.add_handler(CommandHandler("briefing", _owner_handler(cmd_briefing)))

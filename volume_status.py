@@ -115,6 +115,13 @@ def report_ru(root: Path | None = None) -> str:
                      f"несжатых крупных: {len(legacy)}")
     if legacy:
         lines.append("⚠️ Большая старая история сохранена без изменений; для освобождения места нужен отдельный безопасный экспорт/сжатие")
+    # Этап 27E: только статус внешней проверки, никаких сетевых операций.
+    try:
+        import storage_archive_27e
+        external = storage_archive_27e.status().splitlines()[1:3]
+        lines.extend('27E · ' + entry for entry in external)
+    except Exception:
+        lines.append('27E · статус внешней копии недоступен; удаление запрещено')
     rotations = list(Path(target).glob("unified_signal_decisions.*.jsonl"))
     rotated_bytes = sum(p.stat().st_size for p in rotations if p.is_file() and not p.is_symlink())
     lines.append(f"Ротации unified_signal_decisions: {len(rotations)} файлов · {_readable_size(rotated_bytes)}")

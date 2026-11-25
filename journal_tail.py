@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import gzip
+import hashlib
 from collections import deque
 from pathlib import Path
 
@@ -94,6 +95,43 @@ def tail_jsonl_fields(path, limit, fields):
     return result
 
 
+# 27E: for enormous externally-backed legacy gzip segments, use a small,
+# independently checked recent-row sidecar. The authoritative gzip remains
+# readable if the sidecar is absent, invalid, or too short.
+_VALID_TAILS = {}
+
+
+def _verified_fast_tail(archive: Path, needed: int) -> Path | None:
+    if needed <= 0:
+        return None
+    sidecar = archive.with_name(archive.name + '.tail.jsonl')
+    meta = archive.with_name(archive.name + '.tail.meta.json')
+    if not sidecar.is_file() or sidecar.is_symlink() or not meta.is_file() or meta.is_symlink():
+        return None
+    try:
+        settings = json.loads(meta.read_text(encoding='utf-8'))
+        fst = archive.stat()
+        sst = sidecar.stat()
+        if (settings.get('schema') != 1
+                or settings.get('archive_size') != fst.st_size
+                or settings.get('archive_mtime_ns') != fst.st_mtime_ns
+                or settings.get('tail_bytes') != sst.st_size
+                or int(settings.get('tail_count', 0)) < needed):
+            return None
+        key = (str(sidecar), sst.st_size, sst.st_mtime_ns,
+               str(settings.get('tail_sha256')))
+        if key not in _VALID_TAILS:
+            with sidecar.open('rb') as input_stream:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: input_stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            _VALID_TAILS.clear()  # Keep bounded, no long-lived large buffers.
+            _VALID_TAILS[key] = (digest.hexdigest() == settings.get('tail_sha256'))
+        return sidecar if _VALID_TAILS[key] else None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def iter_tail_lines_reverse(path, limit=4000):
     """Newest-first recent physical lines across active and rotated segments.
 
@@ -110,7 +148,15 @@ def iter_tail_lines_reverse(path, limit=4000):
         if remaining <= 0:
             break
         if source.suffix == '.gz':
-            # gzip is forward-only; each new archive is bounded in size.
+            # 27E: avoid repeatedly decoding a multi-GB historical segment.
+            cached_tail = _verified_fast_tail(source, remaining)
+            if cached_tail is not None:
+                for row in _iter_single_file_reverse(cached_tail, remaining):
+                    remaining -= 1
+                    yield row
+                continue
+            # gzip is forward-only; without a sufficient verified cache,
+            # decompress once to collect the bounded last rows.
             try:
                 with gzip.open(source, 'rt', encoding='utf-8', errors='replace') as inp:
                     recent = deque(inp, maxlen=remaining)

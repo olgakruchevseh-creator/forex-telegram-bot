@@ -1684,3 +1684,9 @@ STAGE27D_JOURNAL_SEGMENT_BYTES = 32_000_000  # Новый активный се�
 STAGE27D_COMPRESS_NEW_SEGMENTS = True  # Проверенное SHA256+gzip-сжатие новых ротаций.
 STAGE27D_AUTO_COMPRESS_MAX_BYTES = 128_000_000  # Старые огромные файлы НЕ сжимать автоматически.
 STAGE27D_DISK_RESERVE_BYTES = 200_000_000  # При нехватке места приостановить только некритичные записи.
+
+
+# Этап 27E: только РУЧНОЙ экспорт и сжатие устаревших ротированных JSONL.
+# Без внешнего HTTPS PUT + обратной полной GET/SHA256 проверки удаление запрещено.
+STAGE27E_ENABLE_MANUAL_OPERATIONS = True  # False полностью блокирует export и compact
+STAGE27E_MIN_FREE_RESERVE_BYTES = 300_000_000  # Не расходовать последние 300 МБ тома
