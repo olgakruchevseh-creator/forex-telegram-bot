@@ -96,6 +96,9 @@ def report_ru(root: Path | None = None) -> str:
         percent = 100 * data['used'] / data['capacity']
         lines.append(f"Файловая система: {_readable_size(data['used'])} / {_readable_size(data['capacity'])} ({percent:.1f}%)")
         lines.append(f"Доступно по statvfs: {_readable_size(data['available'])}")
+    rotations = list(Path(target).glob("unified_signal_decisions.*.jsonl"))
+    rotated_bytes = sum(p.stat().st_size for p in rotations if p.is_file() and not p.is_symlink())
+    lines.append(f"Ротации unified_signal_decisions: {len(rotations)} файлов · {_readable_size(rotated_bytes)}")
     lines.append("Самые большие файлы:")
     for size, path in data["top"]:
         lines.append(f"• {_readable_size(size)} — {path}")

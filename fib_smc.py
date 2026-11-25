@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
 import pullback_regime
@@ -294,21 +295,30 @@ def process_market(market: dict, strength: dict[str, float], events=None, now_ut
     if int(state.get("logic_version") or 0) != 2:
         state={"logic_version":2, "sent":{}, "pending":{}, "bootstrapped":False}
     first=not bool(state.get("bootstrapped")); sent=state.setdefault("sent",{}); pending=state.setdefault("pending",{})
+    expired_items=[]
+    stage27a.prune(pending, market, "fib_smc", expired_items)
+    expired_keys=state.setdefault("expired_keys", {})
+    for item in expired_items:
+        if isinstance(item, dict) and item.get("key"):
+            expired_keys[item["key"]] = item.get("saved_h1", "")
+    if len(expired_keys)>800:
+        state["expired_keys"]=dict(list(expired_keys.items())[-600:])
     messages=[]
     for digest,item in list(pending.items()):
         event=item.get("event") if isinstance(item,dict) else None
         if not isinstance(event,dict) or event.get("key") in sent:
             pending.pop(digest,None); continue
-        text=format_message(event); messages.append(text); _PENDING_CARDS[text]=(event, freeze_by_tf(market.get(event["symbol"]) or {}))
+        text=stage27a.stamp(format_message(event), item.get("saved_h1", "")); messages.append(text); _PENDING_CARDS[text]=(event, freeze_by_tf(market.get(event["symbol"]) or {}))
     pending_keys={item.get("key") for item in pending.values() if isinstance(item,dict)}
     for symbol in cfg.PAIRS:
         try:
             event=detect_setup(symbol, market.get(symbol) or {}, strength, events, now_utc)
-            if not event or event["key"] in sent or event["key"] in pending_keys: continue
-            text=format_message(event)
+            if not event or event["key"] in sent or event["key"] in pending_keys or event["key"] in expired_keys: continue
+            saved_h1=stage27a.closed_h1_iso(market.get(symbol) or {})
+            text=stage27a.stamp(format_message(event), saved_h1)
             if first: sent[event["key"]]=event["key"]
             else:
-                digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"key":event["key"],"event":event}; pending_keys.add(event["key"])
+                digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"key":event["key"],"event":event,"saved_h1":saved_h1}; pending_keys.add(event["key"])
                 messages.append(text); _PENDING_CARDS[text]=(event, freeze_by_tf(market.get(symbol) or {}))
         except Exception:
             log.exception("Fib+SMC %s", symbol)

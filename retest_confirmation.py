@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 import pullback_regime
 import structure_break_quality
@@ -260,6 +261,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     setups = {key: RetestSetup(**{k: v for k, v in value.items() if k in allowed})
               for key, value in (state.get("setups") or {}).items()}
     pending=state.setdefault("pending",{})
+    expired_items=[]; stage27a.prune(pending, market, "retest_confirmation", expired_items)
+    expired_ids={item.get("setup_id") for item in expired_items if isinstance(item,dict)}
+    for setup in setups.values():
+        if getattr(setup,"setup_id",None) in expired_ids: setup.invalid=True
     messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
         try:
@@ -268,13 +273,14 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             for tf in SCAN_TFS:
                 key = f"{symbol}|{tf}"
                 existing = setups.get(key)
-                if existing:
+                if existing and not existing.invalid:
                     event = confirm_retest(existing, h1, by_tf, strength)
                     if event and not first:
-                        message = format_message(event)
+                        saved_h1=stage27a.closed_h1_iso(by_tf)
+                        message = stage27a.stamp(format_message(event), saved_h1)
 
                         _RETEST_CHART_CACHE[message] = (event, freeze_by_tf(by_tf))
-                        digest=hashlib.sha256(message.encode()).hexdigest()[:20]; pending[digest]={"setup_id":existing.setup_id,"text":message}
+                        digest=hashlib.sha256(message.encode()).hexdigest()[:20]; pending[digest]={"setup_id":existing.setup_id,"text":message,"saved_h1":saved_h1}
                         messages.append(message)
 
                 bars = _bars(by_tf, tf)

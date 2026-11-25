@@ -15,6 +15,41 @@ DIRECTION_PATTERN = r"(LONG|SHORT|ЛОНГ|ШОРТ)"
 _AMSTERDAM = ZoneInfo("Europe/Amsterdam")
 
 
+# Этап 27A: единая таблица модулей; сверяем только заголовок, не факты ниже.
+SOURCE_MARKERS = (
+    ("BREAKER BLOCK", "breaker_block"), ("РЕТЕСТ BREAKER BLOCK", "breaker_block"),
+    ("KILLER —", "killer_engine"), ("ICT SILVER BULLET", "silver_bullet_ict"),
+    ("📐 EDGE H1", "edge_estimator"), ("РИТМ НЕДЕЛИ — КОНТЕКСТ", "weekly_rhythm_context"),
+    ("BALANCED PRICE RANGE", "bpr"), ("QUASIMODO", "quasimodo_engine"),
+    ("ДИСБАЛАНС", "disbalance"), ("IMBALANCE", "imbalance"),
+    ("ПАТТЕРН ПОДТВЕРЖДЁН", "patterns"), ("AMD / POWER OF THREE", "amd_power_of_three"),
+    ("CANDLE RANGE THEORY", "crt_candle_range"), ("СНЯТИЕ ЛИКВИДНОСТИ", "liquidity_sweep"),
+    ("ORDER BLOCK", "order_block"), ("SMART MONEY 62", "smart_money_62_26"),
+    ("CHAIN ENTRY", "chain_entries"), ("FIB + SMC", "fib_smc"),
+    ("ATS REVERSAL", "ats_reversal_point"), ("ZIGZAG", "zigzag_scanner"),
+    ("POC —", "poc_profile"), ("ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ", "consolidation_zone"),
+    ("ВЫХОД ИЗ ФАЗЫ", "accumulation_distribution"), ("ФИБОНАЧЧИ", "fibonacci_grid"),
+    ("СНЯТИЕ PDH", "daily_high_low"), ("СНЯТИЕ PDL", "daily_high_low"),
+    ("ПРОБОЙ PDH", "daily_high_low"), ("ПРОБОЙ PDL", "daily_high_low"),
+    ("УДЕРЖАНИЕ ПОДТВЕРЖДЕНО", "levels"), ("РЕТТЕСТ УРОВНЯ", "levels"),
+    ("РЕТЕСТ УРОВНЯ", "levels"), ("СМЕНА РОЛИ УРОВНЯ", "levels"),
+    ("ЛОЖНЫЙ ПРОБОЙ", "levels"), ("ПРОБОЙ УРОВНЯ", "levels"),
+    ("ОТБОЙ ОТ", "levels"), ("СИЛЬНЫЙ УРОВЕНЬ", "levels"),
+    ("СТРУКТУРНЫЙ РЕТЕСТ", "retest_confirmation"),
+    ("СТРУКТУРНЫЙ РЕТТЕСТ", "retest_confirmation"),
+)
+
+
+def infer_source_header(text: str) -> str:
+    lines = [ln.strip().upper() for ln in (text or "").splitlines()
+             if ln.strip() and not ln.strip().startswith("━")]
+    header = "\n".join(lines[:3])
+    for marker, source in SOURCE_MARKERS:
+        if marker in header:
+            return source
+    return ""
+
+
 def pair_of(text: str) -> str:
     s = text or ""
     for pattern in (
@@ -45,6 +80,10 @@ def side_of(text: str) -> str:
 
 def is_information_card(text: str) -> bool:
     upper = (text or "").upper()
+    import config as cfg
+    if getattr(cfg, "STAGE27A_NEW_FVG_INFO_ONLY", True) and (
+            "IMBALANCE — НОВАЯ FVG" in upper or "НОВАЯ FVG · ЗОНА ИНТЕРЕСА" in upper):
+        return True
     return ("📐 EDGE H1" in upper or "РИТМ НЕДЕЛИ — КОНТЕКСТ" in upper
             or "📍 СИЛЬНЫЙ УРОВЕНЬ" in upper
             or "❌ УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН" in upper
@@ -108,6 +147,16 @@ def event_close_utc(text: str, source: str = "") -> datetime | None:
     if source == "silver_bullet_ict" or "ICT SILVER BULLET" in text.upper():
         m = re.search(r"(?im)^\s*M5 событие \(открытие UTC\):\s*([^\n]+)", text)
         return _parse_time(m.group(1)) + timedelta(minutes=5) if m and _parse_time(m.group(1)) else None
+    # Stage 27A appends a verified H1 close, potentially after a legacy label
+    # whose 'close' actually denotes Twelve Data's candle OPEN. Prefer it.
+    verified = re.search(
+        r"(?im)^\s*(?:🕐\s*)?Время закрытия:\s*([^\n]*(?:· H1 закрыта|\[27A_CLOSE\])[^\n]*)",
+        text or "",
+    )
+    if verified:
+        verified_close = _parse_time(verified.group(1))
+        if verified_close is not None:
+            return verified_close
     for pattern in (r"(?im)^\s*(?:🕐\s*)?Время закрытия:\s*([^\n]+)",
                     r"(?im)^\s*(?:🕐\s*)?Закрытие подтверждения:\s*([^\n]+)"):
         m = re.search(pattern, text)
@@ -116,7 +165,8 @@ def event_close_utc(text: str, source: str = "") -> datetime | None:
             if t is not None:
                 # patterns already print actual Amsterdam close. Other modules
                 # print Twelve Data candle *open* timestamps as a 'close'.
-                if source in ("patterns", "levels") or "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
+                if ("[27A_CLOSE]" in m.group(1) or "· H1 закрыта" in m.group(1) or source in ("patterns", "levels")
+                        or "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text):
                     return t
                 tf = source_timeframe(text, source)
                 return t + timedelta(minutes={"H1": 60, "M15": 15, "M5": 5}.get(tf, 60))

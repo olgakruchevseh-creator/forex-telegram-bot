@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
 import mitigation_block
@@ -303,6 +304,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     blocks = {k: OrderBlock(**v) for k, v in (state.get("blocks") or {}).items()}
     pending = state.setdefault("pending", {})
+    expired_items=[]; stage27a.prune(pending, market, "order_block", expired_items)
+    expired_ids={item.get("block_id") for item in expired_items if isinstance(item,dict)}
+    for setup in blocks.values():
+        if getattr(setup,"block_id",None) in expired_ids: setup.invalid=True
     pending_block_ids = {v.get("block_id") for v in pending.values() if isinstance(v, dict)}
     messages = [v["text"] for v in pending.values() if isinstance(v, dict) and v.get("text")]
     for symbol in cfg.PAIRS:
@@ -325,9 +330,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         confirmed.append(event)
             if confirmed and not first:
                 best = max(confirmed, key=lambda e: (e["quality"], e["tf"] == "H4"))
-                message = format_message(best)
+                saved_h1=stage27a.closed_h1_iso(by_tf)
+                message = stage27a.stamp(format_message(best), saved_h1)
                 digest = hashlib.sha256(message.encode()).hexdigest()[:20]
-                pending[digest] = {"block_id": best["block_id"], "text": message}
+                pending[digest] = {"block_id": best["block_id"], "text": message,"saved_h1":saved_h1}
                 pending_block_ids.add(best["block_id"])
                 messages.append(message)
                 _LAST_CHART_CARDS[message] = (best, freeze_by_tf(by_tf))

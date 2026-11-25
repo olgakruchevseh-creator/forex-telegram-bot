@@ -161,7 +161,7 @@ _FAMILIES={
  "liquidity":("СНЯТИЕ ЛИКВИДНОСТИ","LIQUIDITY SWEEP","PDH","PDL","EQH","EQL","INDUCEMENT","IDM"),
  "imbalance":("IMBALANCE","FVG","SIBI","BISI","ДИСБАЛАНС","BPR","BALANCED PRICE RANGE"),
  "blocks":("ORDER BLOCK","MITIGATION BLOCK","BREAKER BLOCK","PROPULSION"),
- "levels":("ПРОБОЙ УРОВНЯ","ОТБОЙ ОТ","РЕТТЕСТ УРОВНЯ","CONSOLIDATION","КОНСОЛИДАЦ","POC"),
+ "levels":("ПРОБОЙ УРОВНЯ","ОТБОЙ ОТ","РЕТТЕСТ УРОВНЯ", "РЕТЕСТ УРОВНЯ","CONSOLIDATION","КОНСОЛИДАЦ","POC"),
  "smc_fib":("FIB + SMC","ФИБОНАЧЧИ","SMART MONEY 62-26","PREMIUM","DISCOUNT"),
  "session_setup":("SILVER BULLET","POWER OF THREE","AMD","CRT —","CANDLE RANGE THEORY"),
  "reversal":("ATS REVERSAL","EXHAUSTION"),

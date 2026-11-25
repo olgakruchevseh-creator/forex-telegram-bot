@@ -12,6 +12,7 @@ import hashlib, io, json, logging, os
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
@@ -169,22 +170,30 @@ def image_for_alert(text: str) -> io.BytesIO | None:
 
 def process_market(market: dict, strength: dict[str,float]) -> list[str]:
     _PENDING_CARDS.clear(); state=_load(); sent=state.setdefault("sent",{}); pending=state.setdefault("pending",{}); first=not state.get("bootstrapped"); msgs=[]
+    expired_items=[]
+    stage27a.prune(pending, market, "crt_candle_range", expired_items)
+    expired_keys=state.setdefault("expired_keys", {})
+    for item in expired_items:
+        if isinstance(item, dict) and item.get("key"):
+            expired_keys[item["key"]] = item.get("saved_h1", "")
+    if len(expired_keys)>600:
+        state["expired_keys"]=dict(list(expired_keys.items())[-450:])
     for digest,item in list(pending.items()):
         e=item.get("event") if isinstance(item,dict) else None
         if not e or e.get("key") in sent: pending.pop(digest,None); continue
-        text=format_message(e); msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(market.get(e["symbol"]) or {}))
+        text=stage27a.stamp(format_message(e), item.get("saved_h1", "")); msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(market.get(e["symbol"]) or {}))
     pkeys={v.get("key") for v in pending.values() if isinstance(v,dict)}
     for symbol in cfg.PAIRS:
         try:
             by=market.get(symbol) or {}; h1=closed_candles(by.get("H1") or [],60); h4=closed_candles(by.get("H4") or [],240); m15=closed_candles(by.get("M15") or [],15)
             e=detect_crt(symbol,h1,h4,m15,strength)
-            if not e or e["key"] in sent or e["key"] in pkeys: continue
+            if not e or e["key"] in sent or e["key"] in pkeys or e["key"] in expired_keys: continue
             og=ohlc_movement.guard_event(by,e.get("side"),e.get("quality"))
             if not og.get("allow",True): continue
             e["quality"]=og.get("quality",e["quality"]); e["confidence"]=min(e.get("confidence",93),max(0,e["quality"]-4))
-            text=format_message(e); digest=hashlib.sha256(text.encode()).hexdigest()[:20]
+            saved_h1=stage27a.closed_h1_iso(by); text=stage27a.stamp(format_message(e), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]
             if first: sent[e["key"]]=e["key"]
-            else: pending[digest]={"key":e["key"],"event":e}; msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(by)); pkeys.add(e["key"])
+            else: pending[digest]={"key":e["key"],"event":e,"saved_h1":saved_h1}; msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(by)); pkeys.add(e["key"])
         except Exception: log.exception("CRT %s",symbol)
     state["bootstrapped"]=True
     if len(sent)>600: state["sent"]=dict(list(sent.items())[-450:])

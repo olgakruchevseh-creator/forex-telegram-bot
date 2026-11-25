@@ -131,8 +131,8 @@ def _evidence_name(text: str) -> str:
     if "ПАТТЕРН" in upper:
         match = re.search(r"Паттерн:\s*([^\n]+)", text)
         return f"паттерн {match.group(1).strip()}" if match else "подтверждён паттерн"
-    if any(word in upper for word in ("ПРОБОЙ УРОВНЯ", "ОТБОЙ ОТ", "УДЕРЖАНИЕ", "РЕТТЕСТ")):
-        title = next((line.strip("━ ") for line in text.splitlines() if any(w in line.upper() for w in ("ПРОБОЙ", "ОТБОЙ", "УДЕРЖАНИЕ", "РЕТТЕСТ"))), "уровень подтверждён")
+    if any(word in upper for word in ("ПРОБОЙ УРОВНЯ", "ОТБОЙ ОТ", "УДЕРЖАНИЕ", "РЕТТЕСТ", "РЕТЕСТ")):
+        title = next((line.strip("━ ") for line in text.splitlines() if any(w in line.upper() for w in ("ПРОБОЙ", "ОТБОЙ", "УДЕРЖАНИЕ", "РЕТТЕСТ", "РЕТЕСТ"))), "уровень подтверждён")
         return title.lower()
     if "ДИСБАЛАНС" in upper:
         return "подтверждён дисбаланс"

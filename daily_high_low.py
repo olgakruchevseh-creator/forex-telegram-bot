@@ -11,6 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
@@ -327,6 +328,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     sent = state.setdefault("sent", {})
     pending = state.setdefault("pending", {})
+    stage27a.prune(pending, market, "daily_high_low")
     last_h1 = state.setdefault("last_h1", {})
     messages = []
     for digest,item in list(pending.items()):
@@ -349,9 +351,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 if first:
                     sent[event["event_id"]] = h1_dt
                 else:
-                    text = format_message(event)
+                    saved_h1=stage27a.closed_h1_iso(by_tf)
+                    text = stage27a.stamp(format_message(event), saved_h1)
                     digest=hashlib.sha256(text.encode()).hexdigest()[:20]
-                    pending[digest]={"event_id":event["event_id"],"h1_dt":h1_dt,"text":text}
+                    pending[digest]={"event_id":event["event_id"],"h1_dt":h1_dt,"text":text,"saved_h1":saved_h1}
                     pending_ids.add(event["event_id"])
                     messages.append(text)
                     _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))

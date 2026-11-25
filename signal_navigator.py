@@ -84,27 +84,34 @@ def _side(text: str) -> str:
     return signal_contract.side_of(text)
 
 
-def _source_name(text: str) -> str:
-    upper = (text or "").upper()
-    names = (
-        ("ICT SILVER BULLET", "Silver Bullet ICT"),
-        ("POWER OF THREE", "AMD"), ("СНЯТИЕ ЛИКВИДНОСТИ", "Liquidity Sweep"),
-        ("СНЯТИЕ PDL", "Daily High/Low"), ("СНЯТИЕ PDH", "Daily High/Low"),
-        ("ПРОБОЙ PDL", "Daily High/Low"), ("ПРОБОЙ PDH", "Daily High/Low"),
-        ("ORDER BLOCK", "Order Block"), ("ВЫХОД ИЗ ФАЗЫ", "Accumulation/Distribution"),
-        ("CHAIN ENTRY", "Chain Entries"), ("ПАТТЕРН", "Patterns"),
-        ("QUASIMODO — QM", "Quasimodo"), ("BALANCED PRICE RANGE", "BPR"), ("ДИСБАЛАНС", "Disbalance"), ("IMBALANCE", "Imbalance/FVG"),
-        ("ФИБОНАЧЧИ", "Fibonacci"), ("МАКСИМУМА ДНЯ", "Daily High/Low"),
-        ("МИНИМУМА ДНЯ", "Daily High/Low"), ("ZIGZAG", "ZigZag"),
-        ("ПРОБОЙ УРОВНЯ", "Levels"), ("ОТБОЙ ОТ", "Levels"),
-        ("УДЕРЖАНИЕ", "Levels"), ("СТРУКТУРНЫЙ РЕТЕСТ", "Retest"),
-    )
-    return next((name for marker, name in names if marker in upper), "Другой модуль")
+# Этап 27A: human-readable names derive from the SAME source ids as Release Guard.
+_SOURCE_LABELS = {
+    "silver_bullet_ict": "Silver Bullet ICT", "amd_power_of_three": "AMD",
+    "liquidity_sweep": "Liquidity Sweep", "daily_high_low": "Daily High/Low",
+    "order_block": "Order Block", "breaker_block": "Breaker Block",
+    "accumulation_distribution": "Accumulation/Distribution",
+    "chain_entries": "Chain Entries", "patterns": "Patterns",
+    "quasimodo_engine": "Quasimodo", "bpr": "BPR", "disbalance": "Disbalance",
+    "imbalance": "Imbalance/FVG", "fibonacci_grid": "Fibonacci",
+    "zigzag_scanner": "ZigZag", "levels": "Levels",
+    "retest_confirmation": "Retest", "crt_candle_range": "CRT",
+    "poc_profile": "POC", "smart_money_62_26": "SMC 62-26",
+    "ats_reversal_point": "ATS", "fib_smc": "Fib+SMC",
+    "edge_estimator": "Edge", "weekly_rhythm_context": "Weekly Rhythm",
+    "consolidation_zone": "Consolidation", "killer_engine": "Killer",
+}
 
 
-def remember_candidates(alerts: list[str], h1_dt: str = "") -> list[str]:
+def _source_name(text: str, source_id: str = "") -> str:
+    if getattr(cfg, "STAGE27A_SOURCE_IDENTITY_SINGLE_TABLE", True):
+        return _SOURCE_LABELS.get(source_id or signal_contract.infer_source_header(text), "Другой модуль")
+    return _SOURCE_LABELS.get(signal_contract.infer_source_header(text), "Другой модуль")
+
+
+def remember_candidates(alerts: list[str], h1_dt: str = "", source_ids: dict | None = None) -> list[str]:
     """Хранит неотправленные события, пока Навигатор не подтвердит или не истечёт TTL."""
     state = _load()
+    source_ids = source_ids or {}
     now = time.time()
     ttl = max(1.0, float(getattr(cfg, "SIGNAL_CANDIDATE_TTL_HOURS", 4))) * 3600
     candidates = {
@@ -115,7 +122,7 @@ def remember_candidates(alerts: list[str], h1_dt: str = "") -> list[str]:
         symbol, side = _pair(text), _side(text)
         if not symbol or not side:
             continue
-        source = _source_name(text)
+        source = _source_name(text, source_ids.get(text, ""))
         # Новое противоположное событие того же модуля заменяет старый сценарий.
         for key, old in list(candidates.items()):
             if old.get("symbol") == symbol and old.get("source") == source and old.get("side") != side:

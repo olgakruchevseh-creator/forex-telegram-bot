@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 import displacement
 from zone_reaction_confirmation import confirm_zone_reaction
@@ -218,7 +219,9 @@ def _fvg_class(zone: FvgZone) -> str:
 
 def format_message(zone: FvgZone, event: str = "new") -> str:
     if event == "new":
-        title = "🟦 IMBALANCE — НОВАЯ FVG"
+        title = ("📍 IMBALANCE — НОВАЯ FVG · ЗОНА ИНТЕРЕСА"
+                 if getattr(cfg, "STAGE27A_NEW_FVG_INFO_ONLY", True)
+                 else "🟦 IMBALANCE — НОВАЯ FVG")
         fact = "Трёхсвечная неэффективность сформирована закрытой свечой и подтверждена направлением таймфреймов."
     elif event == "ifvg_retest":
         title = "🔁 IMBALANCE — IFVG · РЕТЕСТ ПОДТВЕРЖДЁН"
@@ -307,7 +310,7 @@ def mark_delivered(text: str) -> None:
     pending = state.setdefault("pending_events", {})
     for key, raw in list(pending.items()):
         zone = FvgZone(**raw["zone"])
-        if format_message(zone, raw["event"]) == text:
+        if stage27a.stamp(format_message(zone, raw["event"]), raw.get("saved_h1", "")) == text:
             pending.pop(key, None)
             break
     state["pending_events"] = pending
@@ -407,11 +410,12 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     for zone in stored.values():
         zone.fvg_class = _fvg_class(zone)
     pending_events = state.setdefault("pending_events", {})
+    stage27a.prune(pending_events, market, "imbalance")
     messages = []
     for raw in pending_events.values():
         zone = FvgZone(**raw["zone"])
         zone.fvg_class = _fvg_class(zone)
-        text = format_message(zone, raw["event"])
+        text = stage27a.stamp(format_message(zone, raw["event"]), raw.get("saved_h1", ""))
         messages.append(text)
         _PENDING_CARDS[text] = (zone, raw["event"], freeze_by_tf(market.get(zone.symbol) or {}))
     for symbol in cfg.PAIRS:
@@ -450,8 +454,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                             zone.lifecycle = "УДЕРЖАН → ПОДТВЕРЖДЁН"
                         if not first:
                             key = f"{zone.zone_id}|{out_event}|{zone.reaction_dt[:19]}"
-                            pending_events[key] = {"zone": asdict(zone), "event": out_event}
-                            text = format_message(zone, out_event)
+                            saved_h1=stage27a.closed_h1_iso(market.get(symbol) or {})
+                            pending_events[key] = {"zone": asdict(zone), "event": out_event,"saved_h1":saved_h1}
+                            text = stage27a.stamp(format_message(zone, out_event), saved_h1)
                             if text not in messages: messages.append(text)
                             _PENDING_CARDS[text] = (zone, out_event, freeze_by_tf(market.get(symbol) or {}))
             for tf in MAIN_TFS:
@@ -464,8 +469,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 stored[zone.zone_id] = zone
                 if accepted and not first:
                     key = f"{zone.zone_id}|new"
-                    pending_events[key] = {"zone": asdict(zone), "event": "new"}
-                    text = format_message(zone, "new")
+                    saved_h1=stage27a.closed_h1_iso(market.get(symbol) or {})
+                    pending_events[key] = {"zone": asdict(zone), "event": "new","saved_h1":saved_h1}
+                    text = stage27a.stamp(format_message(zone, "new"), saved_h1)
                     if text not in messages:
                         messages.append(text)
                     _PENDING_CARDS[text] = (zone, "new", freeze_by_tf(market.get(symbol) or {}))

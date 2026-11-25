@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
@@ -292,7 +293,12 @@ def format_message(e: dict) -> str:
 
 def process_market(market: dict, strength: dict[str,float]) -> list[str]:
     state=_load(); first=not bool(state.get("bootstrapped"))
-    setups={k:Setup(**v) for k,v in (state.get("setups") or {}).items()}; pending=state.setdefault("pending",{}); messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
+    setups={k:Setup(**v) for k,v in (state.get("setups") or {}).items()}; pending=state.setdefault("pending",{}); expired_items=[]; stage27a.prune(pending, market, "smart_money_62_26", expired_items)
+    expired_ids={item.get("setup_id") for item in expired_items if isinstance(item,dict)}
+    for setup in setups.values():
+        if getattr(setup,"setup_id",None) in expired_ids:
+            setup.invalid = True
+    messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
         try:
             by_tf=market.get(symbol) or {}
@@ -301,7 +307,7 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
                 if s.symbol!=symbol or s.sent or s.invalid: continue
                 e=_confirm(s,by_tf,d1,h4,h1,m15,m5,strength)
                 if e and not first:
-                    text=format_message(e); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"setup_id":s.setup_id,"text":text}; messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
+                    saved_h1=stage27a.closed_h1_iso(by_tf); text=stage27a.stamp(format_message(e), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"setup_id":s.setup_id,"text":text,"saved_h1":saved_h1}; messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
             fresh=_find_setup(symbol,d1,h4,h1,m15)
             if fresh and fresh.setup_id not in setups:
                 # Новый setup заменяет старые незавершённые того же направления.

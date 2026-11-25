@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 import market_regime
 import structure_break_quality
@@ -339,6 +340,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     chain = state.setdefault("chain_count", {})
     legs = state.setdefault("last_leg", {})
     pending = state.setdefault("pending", {})
+    expired_items=[]; stage27a.prune(pending, market, "chain_entries", expired_items)
+    expired_ids={item.get("setup_id") or (item.get("event") or {}).get("setup_id") for item in expired_items if isinstance(item,dict)}
+    for setup in setups.values():
+        if setup.setup_id in expired_ids: setup.invalid=True
     messages: list[str] = []
     for digest, item in list(pending.items()):
         event = item.get("event") if isinstance(item, dict) else None
@@ -346,7 +351,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         if not isinstance(event, dict) or not isinstance(number, int):
             pending.pop(digest, None)
             continue
-        text = format_message(event, number)
+        text = stage27a.stamp(format_message(event, number), item.get("saved_h1", ""))
         messages.append(text)
         _PENDING_CARDS[text] = (event, freeze_by_tf(market.get(event.get("symbol")) or {}))
     for symbol in cfg.PAIRS:
@@ -356,7 +361,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 key = f"{symbol}|{tf}"
                 bars = _bars(by_tf, tf)
                 existing = setups.get(key)
-                if existing:
+                if existing and not existing.invalid:
                     # BOS остаётся H1/H4, а возврат и удержание контролируются
                     # закрытой M15, чтобы не отдавать уже прошедший маршрут.
                     event = confirm_entry(existing, _bars(by_tf, "H1"), by_tf, strength, legs.get(symbol))
@@ -370,9 +375,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         event["number"] = number
                         # Do not commit chain_count/last_leg before Telegram ACK.
                         # Pending delivery reserves this exact event and number.
-                        text = format_message(event, number)
+                        saved_h1=stage27a.closed_h1_iso(by_tf)
+                        text = stage27a.stamp(format_message(event, number), saved_h1)
                         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
-                        pending[digest] = {"event": event, "number": number}
+                        pending[digest] = {"event": event, "number": number,"saved_h1":saved_h1,"setup_id":existing.setup_id}
                         messages.append(text)
                         _PENDING_CARDS[text] = (event, freeze_by_tf(by_tf))
                 bos = detect_bos(symbol, tf, bars)

@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
 import zone_reaction_confirmation as zrc
@@ -247,6 +248,10 @@ def process_market(market: dict, strength: dict[str, float], invalidated_blocks:
     state = _load(); first = not bool(state.get("bootstrapped"))
     candidates = {k: BreakerCandidate(**v) for k, v in (state.get("candidates") or {}).items()}
     pending=state.setdefault("pending", {})
+    expired_items=[]; stage27a.prune(pending, market, "breaker_block", expired_items)
+    expired_ids={item.get("breaker_id") for item in expired_items if isinstance(item,dict)}
+    for setup in candidates.values():
+        if getattr(setup,"breaker_id",None) in expired_ids: setup.invalid=True
     ingest_invalidated(invalidated_blocks or [], candidates)
     messages: list[str] = [item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
@@ -266,7 +271,7 @@ def process_market(market: dict, strength: dict[str, float], invalidated_blocks:
                         events.append(event)
             if events and not first:
                 best = max(events, key=lambda x: x["quality"])
-                text = format_message(best); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"breaker_id":next(c.breaker_id for c in candidates.values() if c.symbol==best["symbol"] and c.broken_dt==best["broken_dt"]),"text":text}; messages.append(text)
+                saved_h1=stage27a.closed_h1_iso(by_tf); text = stage27a.stamp(format_message(best), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"breaker_id":next(c.breaker_id for c in candidates.values() if c.symbol==best["symbol"] and c.broken_dt==best["broken_dt"]),"text":text,"saved_h1":saved_h1}; messages.append(text)
                 _LAST_CHART_CARDS[text] = (best, freeze_by_tf(by_tf))
         except Exception:
             log.exception("Breaker Block %s", symbol)

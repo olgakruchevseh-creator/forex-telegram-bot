@@ -8,6 +8,7 @@ import io, json, logging, os, hashlib, statistics
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 import pullback_regime
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
@@ -148,7 +149,12 @@ def _format(e):
     ])
 
 def process_market(market,strength):
-    st=_load(); first=not st.get('bootstrapped'); setups={k:Setup(**v) for k,v in (st.get('setups') or {}).items()}; pending=st.setdefault('pending',{}); out=[item['text'] for item in pending.values() if isinstance(item,dict) and item.get('text')]
+    st=_load(); first=not st.get('bootstrapped'); setups={k:Setup(**v) for k,v in (st.get('setups') or {}).items()}; pending=st.setdefault('pending',{}); expired_items=[]; stage27a.prune(pending, market, "ats_reversal_point", expired_items)
+    expired_ids={item.get("id") for item in expired_items if isinstance(item,dict)}
+    for setup in setups.values():
+        if getattr(setup,"id",None) in expired_ids:
+            setup.invalid = True
+    out=[item['text'] for item in pending.values() if isinstance(item,dict) and item.get('text')]
     for symbol in cfg.PAIRS:
       try:
         by_tf=market.get(symbol) or {}; h4,h1,m15,m5=(_bars(by_tf,t) for t in ('H4','H1','M15','M5'))
@@ -159,7 +165,7 @@ def process_market(market,strength):
             og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
             if not og.get('allow',True): continue
             if 'quality' in og: e['quality']=og['quality']; e['confidence']=min(e.get('confidence',90), max(0,e['quality']-3))
-            msg=_format(e); digest=hashlib.sha256(msg.encode()).hexdigest()[:20]; pending[digest]={'id':s.id,'text':msg}; out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
+            saved_h1=stage27a.closed_h1_iso(by_tf); msg=stage27a.stamp(_format(e), saved_h1); digest=hashlib.sha256(msg.encode()).hexdigest()[:20]; pending[digest]={'id':s.id,'text':msg,'saved_h1':saved_h1}; out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
         fresh=_candidate(symbol,h4,h1)
         if fresh and fresh.id not in setups:
           for old in setups.values():

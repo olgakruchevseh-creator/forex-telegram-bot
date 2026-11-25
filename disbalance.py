@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
 import displacement
@@ -38,6 +39,7 @@ class Signal:
     aligned: list[str]
     strength_gap: float
     dt: str
+    saved_h1: str = ""
 
 
 def _state_path() -> Path:
@@ -275,7 +277,7 @@ def mark_delivered(text: str) -> None:
     pending = state.setdefault("pending", {})
     for key, raw in list(pending.items()):
         signal = Signal(**raw)
-        if format_message(signal) == text:
+        if stage27a.stamp(format_message(signal), signal.saved_h1) == text:
             pending.pop(key, None)
             state.setdefault("seen", {})[key] = signal.dt
             break
@@ -290,10 +292,11 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     seen = state.setdefault("seen", {})
     pending = state.setdefault("pending", {})
+    stage27a.prune(pending, market, "disbalance")
     messages = []
     for raw in pending.values():
         signal = Signal(**raw)
-        text = format_message(signal)
+        text = stage27a.stamp(format_message(signal), signal.saved_h1)
         messages.append(text)
         _PENDING_CARDS[text] = (signal, freeze_by_tf(market.get(signal.symbol) or {}))
     for symbol in cfg.PAIRS:
@@ -307,8 +310,9 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             if first:
                 seen[key] = signal.dt
             else:
+                signal.saved_h1=stage27a.closed_h1_iso(market.get(symbol) or {})
                 pending[key] = signal.__dict__
-                text = format_message(signal)
+                text = stage27a.stamp(format_message(signal), signal.saved_h1)
                 messages.append(text)
                 _PENDING_CARDS[text] = (signal, freeze_by_tf(market.get(symbol) or {}))
         except Exception:

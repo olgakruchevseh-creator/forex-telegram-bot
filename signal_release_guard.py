@@ -20,7 +20,7 @@ from pathlib import Path
 import config as cfg
 from analysis import atr, closed_candles, analyze_tf
 import killer_trap_guard
-from signal_contract import pair_of, side_of, is_information_card, source_timeframe, event_close_utc
+from signal_contract import pair_of, side_of, is_information_card, source_timeframe, event_close_utc, infer_source_header, SOURCE_MARKERS as SINGLE_SOURCE_MARKERS
 
 log = logging.getLogger("fxbot.release_guard")
 
@@ -40,29 +40,14 @@ SOURCE_FAMILIES = {
     "patterns": "structure", "killer_engine": "meta",
 }
 
-SOURCE_MARKERS = (
-    ("KILLER —", "killer_engine"), ("ICT SILVER BULLET", "silver_bullet_ict"),
-    ("📐 EDGE H1", "edge_estimator"), ("РИТМ НЕДЕЛИ — КОНТЕКСТ", "weekly_rhythm_context"),
-    ("BALANCED PRICE RANGE", "bpr"), ("QUASIMODO", "quasimodo_engine"),
-    ("ДИСБАЛАНС", "disbalance"), ("IMBALANCE", "imbalance"),
-    ("ПАТТЕРН ПОДТВЕРЖДЁН", "patterns"), ("AMD / POWER OF THREE", "amd_power_of_three"),
-    ("CANDLE RANGE THEORY", "crt_candle_range"), ("СНЯТИЕ ЛИКВИДНОСТИ", "liquidity_sweep"),
-    ("ORDER BLOCK", "order_block"), ("BREAKER BLOCK", "breaker_block"),
-    ("SMART MONEY 62", "smart_money_62_26"), ("CHAIN ENTRY", "chain_entries"),
-    ("FIB + SMC", "fib_smc"), ("ATS REVERSAL", "ats_reversal_point"),
-    ("ZIGZAG", "zigzag_scanner"), ("POC —", "poc_profile"),
-    ("ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ", "consolidation_zone"),
-    ("ВЫХОД ИЗ ФАЗЫ", "accumulation_distribution"),
-    ("РЕТЕСТ", "retest_confirmation"), ("ФИБОНАЧЧИ", "fibonacci_grid"),
-    ("ПРОБОЙ PDH", "daily_high_low"), ("ПРОБОЙ PDL", "daily_high_low"),
-    ("СНЯТИЕ PDH", "daily_high_low"), ("СНЯТИЕ PDL", "daily_high_low"),
-    ("ПРОБОЙ УРОВНЯ", "levels"), ("ОТБОЙ ОТ", "levels"),
-)
+SOURCE_MARKERS = SINGLE_SOURCE_MARKERS  # Этап 27A: тот же контракт, что и у Navigator.
 
 
 def infer_source(text: str) -> str:
-    # Legacy cards, including recovered persisted outbox entries.
-    lines = [line.strip().upper() for line in (text or "").splitlines() if line.strip() and not line.strip().startswith("━")]
+    if getattr(cfg, "STAGE27A_SOURCE_IDENTITY_SINGLE_TABLE", True):
+        return infer_source_header(text)
+    lines = [line.strip().upper() for line in (text or "").splitlines()
+             if line.strip() and not line.strip().startswith("━")]
     header = "\n".join(lines[:5])
     for marker, source in SOURCE_MARKERS:
         if marker in header:
@@ -207,6 +192,9 @@ def review(text: str, market: dict, peers=(), source_ids=None, *, now=None, cach
     elif tf == "UNKNOWN":
         return Decision("BLOCK", "unknown_source_timeframe", pair, side, source, family, end.isoformat(), tuple(checks))
     else:
+        if getattr(cfg, "STAGE27A_REQUIRE_EVENT_TIME", False) and family not in ("context",):
+            return Decision("BLOCK", "event_timestamp_missing", pair, side, source, family,
+                            end.isoformat(), tuple(checks))
         checks.append({"check": "event_confirmation", "status": "PASS", "source_tf": tf,
                        "note": "H1-confirmed detector contract"})
     stop_error = _execution_check(text, side, bars)
@@ -283,6 +271,18 @@ def journal(decision: Decision, event_id: str = "") -> None:
         if path.exists() and path.stat().st_size > 5_000_000:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             path.replace(root / f"unified_signal_decisions.{stamp}.jsonl")
+            if getattr(cfg, "STAGE27A_UNIFIED_JOURNAL_CLEANUP", True):
+                # Only our own, timestamped rotations; never remove unknown files/SQLite.
+                rotations = sorted((p for p in root.glob("unified_signal_decisions.*.jsonl")
+                                    if p.is_file() and not p.is_symlink()
+                                    and re.fullmatch(r"unified_signal_decisions\.\d{8}T\d{12}Z\.jsonl", p.name)),
+                                   key=lambda p: p.name)
+                keep = max(1, int(getattr(cfg, "UNIFIED_JOURNAL_KEEP_ROTATED", 6)))
+                for old in rotations[:-keep]:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        log.warning("UNIFIED_JOURNAL_ROTATION_DELETE_FAILED file=%s", old.name)
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")) + "\n")
         if event_id:

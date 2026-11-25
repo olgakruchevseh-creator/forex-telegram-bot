@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import module_evidence_bus
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
@@ -390,7 +391,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                 continue
             keys[symbol] = key
             dirty = True
-            text = format_message(e)
+            text = stage27a.stamp(format_message(e), stage27a.closed_h1_iso(by_tf))
             out.append(text)
             _LAST_CHART_CARDS[text] = (e, freeze_by_tf(by_tf))
         except Exception:

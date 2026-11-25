@@ -37,7 +37,7 @@ def family_from_alert(text: str) -> str:
     u = (text or "").upper()
     if any(x in u for x in ("СНЯТИЕ PDL", "СНЯТИЕ PDH", "СНЯТИЕ ЛИКВИДНОСТИ", "LIQUIDITY SWEEP", "ЛОВУШ", "FALSE BREAK", "ЛОЖНЫЙ ПРОБОЙ")):
         return "LIQUIDITY_REVERSAL"
-    if any(x in u for x in ("CHAIN ENTRY", "ЦЕПНОЙ ВХОД", "BOS", "CHOCH", "MSS", "РЕТТЕСТ", "ПРОБОЙ УРОВНЯ", "BREAKER", "ORDER BLOCK")):
+    if any(x in u for x in ("CHAIN ENTRY", "ЦЕПНОЙ ВХОД", "BOS", "CHOCH", "MSS", "РЕТТЕСТ", "РЕТЕСТ", "ПРОБОЙ УРОВНЯ", "BREAKER", "ORDER BLOCK")):
         return "STRUCTURE_BREAKOUT"
     if any(x in u for x in ("POC", "VALUE AREA", "ОТБОЙ ОТ", "УДЕРЖАНИЕ УРОВНЯ", "RBS", "SBR")):
         return "RANGE_AUCTION"

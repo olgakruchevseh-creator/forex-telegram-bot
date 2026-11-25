@@ -199,10 +199,11 @@ def load_state() -> dict:
     # Railway restart/redeploy must not leave a healthy process permanently
     # silent just because state.json was lost or an older state did not contain
     # chat_id.  TELEGRAM_CHAT_ID is an emergency durable fallback.
-    if not state.get("chat_id"):
-        fallback = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-        if fallback:
-            state["chat_id"] = fallback
+    fallback = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if fallback and getattr(cfg, "STAGE27A_OWNER_CHAT_GUARD", True):
+        state["chat_id"] = fallback  # explicit owner always wins over old mutable state
+    elif not state.get("chat_id") and fallback:
+        state["chat_id"] = fallback
     return state
 
 
@@ -601,22 +602,53 @@ async def send(app: Application, chat_id: int, text: str):
     return mid
 
 
+
+def _owner_allowed(update: Update) -> bool:
+    """No TOFU: an unknown first /start cannot choose the delivery destination."""
+    if not getattr(cfg, "STAGE27A_OWNER_CHAT_GUARD", True):
+        return True
+    incoming = getattr(getattr(update, "effective_chat", None), "id", None)
+    owner = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not owner:
+        owner = str(load_state().get("chat_id") or "").strip()
+    return bool(owner and incoming is not None and str(incoming) == owner)
+
+
+async def _owner_command(update: Update, context, handler):
+    if not _owner_allowed(update):
+        log.warning("TELEGRAM_UNAUTHORIZED_COMMAND chat=%s",
+                    getattr(getattr(update, "effective_chat", None), "id", None))
+        # Do not disclose state or allowed chat id.
+        if getattr(update, "message", None) is not None:
+            await update.message.reply_text("Команда недоступна этому чату. Для настройки владельца укажи TELEGRAM_CHAT_ID в Railway.")
+        return
+    await handler(update, context)
+
+
+def _owner_handler(handler):
+    from functools import wraps
+    @wraps(handler)
+    async def invoke(update, context):
+        await _owner_command(update, context, handler)
+    return invoke
+
 def _remember_effective_chat(update: Update) -> dict:
-    """Any successful manual command heals a lost persistent chat_id."""
+    """Never let a manual command silently rewrite the owner chat."""
     state = load_state()
-    chat = getattr(update, "effective_chat", None)
-    chat_id = getattr(chat, "id", None)
-    if chat_id and str(state.get("chat_id") or "") != str(chat_id):
-        state["chat_id"] = chat_id
+    if not _owner_allowed(update):
+        return state
+    incoming = getattr(getattr(update, "effective_chat", None), "id", None)
+    if incoming and not state.get("chat_id"):
+        state["chat_id"] = incoming
         save_state(state)
-        log.info("CHAT_ID_RECOVERED source=manual_command chat_id=%s", chat_id)
     return state
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = load_state()
-    state["chat_id"] = update.effective_chat.id
-    save_state(state)
+    if not _owner_allowed(update):
+        await update.message.reply_text("Чат не авторизован. Настрой TELEGRAM_CHAT_ID в Railway.")
+        return
+    _remember_effective_chat(update)
     await update.message.reply_text(
         "Готово. Я запомнил тебя.\n"
         "Смотрю W1, D1, H4, H1, M15, M5.\n"
@@ -765,6 +797,7 @@ async def cmd_patterns_history(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("Историческая проверка сейчас недоступна: ошибка расчёта или источника данных.")
 
 
+@_owner_handler
 async def cmd_ohlc_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Read-only source diagnosis; no Twelve Data calls and no trade effects."""
     _remember_effective_chat(update)
@@ -990,6 +1023,7 @@ async def cmd_ohlc_triplet(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 _OHLC_VERIFY_COMMAND_LOCK = asyncio.Lock()
 
 
+@_owner_handler
 async def cmd_ohlc_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Explicit, owner-only, max-three H1 same-vendor rechecks; never automatic.
 
@@ -1637,7 +1671,7 @@ def _source_image_for(text: str, source_text: str):
             "📍 СИЛЬНЫЙ УРОВЕНЬ", "↘️ ОТБОЙ ОТ СОПРОТИВЛЕНИЯ",
             "↗️ ОТБОЙ ОТ ПОДДЕРЖКИ", "⚡ ПРОБОЙ УРОВНЯ",
             "📌 УДЕРЖАНИЕ ПОДТВЕРЖДЕНО", "↘️ ЛОЖНЫЙ ПРОБОЙ СОПРОТИВЛЕНИЯ",
-            "↗️ ЛОЖНЫЙ ПРОБОЙ ПОДДЕРЖКИ", "🔄 РЕТТЕСТ УРОВНЯ",
+            "↗️ ЛОЖНЫЙ ПРОБОЙ ПОДДЕРЖКИ", "🔄 РЕТТЕСТ УРОВНЯ", "🔄 РЕТЕСТ УРОВНЯ",
             "🔄 СМЕНА РОЛИ УРОВНЯ", "❌ УРОВЕНЬ НЕДЕЙСТВИТЕЛЕН",
         )):
             return levels.image_for_alert(source_text)
@@ -2567,7 +2601,21 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 age = now_epoch - float(item.get("saved_at") or 0)
             except (TypeError, ValueError, OverflowError):
                 return False
-            return 0 <= age <= ttl
+            if not 0 <= age <= ttl:
+                return False
+            # A pre-stage27A queued event without a verified closing H1 must
+            # not regain trade eligibility by being restored from old state.
+            if getattr(cfg, "STAGE27A_MODULE_EVENT_TIME", True):
+                event_source = str(signal_release_guard.infer_source(item["text"]) or item.get("source") or "")
+                timed_sources = {
+                    "crt_candle_range", "liquidity_sweep", "daily_high_low",
+                    "imbalance", "disbalance", "order_block", "breaker_block",
+                    "smart_money_62_26", "chain_entries", "fib_smc",
+                    "ats_reversal_point", "poc_profile", "retest_confirmation",
+                }
+                if event_source in timed_sources and signal_contract.event_close_utc(item["text"], event_source) is None:
+                    return False
+            return True
 
         restored_outbox = []
         for item in list(state.get("source_outbox") or []):
@@ -2575,7 +2623,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.warning("UNIFIED_OUTBOX_DISCARDED reason=stale_or_corrupt")
                 continue
             text = item["text"]
-            source_ids[text] = item.get("source") or signal_release_guard.infer_source(text)
+            source_ids[text] = signal_release_guard.infer_source(text) or item.get("source") or ""
             restored_outbox.append((0, text))
         state["source_outbox"] = [item for item in (state.get("source_outbox") or [])
                                   if _fresh_queue_item(item, retry_ttl)]
@@ -2585,7 +2633,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 pending_h1.pop(key, None)
                 continue
             text = item["text"]
-            source_ids[text] = item.get("source") or signal_release_guard.infer_source(text)
+            source_ids[text] = signal_release_guard.infer_source(text) or item.get("source") or ""
             restored_outbox.append((0, text))
         source_alerts += restored_outbox
         seen_raw = set()
@@ -2626,11 +2674,21 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                             log.exception("UNIFIED_INFO_SEND_FAILED source=%s", ruling.source)
                         else:
                             _mark_event_delivered(state, info_id)
+                            if "IMBALANCE — НОВАЯ FVG" in raw:
+                                try:
+                                    imbalance.mark_delivered(raw)
+                                except Exception:
+                                    log.exception("IMBALANCE_INFO_ACK_FAILED")
                             if "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in raw:
                                 try:
                                     weekly_rhythm_context.mark_delivered(raw)
                                 except Exception:
                                     log.exception("WEEKLY_RHYTHM_INFO_ACK_FAILED")
+                    elif "IMBALANCE — НОВАЯ FVG" in raw:
+                        try:
+                            imbalance.mark_delivered(raw)
+                        except Exception:
+                            log.exception("IMBALANCE_INFO_ACK_RECONCILE_FAILED")
                     elif "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in raw:
                         # Legacy INFO was delivered globally before module ACK existed.
                         try:
@@ -2704,7 +2762,7 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Historical remembered candidates remain research-only; they must NOT
         # revive yesterday's setup or bypass today's H1/trap validation.
         memory_scan_stage8.mark("admission_killer_done")
-        signal_navigator.remember_candidates(raw_alerts, closed_dt)
+        signal_navigator.remember_candidates(raw_alerts, closed_dt, source_ids)
         candidate_alerts = list(raw_alerts)
         navigator_sources: dict[str, list[str]] = {}
         confirmed_alerts: list[tuple[int, str]] = []
@@ -3336,24 +3394,24 @@ def main() -> None:
             "STATE_DIR не задан: state.json рядом с кодом пропадёт после рестарта контейнера"
         )
     app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("storage", cmd_storage))
-    app.add_handler(CommandHandler("now", cmd_now))
-    app.add_handler(CommandHandler("pair", cmd_pair))
-    app.add_handler(CommandHandler("briefing", cmd_briefing))
-    app.add_handler(CommandHandler("briefing_full", cmd_briefing))
-    app.add_handler(CommandHandler("patterns_history", cmd_patterns_history))
+    app.add_handler(CommandHandler("start", _owner_handler(cmd_start)))
+    app.add_handler(CommandHandler("status", _owner_handler(cmd_status)))
+    app.add_handler(CommandHandler("storage", _owner_handler(cmd_storage)))
+    app.add_handler(CommandHandler("now", _owner_handler(cmd_now)))
+    app.add_handler(CommandHandler("pair", _owner_handler(cmd_pair)))
+    app.add_handler(CommandHandler("briefing", _owner_handler(cmd_briefing)))
+    app.add_handler(CommandHandler("briefing_full", _owner_handler(cmd_briefing)))
+    app.add_handler(CommandHandler("patterns_history", _owner_handler(cmd_patterns_history)))
     app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
-    app.add_handler(CommandHandler("ohlc_timebase", cmd_ohlc_timebase))
-    app.add_handler(CommandHandler("ohlc_conflicts", cmd_ohlc_conflicts))
-    app.add_handler(CommandHandler("ohlc_triplet", cmd_ohlc_triplet))
+    app.add_handler(CommandHandler("ohlc_timebase", _owner_handler(cmd_ohlc_timebase)))
+    app.add_handler(CommandHandler("ohlc_conflicts", _owner_handler(cmd_ohlc_conflicts)))
+    app.add_handler(CommandHandler("ohlc_triplet", _owner_handler(cmd_ohlc_triplet)))
     app.add_handler(CommandHandler("ohlc_verify", cmd_ohlc_verify))
-    app.add_handler(CommandHandler("patterns_formation", cmd_patterns_formation))
-    app.add_handler(CommandHandler("diagnostics", cmd_diagnostics))
-    app.add_handler(CommandHandler("module_replay", cmd_module_replay))
-    app.add_handler(CommandHandler("strength_replay", cmd_strength_replay))
-    app.add_handler(CommandHandler("h1_backfill", cmd_h1_backfill))
+    app.add_handler(CommandHandler("patterns_formation", _owner_handler(cmd_patterns_formation)))
+    app.add_handler(CommandHandler("diagnostics", _owner_handler(cmd_diagnostics)))
+    app.add_handler(CommandHandler("module_replay", _owner_handler(cmd_module_replay)))
+    app.add_handler(CommandHandler("strength_replay", _owner_handler(cmd_strength_replay)))
+    app.add_handler(CommandHandler("h1_backfill", _owner_handler(cmd_h1_backfill)))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)
     log.info("Бот запущен.")

@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage27a_event_integrity as stage27a
 import ohlc_movement
 import liquidity_map
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair, zigzag
@@ -283,23 +284,29 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     first = not bool(state.get("bootstrapped"))
     setups = {k: SweepSetup(**v) for k, v in (state.get("setups") or {}).items()}
     pending=state.setdefault("pending", {})
+    expired_items=[]; stage27a.prune(pending, market, "liquidity_sweep", expired_items)
+    expired_ids={item.get("setup_id") for item in expired_items if isinstance(item,dict)}
+    for setup in setups.values():
+        if getattr(setup,"setup_id",None) in expired_ids: setup.invalid=True
+    pending_setups={item.get("setup_id") for item in pending.values() if isinstance(item,dict)}
     messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
     for symbol in cfg.PAIRS:
         try:
             by_tf = market.get(symbol) or {}
             d1, h4, h1, m15 = (_bars(by_tf, tf) for tf in ("D1", "H4", "H1", "M15"))
             for key, setup in list(setups.items()):
-                if setup.symbol != symbol or setup.sent or setup.invalid:
+                if setup.symbol != symbol or setup.sent or setup.invalid or setup.setup_id in pending_setups:
                     continue
                 event = confirm_sweep(setup, h1, h4, m15, strength)
                 if event and not first:
                     og=ohlc_movement.guard_event(by_tf,event.get('side'),event.get('quality'))
                     if not og.get('allow',True): continue
                     if 'quality' in og: event['quality']=og['quality']; event['confidence']=min(event.get('confidence',90),max(0,event['quality']-4))
-                    message = format_message(event)
+                    saved_h1=stage27a.closed_h1_iso(by_tf)
+                    message = stage27a.stamp(format_message(event), saved_h1)
 
                     digest=hashlib.sha256(message.encode()).hexdigest()[:20]
-                    pending[digest]={"setup_id":setup.setup_id,"text":message}
+                    pending[digest]={"setup_id":setup.setup_id,"text":message,"saved_h1":saved_h1}; pending_setups.add(setup.setup_id)
                     messages.append(message)
 
                     _LAST_CHART_CARDS[message] = (event, freeze_by_tf(by_tf))

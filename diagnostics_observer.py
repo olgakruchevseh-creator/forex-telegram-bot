@@ -33,6 +33,7 @@ log = logging.getLogger("fxbot.diagnostics")
 
 TF_SECONDS = {"M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
 _LAST_H1: str | None = None
+_LAST_BASKET: tuple | None = None
 _LAST_RESULT: dict | None = None
 
 
@@ -134,7 +135,7 @@ def _append(record: dict) -> None:
 
 def observe(market: dict, *, force: bool = False) -> dict | None:
     """Run once per new closed H1 of the basket. Returns the record or None."""
-    global _LAST_H1, _LAST_RESULT
+    global _LAST_H1, _LAST_RESULT, _LAST_BASKET
     if not getattr(cfg, "DIAGNOSTICS_OBSERVER_ENABLED", True):
         return None
     newest = ""
@@ -144,7 +145,9 @@ def observe(market: dict, *, force: bool = False) -> dict | None:
         h1_by_pair[pair] = h1
         if h1:
             newest = max(newest, str(h1[-1].dt))
-    if not newest or (newest == _LAST_H1 and not force):
+    basket = tuple((pair, str(h1_by_pair[pair][-1].dt) if h1_by_pair[pair] else "") for pair in cfg.PAIRS)
+    if not newest or (not force and (basket == _LAST_BASKET if getattr(
+            cfg, "STAGE27A_DIAGNOSTICS_BASKET_VECTOR", True) else newest == _LAST_H1)):
         return None
     pairs = {}
     for pair in cfg.PAIRS:
@@ -164,7 +167,7 @@ def observe(market: dict, *, force: bool = False) -> dict | None:
     record = {"schema": 1, "mode": "OBSERVE_ONLY", "live_effect": "NONE",
               "h1": newest, "observed_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "pairs": pairs, "summary": summarize(pairs)}
-    _LAST_H1, _LAST_RESULT = newest, record
+    _LAST_H1, _LAST_RESULT, _LAST_BASKET = newest, record, basket
     try:
         _append(record)
     except OSError:

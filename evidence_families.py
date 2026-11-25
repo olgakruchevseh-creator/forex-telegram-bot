@@ -50,7 +50,7 @@ _TITLE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "ДВОЙН", "1-2-3",
     )),
     ("levels", (
-        "ПРОБОЙ УРОВНЯ", "ОТБОЙ ОТ", "РЕТТЕСТ УРОВНЯ",
+        "ПРОБОЙ УРОВНЯ", "ОТБОЙ ОТ", "РЕТТЕСТ УРОВНЯ", "РЕТЕСТ УРОВНЯ",
         "CONSOLIDATION", "КОНСОЛИДАЦ", "POC",
     )),
     ("reversal", ("ATS REVERSAL", "EXHAUSTION")),
@@ -66,7 +66,7 @@ _BODY_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("imbalance", ("FVG", "IMBALANCE", "ИМБАЛАНС", "ДИСБАЛАНС", "BPR")),
     ("liquidity", ("PDH", "PDL", "EQH", "EQL", "INDUCEMENT", "IDM")),
     ("structure", ("MSS", "BOS", "CHOCH", "СЛОМ СТРУКТУР", "STRUCTURE SHIFT", "СТРУКТУР")),
-    ("levels", ("LEVEL", "РЕТТЕСТ")),
+    ("levels", ("LEVEL", "РЕТТЕСТ", "РЕТЕСТ")),
 )
 
 

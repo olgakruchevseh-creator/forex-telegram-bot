@@ -1642,3 +1642,16 @@ KILLER_FAMILY_FRESHNESS_SECONDS = {"D1": 36*3600, "H4": 12*3600,
 
 # Этап 26: одно ценовое место не показываем дважды с противоречивым статусом.
 BRIEFING_LEVELS_NO_OVERLAP = True
+
+
+# Этап 27A — независимые флаги отката, не меняют Master/Killer/ATR/H1-close.
+STAGE27A_OWNER_CHAT_GUARD = True
+STAGE27A_SOURCE_IDENTITY_SINGLE_TABLE = True
+STAGE27A_MODULE_EVENT_TIME = True
+STAGE27A_MODULE_PENDING_TTL = True
+STAGE27A_REQUIRE_EVENT_TIME = False  # Второй этап после Railway-логов по всем источникам.
+STAGE27A_NEW_FVG_INFO_ONLY = True
+STAGE27A_DIAGNOSTICS_BASKET_VECTOR = True
+STAGE27A_UNIFIED_JOURNAL_CLEANUP = True
+UNIFIED_JOURNAL_KEEP_ROTATED = 6
+MODULE_PENDING_MAX_H1 = 2
