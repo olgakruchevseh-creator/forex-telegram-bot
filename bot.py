@@ -987,6 +987,7 @@ async def cmd_h1_backfill(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Сигналы не затронуты.")
 
 
+@_owner_handler
 async def cmd_ohlc_timebase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Where do vendor H4/D1/W1 bars really start? Read-only, cache only."""
     _remember_effective_chat(update)
@@ -3403,7 +3404,7 @@ def main() -> None:
     app.add_handler(CommandHandler("briefing_full", _owner_handler(cmd_briefing)))
     app.add_handler(CommandHandler("patterns_history", _owner_handler(cmd_patterns_history)))
     app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
-    app.add_handler(CommandHandler("ohlc_timebase", _owner_handler(cmd_ohlc_timebase)))
+    app.add_handler(CommandHandler("ohlc_timebase", cmd_ohlc_timebase))
     app.add_handler(CommandHandler("ohlc_conflicts", _owner_handler(cmd_ohlc_conflicts)))
     app.add_handler(CommandHandler("ohlc_triplet", _owner_handler(cmd_ohlc_triplet)))
     app.add_handler(CommandHandler("ohlc_verify", cmd_ohlc_verify))
