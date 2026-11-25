@@ -323,7 +323,7 @@ def _cache_fallback(s: str, tf: dict, now: float) -> list[Candle]:
     candles = hit.get("candles") or []
     try:
         age = now - float(hit.get("ts"))
-        max_age = float(getattr(cfg, "MARKET_CACHE_FALLBACK_MAX_AGE_MINUTES", {}).get(tf["key"], 0)) * 60
+        max_age = float(getattr(cfg, "MARKET_CACHE_FALLBACK_MAX_AGE_MINUTES", {'M5': 20, 'M15': 45, 'H1': 90, 'H4': 300, 'D1': 2880, 'W1': 14400}).get(tf["key"], 0)) * 60
     except (TypeError, ValueError, OverflowError, AttributeError):
         return []
     if not candles or not math.isfinite(age) or not math.isfinite(max_age):

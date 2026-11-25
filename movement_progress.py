@@ -47,7 +47,7 @@ def _view(tf: str, bars: list[Candle]):
 def _swings(tf: str, bars: list[Candle]):
     return zigzag(
         bars,
-        float((getattr(cfg, "ZIGZAG_PCT", {}) or {}).get(tf, .18)),
+        float((getattr(cfg, "ZIGZAG_PCT", {'W1': 1.2, 'D1': 0.7, 'H4': 0.35, 'H1': 0.18, 'M15': 0.12, 'M5': 0.08}) or {}).get(tf, .18)),
         int(getattr(cfg, "ZIGZAG_MIN_BARS", 3)),
     )
 
@@ -55,7 +55,7 @@ def _swings(tf: str, bars: list[Candle]):
 def _strength_ok(symbol: str, side: str, strength: dict[str, float]) -> tuple[bool, float]:
     base, quote = split_pair(symbol)
     gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
-    need = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", .05))
+    need = float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_STRENGTH_GAP", 0.03))
     return (gap >= need if side == "LONG" else gap <= -need), gap
 
 
@@ -137,7 +137,7 @@ def analyze_progress(symbol: str, by_tf: dict, strength: dict[str, float]) -> di
     target, target_tf = targets[0]["price"], targets[0]["tf"]
     total = abs(target-anchor)
     passed = abs(current-anchor)
-    if total < av * float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_TARGET_ATR", 1.5)):
+    if total < av * float(getattr(cfg, "MOVEMENT_PROGRESS_MIN_TARGET_ATR", 0.8)):
         return None
     progress = max(0.0, min(100.0, passed / total * 100.0))
     remaining = max(0.0, 100.0-progress)

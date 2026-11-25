@@ -605,7 +605,7 @@ def _chart_figure(tf: str, bars: list[Candle]) -> dict | None:
     or None. No redraw check here (see chart_patterns); this is also the probe
     used to find earlier breakouts inside a later figure.
     """
-    hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {}).get(tf, 42) or 42)
+    hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {'W1': 79, 'D1': 120, 'H4': 80, 'H1': 60, 'M15': 48, 'M5': 42}).get(tf, 42) or 42)
     if len(bars) < 45:
         return None
     last = bars[-1]
@@ -814,7 +814,7 @@ def _pattern_123_triple(tf: str, bars: list[Candle], n: int, p1, p2, p3,
     # Preserve the historical per-TF limit by default; unlike a magic n+6,
     # its meaning is now explicit. Enlarging this window is a *trading-policy*
     # change and requires historical evaluation before enabling.
-    maximum_age = max(0, int(getattr(cfg, "PATTERN_123_MAX_BARS_AFTER_P3", {}).get(tf, n + 5)))
+    maximum_age = max(0, int(getattr(cfg, "PATTERN_123_MAX_BARS_AFTER_P3", {'W1': 8, 'D1': 8, 'H4': 8, 'H1': 7, 'M15': 7, 'M5': 7}).get(tf, n + 5)))
     anchor_i = p3[0] if window_anchor is None else max(p3[0], int(window_anchor))
     p3_age = len(bars) - 1 - anchor_i
 
@@ -991,7 +991,7 @@ def harmonic_xabcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     }
     tol = float(getattr(cfg, "FIB_TOL", .06))
     for key, label in labels.items():
-        rules = getattr(cfg, "HARMONIC_RATIOS", {}).get(key) or {}
+        rules = getattr(cfg, "HARMONIC_RATIOS", {'gartley': {'xb': (0.56, 0.66), 'ac': (0.382, 0.886), 'bd': (1.13, 1.618), 'xd': (0.72, 0.85)}, 'bat': {'xb': (0.382, 0.5), 'ac': (0.382, 0.886), 'bd': (1.618, 2.618), 'xd': (0.82, 0.95)}, 'alt_bat': {'xb': (0.382, 0.382), 'ac': (0.382, 0.886), 'bd': (2.0, 3.618), 'xd': (1.08, 1.18)}, 'butterfly': {'xb': (0.76, 0.81), 'ac': (0.382, 0.886), 'bd': (1.618, 2.24), 'xd': (1.2, 1.5)}, 'crab': {'xb': (0.382, 0.618), 'ac': (0.382, 0.886), 'bd': (2.24, 3.618), 'xd': (1.55, 1.68)}, 'deep_crab': {'xb': (0.84, 0.924), 'ac': (0.382, 0.886), 'bd': (2.0, 3.618), 'xd': (1.55, 1.68)}, 'shark': {'ac': (1.13, 1.618), 'bd': (1.618, 2.24), 'xd': (0.886, 1.13)}, 'cypher': {'xb': (0.382, 0.618), 'xc': (1.272, 1.414), 'dxc': (0.75, 0.82)}, 'five_o': {'xb': (1.13, 1.618), 'ac': (1.618, 2.24), 'cd': (0.48, 0.62)}, 'abcd': {'bc': (0.382, 0.886), 'cd_ab': (0.88, 1.12)}}).get(key) or {}
         local_ratios = ratios
         if rules and all(name in local_ratios and _inside(local_ratios[name], limits, tol)
                          for name, limits in rules.items()):
@@ -1027,8 +1027,8 @@ def harmonic_abcd(tf: str, bars: list[Candle]) -> list[Pattern]:
     if not _no_violation_after(bars, d):
         return out
     ratio_bc, ratio_cd = bc/ab, cd/ab
-    bc_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("bc", (.382, .886))
-    cd_limits = getattr(cfg, "HARMONIC_RATIOS", {}).get("abcd", {}).get("cd_ab", (.88, 1.12))
+    bc_limits = getattr(cfg, "HARMONIC_RATIOS", {'gartley': {'xb': (0.56, 0.66), 'ac': (0.382, 0.886), 'bd': (1.13, 1.618), 'xd': (0.72, 0.85)}, 'bat': {'xb': (0.382, 0.5), 'ac': (0.382, 0.886), 'bd': (1.618, 2.618), 'xd': (0.82, 0.95)}, 'alt_bat': {'xb': (0.382, 0.382), 'ac': (0.382, 0.886), 'bd': (2.0, 3.618), 'xd': (1.08, 1.18)}, 'butterfly': {'xb': (0.76, 0.81), 'ac': (0.382, 0.886), 'bd': (1.618, 2.24), 'xd': (1.2, 1.5)}, 'crab': {'xb': (0.382, 0.618), 'ac': (0.382, 0.886), 'bd': (2.24, 3.618), 'xd': (1.55, 1.68)}, 'deep_crab': {'xb': (0.84, 0.924), 'ac': (0.382, 0.886), 'bd': (2.0, 3.618), 'xd': (1.55, 1.68)}, 'shark': {'ac': (1.13, 1.618), 'bd': (1.618, 2.24), 'xd': (0.886, 1.13)}, 'cypher': {'xb': (0.382, 0.618), 'xc': (1.272, 1.414), 'dxc': (0.75, 0.82)}, 'five_o': {'xb': (1.13, 1.618), 'ac': (1.618, 2.24), 'cd': (0.48, 0.62)}, 'abcd': {'bc': (0.382, 0.886), 'cd_ab': (0.88, 1.12)}}).get("abcd", {}).get("bc", (.382, .886))
+    cd_limits = getattr(cfg, "HARMONIC_RATIOS", {'gartley': {'xb': (0.56, 0.66), 'ac': (0.382, 0.886), 'bd': (1.13, 1.618), 'xd': (0.72, 0.85)}, 'bat': {'xb': (0.382, 0.5), 'ac': (0.382, 0.886), 'bd': (1.618, 2.618), 'xd': (0.82, 0.95)}, 'alt_bat': {'xb': (0.382, 0.382), 'ac': (0.382, 0.886), 'bd': (2.0, 3.618), 'xd': (1.08, 1.18)}, 'butterfly': {'xb': (0.76, 0.81), 'ac': (0.382, 0.886), 'bd': (1.618, 2.24), 'xd': (1.2, 1.5)}, 'crab': {'xb': (0.382, 0.618), 'ac': (0.382, 0.886), 'bd': (2.24, 3.618), 'xd': (1.55, 1.68)}, 'deep_crab': {'xb': (0.84, 0.924), 'ac': (0.382, 0.886), 'bd': (2.0, 3.618), 'xd': (1.55, 1.68)}, 'shark': {'ac': (1.13, 1.618), 'bd': (1.618, 2.24), 'xd': (0.886, 1.13)}, 'cypher': {'xb': (0.382, 0.618), 'xc': (1.272, 1.414), 'dxc': (0.75, 0.82)}, 'five_o': {'xb': (1.13, 1.618), 'ac': (1.618, 2.24), 'cd': (0.48, 0.62)}, 'abcd': {'bc': (0.382, 0.886), 'cd_ab': (0.88, 1.12)}}).get("abcd", {}).get("cd_ab", (.88, 1.12))
     tol = float(getattr(cfg, "FIB_TOL", .06))
     # AB=CD is an equality-of-legs pattern, not a generic 1.0–1.68 extension.
     # Fib tolerance applies to BC/retracements, but must not relax this core
@@ -1559,7 +1559,7 @@ def _chart_boundaries(pattern: Pattern, bars: list[Candle]) -> list[tuple[int, f
     """
     if pattern.name not in CHART_FIGURE_NAMES or len(bars) < 45:
         return []
-    hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {}).get(pattern.tf, 42) or 42)
+    hist_n = int(getattr(cfg, "PATTERN_CHART_HISTORY", {'W1': 79, 'D1': 120, 'H4': 80, 'H1': 60, 'M15': 48, 'M5': 42}).get(pattern.tf, 42) or 42)
     history = bars[-(hist_n + 1):-1] if len(bars) > hist_n + 1 else bars[:-1]
     offset = len(bars) - 1 - len(history)
     piv = _pivots(history, max(2, cfg.PATTERN_PIVOT.get(pattern.tf, 3)),
@@ -1979,7 +1979,7 @@ def _harmonic_still_early(p: Pattern, by_tf: dict) -> bool:
         return True  # D not locatable (synthetic/legacy inputs): keep old behaviour
     # D is a pivot confirmed by PATTERN_PIVOT bars, so the minimum age is n.
     n = int(cfg.PATTERN_PIVOT.get(p.tf, 3))
-    max_age = int(getattr(cfg, "HARMONIC_MAX_BARS_AFTER_D", {}).get(p.tf, n + 2))
+    max_age = int(getattr(cfg, "HARMONIC_MAX_BARS_AFTER_D", {'H1': 4, 'H4': 5, 'D1': 5, 'W1': 5}).get(p.tf, n + 2))
     max_atr = float(getattr(cfg, "HARMONIC_MAX_REACTION_ATR", 2.0))
     av = atr(bars, 14) or _range(bars[-1])
     age = len(bars) - 1 - d_i

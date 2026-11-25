@@ -10,6 +10,8 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from stage27a_event_integrity import _parse as _utc_parse, _h1_ends
+
 import config as cfg
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
@@ -151,7 +153,7 @@ def detect_exit(phase: Phase, bars: list[Candle], by_tf: dict, strength: dict[st
         return False
     base, quote = split_pair(phase.symbol)
     gap = strength.get(base, 0.0) - strength.get(quote, 0.0)
-    need = float(getattr(cfg, "PHASE_EXIT_STRENGTH_GAP", 0.05))
+    need = float(getattr(cfg, "PHASE_EXIT_STRENGTH_GAP", 0.06))
     if not getattr(cfg, "CURRENCY_STRENGTH_ADVISORY_ONLY", True) and ((wanted > 0 and gap < need) or (wanted < 0 and gap > -need)):
         return False
     og = ohlc_movement.guard_event(by_tf, phase.side, phase.quality)
@@ -281,6 +283,61 @@ def _stale_pending_reason(phase: Phase, event: str, market: dict) -> str:
     return ""
 
 
+
+def _box_overlap(a: Phase, b: Phase) -> float:
+    """Overlap over the smaller *positive* box width, never over price itself."""
+    width = min(a.high - a.low, b.high - b.low)
+    if width <= 0:
+        return 0.0
+    return max(0.0, min(a.high, b.high) - max(a.low, b.low)) / width
+
+
+def _same_cross_tf_box(a: Phase, b: Phase) -> bool:
+    if a.symbol != b.symbol or a.kind != b.kind or a.side != b.side:
+        return False
+    width = max(a.high - a.low, b.high - b.low, 1e-12)
+    boundary_shift = max(abs(a.low-b.low), abs(a.high-b.high)) / width
+    return _box_overlap(a, b) >= .75 and boundary_shift <= .30
+
+
+def _recent_exited_overlapping(a: Phase, prior: Phase, by_tf: dict) -> bool:
+    if not prior.exit_sent or not prior.exit_dt or a.kind != prior.kind or a.side != prior.side:
+        return False
+    if a.symbol != prior.symbol or _box_overlap(a, prior) <= .50:
+        return False
+    exit_at = _utc_parse(prior.exit_dt)
+    closes = _h1_ends(by_tf)
+    if not exit_at or not closes:
+        return False   # no verified clock -> do not invent an elapsed-H1 count
+    if exit_at > closes[-1]:
+        return False
+    elapsed = sum(end > exit_at for end in closes)
+    return elapsed <= max(0, int(getattr(cfg, "PHASE_EXIT_MEMORY_H1", 72)))
+
+
+def _verified_fresh_phase_after_exit(a: Phase, prior: Phase, by_tf: dict) -> bool:
+    """Allow a recycled price area only after a full NEW box of CLOSED bars.
+
+    A time-based TTL alone must not resurrect a phase while the breakout leg
+    still lies in its consolidation window. This uses both elapsed closed H1
+    and the start of the *candidate TF* detection window.
+    """
+    if not prior.exit_sent or a.symbol != prior.symbol or a.kind != prior.kind:
+        return False
+    if _recent_exited_overlapping(a, prior, by_tf):
+        return False
+    exit_at = _utc_parse(prior.exit_dt)
+    h1_ends = _h1_ends(by_tf)
+    tf_bars = _bars(by_tf, a.tf)
+    window = max(1, int(getattr(cfg, "PHASE_RANGE_BARS", 24)))
+    if not exit_at or len(tf_bars) < window or not h1_ends:
+        return False
+    if sum(end > exit_at for end in h1_ends) <= max(0, int(getattr(cfg, "PHASE_EXIT_MEMORY_H1", 72))):
+        return False
+    start = _utc_parse(tf_bars[-window].dt)
+    return bool(start and start > exit_at)
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
@@ -312,7 +369,15 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
         try:
             by_tf = market.get(symbol) or {}
             # Existing ranges: only a newly crossed boundary can create exit.
-            for phase in [p for p in stored.values() if p.symbol == symbol and not p.exit_sent]:
+            active = sorted([p for p in stored.values() if p.symbol == symbol and not p.exit_sent],
+                            key=lambda p: (TF_RANK.get(p.tf, 0), p.quality), reverse=True)
+            emitted: list[Phase] = []
+            for phase in active:
+                if (getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True)
+                        and any(_same_cross_tf_box(phase, peer) for peer in emitted)):
+                    continue  # senior TF has actually confirmed an exit; no duplicate
+                # Do not suppress a valid H1 exit just because an overlapping
+                # higher-TF phase has NOT confirmed its own breakout.
                 # Граница фазы может быть D1/H4/H1, но торговый выход семьи AMD
                 # фиксируется только закрытой H1. M15/M5 — подтверждение, не триггер.
                 if detect_exit(phase, _bars(by_tf, "H1"), by_tf, strength) and not first:
@@ -330,6 +395,13 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                         except Exception:
                             log.exception("AMD family priority check %s", symbol)
                     if not po3_same_event:
+                        emitted.append(phase)
+                        if getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True):
+                            for peer in active:
+                                if peer is not phase and not peer.exit_sent and _same_cross_tf_box(phase, peer):
+                                    peer.exit_sent = True
+                                    peer.exit_dt, peer.exit_price = phase.exit_dt, phase.exit_price
+                                    peer.status = "ВЫХОД ПОДТВЕРЖДЁН · ДУБЛЬ TF"
                         text = format_message(phase, "exit")
                         digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                         pending[digest] = {"phase": asdict(phase), "event": "exit"}
@@ -342,12 +414,16 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     candidates.append(phase)
             if candidates:
                 phase = max(candidates, key=lambda p: (TF_RANK[p.tf], p.quality))
+                if (getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True)
+                        and any(_recent_exited_overlapping(phase, prior, by_tf) for prior in stored.values())):
+                    continue  # an already-exited, overlapping box is NOT new accumulation
                 # A completed phase is immutable as a signal lifecycle.  The
                 # current price may keep trading the same box for many days:
                 # rediscovery must not resurrect a previously delivered exit.
                 if getattr(cfg, "PHASE_EXITED_RANGE_DEDUP", True):
                     peers = [p for p in stored.values()
-                             if p.symbol == symbol and p.tf == phase.tf and p.kind == phase.kind]
+                             if p.symbol == symbol and p.kind == phase.kind
+                             and (not getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True) or p.tf == phase.tf)]
                     def distance(prior):
                         width = max(prior.high - prior.low, phase.high - phase.low, 1e-12)
                         return max(abs(prior.low - phase.low), abs(prior.high - phase.high)) / width
@@ -357,8 +433,22 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     same = next((p for p in stored.values()
                                  if p.symbol == symbol and p.tf == phase.tf
                                  and p.kind == phase.kind and not p.exit_sent), None)
-                if same:
-                    if same.exit_sent:
+                if (same and not same.exit_sent
+                        and getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True)
+                        and TF_RANK.get(phase.tf, 0) > TF_RANK.get(same.tf, 0)):
+                    # A matching higher-TF phase replaces the unconfirmed lower-TF copy.
+                    stored.pop(same.phase_id, None)
+                    stored[phase.phase_id] = phase
+                elif same:
+                    if (same.exit_sent
+                            and getattr(cfg, "STAGE27C_PHASE_CROSS_TF_DEDUP", True)
+                            and _verified_fresh_phase_after_exit(phase, same, by_tf)):
+                        # A new independent lifecycle may reuse the SAME price band,
+                        # but must have a different durable ID (old exit immutable).
+                        phase.phase_id = phase.phase_id + "|" + str(phase.created_dt)
+                        if phase.phase_id not in stored:
+                            stored[phase.phase_id] = phase
+                    elif same.exit_sent:
                         # Only observational timestamp can advance; do not
                         # clear exit_sent, exit_price, exit_dt or recreate id.
                         if phase.last_dt > same.last_dt:

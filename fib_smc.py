@@ -147,7 +147,7 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
     h1, h4, d1, m15, m5 = (_bars(by_tf, tf) for tf in ("H1", "H4", "D1", "M15", "M5"))
     if min(len(h1), len(h4), len(d1), len(m15), len(m5)) < 25:
         return None
-    swings = zigzag(h1, float((getattr(cfg, "ZIGZAG_PCT", {}) or {}).get("H1", .18)), int(getattr(cfg, "ZIGZAG_MIN_BARS", 3)))
+    swings = zigzag(h1, float((getattr(cfg, "ZIGZAG_PCT", {'W1': 1.2, 'D1': 0.7, 'H4': 0.35, 'H1': 0.18, 'M15': 0.12, 'M5': 0.08}) or {}).get("H1", .18)), int(getattr(cfg, "ZIGZAG_MIN_BARS", 3)))
     if len(swings) < 2:
         return None
     start, end = swings[-2], swings[-1]
@@ -174,7 +174,7 @@ def detect_setup(symbol: str, by_tf: dict, strength: dict[str, float], events=No
     if h4_bias != wanted or d1_bias == -wanted:
         return None
 
-    fib_a = float(getattr(cfg, "FIB_SMC_RETRACE_MIN", .50))
+    fib_a = float(getattr(cfg, "FIB_SMC_RETRACE_MIN", 0.618))
     fib_b = float(getattr(cfg, "FIB_SMC_RETRACE_MAX", .786))
     fib_ref = float(getattr(cfg, "FIB_SMC_OTE_REFERENCE", .705))
     if side == "LONG":

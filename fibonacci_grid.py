@@ -63,7 +63,7 @@ def detect_reaction(symbol: str, by_tf: dict, strength: dict[str, float]) -> dic
         return None
     swings = zigzag(
         h1,
-        float((getattr(cfg, "ZIGZAG_PCT", {}) or {}).get("H1", .18)),
+        float((getattr(cfg, "ZIGZAG_PCT", {'W1': 1.2, 'D1': 0.7, 'H4': 0.35, 'H1': 0.18, 'M15': 0.12, 'M5': 0.08}) or {}).get("H1", .18)),
         int(getattr(cfg, "ZIGZAG_MIN_BARS", 3)),
     )
     if len(swings) < 2:

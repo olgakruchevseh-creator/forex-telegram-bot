@@ -594,7 +594,7 @@ def market_coverage(market: dict[str, dict[str, list]]) -> dict:
     даёт ложные 2-из-3 на младших ТФ.
     """
     required_tfs = tuple(getattr(cfg, "MARKET_REQUIRED_TFS", ("H1", "M15", "M5", "H4")))
-    min_h1 = int(getattr(cfg, "MARKET_MIN_CLOSED_H1", 20))
+    min_h1 = int(getattr(cfg, "MARKET_MIN_CLOSED_H1", 26))
     missing: list[str] = []
     short_h1: list[str] = []
     present = 0

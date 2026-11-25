@@ -20,7 +20,7 @@ def _flatten(prefix, value, out):
             if _numeric(item): out[f"{prefix}[{i}]"] = item
 
 def snapshot() -> dict:
-    out = {"schema": int(getattr(cfg, "NUMERICAL_CALIBRATION_SCHEMA", 2))}
+    out = {"schema": int(getattr(cfg, "NUMERICAL_CALIBRATION_SCHEMA", 1))}
     for key in sorted(k for k in dir(cfg) if k.isupper() and not k.startswith("__")):
         try: _flatten(key, getattr(cfg, key), out)
         except Exception: continue

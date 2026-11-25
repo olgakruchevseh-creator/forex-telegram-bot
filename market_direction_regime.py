@@ -96,7 +96,7 @@ def _auction_context(by_tf: dict) -> dict:
     h1 = closed_candles((by_tf or {}).get("H1") or [], 60)
     if len(h1) < 35:
         return {"available": False, "state": "UNAVAILABLE", "direction": "NEUTRAL"}
-    lookback = int(getattr(cfg, "POC_LOOKBACK_H1", 80) or 80)
+    lookback = int(getattr(cfg, "POC_LOOKBACK_H1", 72) or 80)
     prof = poc_profile._profile(h1[-max(30, lookback):])
     if prof is None:
         return {"available": False, "state": "UNAVAILABLE", "direction": "NEUTRAL"}

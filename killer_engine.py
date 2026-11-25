@@ -443,7 +443,7 @@ def evaluate(pair, side, texts, market, strength, events=None, now_utc=None):
  setup_ctx=setup_memory.analyze(pair,direction,rname)
  score += setup_memory.score_delta(setup_ctx)
  score=max(0,min(100,int(round(score))))
- threshold=int(getattr(cfg,"KILLER_SCORE_THRESHOLD",88))
+ threshold=int(getattr(cfg,"KILLER_SCORE_THRESHOLD",84))
  if score<threshold:return {"eligible":False,"reason":"score_below_threshold","score":score,"families":families,"trap_review":trap_review,"module_trace":module_trace}
  av=atr(h1,14); entry=float(h1[-1].close); mult=(1 if direction>0 else -1)
  if not all(map(lambda x: isinstance(x,(int,float)) and math.isfinite(x), (av,entry))) or av<=0 or entry<=0:

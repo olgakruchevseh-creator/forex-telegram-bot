@@ -234,13 +234,20 @@ class NewsEvent:
 CPI_MARKERS = ("cpi", "consumer price index")
 CORE_CPI_MARKERS = ("core cpi", "core consumer price")
 
+def is_pce_event(event: NewsEvent) -> bool:
+    title = (event.title or "").lower()
+    return (getattr(cfg, "STAGE27C_NEWS_EVENT_CLASSIFICATION", True)
+            and any(k in title for k in ("pce", "personal consumption expenditures")))
+
+
 def is_cpi_event(event: NewsEvent) -> bool:
     title = (event.title or "").lower()
-    return any(marker in title for marker in CPI_MARKERS)
+    return any(marker in title for marker in CPI_MARKERS) or is_pce_event(event)
 
 def is_core_cpi_event(event: NewsEvent) -> bool:
     title = (event.title or "").lower()
-    return any(marker in title for marker in CORE_CPI_MARKERS)
+    return (any(marker in title for marker in CORE_CPI_MARKERS)
+            or (getattr(cfg, "STAGE27C_NEWS_EVENT_CLASSIFICATION", True) and "core pce" in title))
 
 def cpi_surprise(event: NewsEvent) -> Optional[dict]:
     """Оценивает CPI в процентных пунктах, а не относительным % от прогноза.
@@ -303,14 +310,17 @@ def cpi_pair_guard(symbol: str, events: list[NewsEvent], now_utc: datetime | Non
         return ""
     _, delta, event = min(relevant, key=lambda x: x[0])
     title = translate_title(event.title)
+    family = "PCE" if is_pce_event(event) else "CPI"
     if now_utc < event.dt_utc:
-        return f"⛔ CPI-ФИЛЬТР: вход запрещён до публикации {event.currency} {title} (через {delta} мин) и подтверждения реакции цены."
+        return f"⛔ {family}-ФИЛЬТР: вход запрещён до публикации {event.currency} {title} (через {delta} мин) и подтверждения реакции цены."
     consensus = cpi_release_consensus(events, event.currency, event)
     state = consensus.get("verdict")
     label = {"positive":"инфляция выше прогноза — реакция зависит от ожиданий ставок",
              "negative":"инфляция ниже прогноза — реакция зависит от ожиданий ставок",
              "mixed":"смешанный headline/core CPI", "neutral":"без значимого числового сюрприза"}.get(state, "неопределённый релиз")
-    return f"⛔ CPI-ФИЛЬТР: {event.currency} · {label}. После релиза прошло {abs(delta)} мин; новый вход только после пост-CPI стабилизации и подтверждения цены."
+    if is_pce_event(event):
+        label = label.replace("CPI", "PCE")
+    return f"⛔ {family}-ФИЛЬТР: {event.currency} · {label}. После релиза прошло {abs(delta)} мин; новый вход только после пост-{family} стабилизации и подтверждения цены."
 
 
 def _cache_path() -> Path:
@@ -403,6 +413,11 @@ def map_impact(raw: str) -> str:
 
 def classify_effect(title: str) -> str:
     t = (title or "").lower()
+    if getattr(cfg, "STAGE27C_NEWS_EVENT_CLASSIFICATION", True):
+        if "claimant count" in t:
+            return "higher_is_negative"
+        if any(x in t for x in ("jolts", "job openings", "pce", "personal consumption expenditures")):
+            return "higher_is_positive"
     if any(k in t for k in CONTEXT_DEPENDENT) and not any(k in t for k in HIGHER_POSITIVE + HIGHER_NEGATIVE):
         return "context_dependent"
     if any(k in t for k in HIGHER_NEGATIVE):
@@ -670,7 +685,8 @@ def interpret_print(event: NewsEvent) -> Optional[str]:
     return "positive" if better else "negative"
 
 
-def scenario_before(event: NewsEvent, ccy_score: float | None) -> str:
+def scenario_before(event: NewsEvent, ccy_score: float | None,
+                    rank_position: int | None = None, rank_total: int = 8) -> str:
     if is_speech_event(event):
         return (
             f"Для выступления нет числового Actual. Жёсткий тон комментариев может усилить {event.currency}; "
@@ -688,14 +704,26 @@ def scenario_before(event: NewsEvent, ccy_score: float | None) -> str:
         return (f"Сравниваем факт и прогноз по {event.currency}, но направление не выводим автоматически. "
                 "Оцениваем ожидания ставок, другие показатели релиза и реакцию цены после закрытой H1.")
     # None = no verified strength: never claim a rank position.
-    weak = ccy_score is not None and ccy_score <= -0.03
-    strong = ccy_score is not None and ccy_score >= 0.03
-    current = (
-        "Сила валюты сейчас не подтверждена. " if ccy_score is None else
-        f"{event.currency} сейчас слабая. " if weak else
-        f"{event.currency} сейчас сильная. " if strong else
-        f"{event.currency} в середине рейтинга. "
-    )
+    # Stage 27C: the verified basket rank, not an arbitrary absolute score,
+    # determines the word «сильная/слабая». Old callers without rank keep the
+    # previous two-argument API for backwards compatibility.
+    if getattr(cfg, "STAGE27C_STRENGTH_RANK_WORDING", True) and ccy_score is not None and rank_position is not None:
+        valid = rank_total == 8 and 1 <= rank_position <= rank_total
+        current = (
+            f"{event.currency} сейчас сильная ({rank_position}/{rank_total}). " if valid and rank_position <= 2 else
+            f"{event.currency} сейчас слабая ({rank_position}/{rank_total}). " if valid and rank_position >= 7 else
+            f"{event.currency} в середине рейтинга ({rank_position}/{rank_total}). " if valid else
+            "Место валюты в рейтинге не подтверждено. "
+        )
+    else:
+        weak = ccy_score is not None and ccy_score <= -0.03
+        strong = ccy_score is not None and ccy_score >= 0.03
+        current = (
+            "Сила валюты сейчас не подтверждена. " if ccy_score is None else
+            f"{event.currency} сейчас слабая. " if weak else
+            f"{event.currency} сейчас сильная. " if strong else
+            f"{event.currency} в середине рейтинга. "
+        )
     if event.economic_effect == "higher_is_negative":
         scenario = (
             f"Факт выше прогноза — отрицательно для {event.currency}; "

@@ -87,7 +87,7 @@ def _structural_bos_level(tf: str, bars: list[Candle], side_i: int, lookback: in
     or unusually flat history cannot form a confirmed swing.
     """
     history = bars[:-1]
-    pct = float((getattr(cfg, "ZIGZAG_PCT", {}) or {}).get(tf, .18))
+    pct = float((getattr(cfg, "ZIGZAG_PCT", {'W1': 1.2, 'D1': 0.7, 'H4': 0.35, 'H1': 0.18, 'M15': 0.12, 'M5': 0.08}) or {}).get(tf, .18))
     min_bars = int(getattr(cfg, "ZIGZAG_MIN_BARS", 3))
     try:
         swings = zigzag(history, pct, min_bars)

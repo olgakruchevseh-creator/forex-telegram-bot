@@ -113,7 +113,7 @@ def remember_candidates(alerts: list[str], h1_dt: str = "", source_ids: dict | N
     state = _load()
     source_ids = source_ids or {}
     now = time.time()
-    ttl = max(1.0, float(getattr(cfg, "SIGNAL_CANDIDATE_TTL_HOURS", 4))) * 3600
+    ttl = max(1.0, float(getattr(cfg, "SIGNAL_CANDIDATE_TTL_HOURS", 1.5))) * 3600
     candidates = {
         key: item for key, item in (state.get("candidates") or {}).items()
         if now - float(item.get("saved_at") or 0) <= ttl
@@ -345,7 +345,7 @@ def _module_targets(symbol: str, side: str, by_tf: dict, source_text: str, ancho
             # test; REAL stage-27B cards require an actual detector anchor line.
             # The deprecated name never comes from patterns._fmt today.
             if getattr(cfg, "NAVIGATOR_PATTERN_MEASURED_FROM_EXTREME", True):
-                lookback = int((getattr(cfg, "PATTERN_LOOKBACK", {}) or {}).get(tf, 160))
+                lookback = int((getattr(cfg, "PATTERN_LOOKBACK", {'W1': 80, 'D1': 150, 'H4': 180, 'H1': 180, 'M15': 160, 'M5': 140}) or {}).get(tf, 160))
                 recent = [s for s in swings if s.kind == ("low" if direction > 0 else "high")
                           and getattr(s, "final", True)
                           and 0 <= s.index < len(bars) and s.index >= max(0, len(bars)-lookback)
@@ -436,7 +436,7 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         float(getattr(cfg, "NAVIGATOR_TARGET_MIN_GAP_ATR", .35)),
     )
     tolerance = av * merge_atr
-    min_target_distance = av * float(getattr(cfg, "NAVIGATOR_MIN_TR1_ATR", .35))
+    min_target_distance = av * float(getattr(cfg, "NAVIGATOR_MIN_TR1_ATR", 0.6))
     for _distance, price, tf in candidates:
         # A structural extremum almost at the entry is part of the reaction
         # zone, not a useful TR1 milestone.  Skip it so Navigator cannot emit
@@ -603,7 +603,7 @@ def assess_new_signal_significance(source_text: str, market: dict, strength: dic
 
     if not math.isfinite(efficiency) or not math.isfinite(gap):
         return {"eligible": False, "reason": "invalid_market_math"}
-    min_h1 = int(getattr(cfg, "SIGNAL_MIN_REMAINING_H1", 3))
+    min_h1 = int(getattr(cfg, "SIGNAL_MIN_REMAINING_H1", 2))
     min_route = float(getattr(cfg, "SIGNAL_MIN_ROUTE_ATR", .75))
     min_body = float(getattr(cfg, "SIGNAL_MIN_MEDIAN_H1_BODY_ATR", .18))
     strong_route = float(getattr(cfg, "SIGNAL_STRONG_ROUTE_ATR_OVERRIDE", 1.25))

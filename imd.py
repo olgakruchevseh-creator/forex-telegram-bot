@@ -32,7 +32,7 @@ def analyze_symbol(symbol:str, market:dict, candidate_side:int)->IMDContext|None
     expected_usd=candidate_side if base=="USD" else -candidate_side
     for tf,mins,look in (("H1",60,int(getattr(cfg,"IMD_H1_LOOKBACK",3))),("H4",240,int(getattr(cfg,"IMD_H4_LOOKBACK",2)))):
         pos=neg=0
-        for peer in getattr(cfg,"PAIRS",()):
+        for peer in getattr(cfg,"PAIRS",['EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD', 'NZD/USD', 'USD/CAD']):
             if peer==symbol or "USD" not in peer:continue
             bars=closed_candles((market.get(peer) or {}).get(tf) or [],mins)
             if len(bars)<=look:continue

@@ -13,6 +13,9 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from datetime import timedelta
+from stage27a_event_integrity import _parse as _utc_parse, _h1_ends
+
 import config as cfg
 import stage27a_event_integrity as stage27a
 import ohlc_movement
@@ -279,11 +282,66 @@ def format_message(event: dict) -> str:
     ])
 
 
+
+def _pool_memory_is_active(rec: dict, h1: list[Candle]) -> bool:
+    sent = _utc_parse(rec.get("sent_dt"))
+    if not sent or not h1:
+        return True  # no reliable clock: never re-authorize a delivered pool
+    closes = [(_utc_parse(b.dt) + timedelta(hours=1)) for b in h1 if _utc_parse(b.dt)]
+    if not closes:
+        return True
+    if sent < closes[0]:
+        return False  # outside our bounded H1 history
+    age = sum(x > sent for x in closes)
+    return age <= max(0, int(getattr(cfg, "LIQUIDITY_POOL_MEMORY_H1", 72)))
+
+
+def _fresh_confirmed_pivot(h1: list[Candle], rec: dict) -> bool:
+    """Re-arm only after a later, confirmed, more extreme H1 pivot."""
+    sent = _utc_parse(rec.get("sent_dt"))
+    if not sent:
+        return False
+    short = rec.get("side") == "SHORT"
+    try:
+        extreme = float(rec["sweep_price"])
+    except (ValueError, TypeError, KeyError):
+        return False
+    for i, price, kind in _local_pivots(h1):
+        opened = _utc_parse(h1[i].dt)
+        if not opened or opened <= sent:
+            continue
+        if short and kind == "high" and price > extreme:
+            return True
+        if not short and kind == "low" and price < extreme:
+            return True
+    return False
+
+
+def _pool_already_consumed(setup: SweepSetup, memory: list[dict], h1: list[Candle]) -> bool:
+    if not getattr(cfg, "STAGE27C_LIQUIDITY_POOL_CONSUMED_ONCE", True):
+        return False
+    av = atr(h1, 14) if len(h1) >= 15 else 0.0
+    tol = max(0.1 * max(0.0, av), 0.01 if "JPY" in setup.symbol else 0.0001)
+    for rec in memory:
+        if rec.get("symbol") != setup.symbol or rec.get("side") != setup.side:
+            continue
+        if not _pool_memory_is_active(rec, h1):
+            continue
+        try:
+            close = abs(float(rec["level"]) - setup.level) <= tol
+        except (KeyError, TypeError, ValueError):
+            continue
+        if close and not _fresh_confirmed_pivot(h1, rec):
+            return True
+    return False
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
     setups = {k: SweepSetup(**v) for k, v in (state.get("setups") or {}).items()}
     pending=state.setdefault("pending", {})
+    consumed=state.setdefault("consumed_pools", [])
     expired_items=[]; stage27a.prune(pending, market, "liquidity_sweep", expired_items)
     expired_ids={item.get("setup_id") for item in expired_items if isinstance(item,dict)}
     for setup in setups.values():
@@ -311,7 +369,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
 
                     _LAST_CHART_CARDS[message] = (event, freeze_by_tf(by_tf))
             fresh = detect_new_sweep(symbol, d1, h4, h1, by_tf)
-            if fresh and fresh.setup_id not in setups:
+            if fresh and fresh.setup_id not in setups and not _pool_already_consumed(fresh, consumed, h1):
                 # Один активный sweep каждого направления на пару.
                 for old in setups.values():
                     if old.symbol == symbol and old.side == fresh.side and not old.sent:
@@ -323,6 +381,10 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     kept = [s for s in setups.values() if not s.invalid]
     kept.sort(key=lambda s: s.sweep_dt)
     state["setups"] = {s.setup_id: asdict(s) for s in kept[-500:]}
+    # Bound the persistent memory and expire only after CLOSED H1 observations.
+    if getattr(cfg, "STAGE27C_LIQUIDITY_POOL_CONSUMED_ONCE", True):
+        state["consumed_pools"] = [r for r in consumed if isinstance(r, dict)
+                                   and _pool_memory_is_active(r, _bars(market.get(r.get("symbol")) or {}, "H1"))][-500:]
     _save(state)
     return messages
 
@@ -332,7 +394,16 @@ def mark_delivered(text: str) -> bool:
     item=(state.get("pending") or {}).pop(digest,None)
     if not item: return False
     setups=state.get("setups") or {}; rec=setups.get(item.get("setup_id"))
-    if rec: rec["sent"]=True
+    if rec:
+        rec["sent"] = True
+        if getattr(cfg, "STAGE27C_LIQUIDITY_POOL_CONSUMED_ONCE", True):
+            memory = state.setdefault("consumed_pools", [])
+            record = {"symbol": rec.get("symbol"), "side": rec.get("side"),
+                      "level": rec.get("level"), "sweep_price": rec.get("sweep_price"),
+                      "sent_dt": item.get("saved_h1") or rec.get("sweep_dt")}
+            if record["sent_dt"] and record["level"] is not None:
+                memory.append(record)
+                state["consumed_pools"] = memory[-500:]
     _save(state); _LAST_CHART_CARDS.pop(text,None); return True
 
 def render_chart(event: dict, by_tf: dict):

@@ -180,7 +180,7 @@ def early_entry_check(by_tf: dict, side) -> dict:
     min_body = float(getattr(cfg, "EARLY_IMPULSE_MIN_BODY_ATR", 1.15))
     min_range = float(getattr(cfg, "EARLY_IMPULSE_MIN_RANGE_ATR", 1.30))
     max_age = int(getattr(cfg, "EARLY_IMPULSE_MAX_AGE_BARS", 1))
-    max_travel = float(getattr(cfg, "EARLY_MAX_TRAVEL_ATR", 1.35))
+    max_travel = float(getattr(cfg, "EARLY_MAX_TRAVEL_ATR", 2.0))
     retest = float(getattr(cfg, "EARLY_ORIGIN_RETEST_ATR", 0.40))
     fresh_exhaust_body = float(getattr(cfg, "EARLY_FRESH_EXHAUST_BODY_ATR", 1.55))
     fresh_exhaust_range = float(getattr(cfg, "EARLY_FRESH_EXHAUST_RANGE_ATR", 1.80))
@@ -208,7 +208,7 @@ def early_entry_check(by_tf: dict, side) -> dict:
     run_net = ((float(run[-1].close) - float(run[0].open)) * side_i) / av
     directional = sum(1 for c in run if ((c.close - c.open) * side_i) > 0)
     run_min_dir = max(2, int(getattr(cfg, "EARLY_RUN_MIN_DIRECTIONAL_BARS", 3)))
-    run_max = float(getattr(cfg, "EARLY_RUN_MAX_TRAVEL_ATR", 1.55))
+    run_max = float(getattr(cfg, "EARLY_RUN_MAX_TRAVEL_ATR", 2.2))
     if directional >= run_min_dir and run_net >= run_max:
         return {"allow": False, "reason": "multi_bar_move_already_extended", "impulse_age": run_bars - 1,
                 "travel_atr": round(run_net, 3), "directional_bars": directional}

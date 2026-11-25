@@ -444,7 +444,7 @@ def analyze(symbol: str, by_tf: dict, horizons_override=None, *,
     # сторону. Если weighted share и медиана спорят, это честный признак
     # неоднородности выборки и снижает качество Echo вместо перерисовки пути.
     minimum_confidence = float(minimum_confidence_override if minimum_confidence_override is not None
-                               else getattr(cfg, "ECHO_MIN_CONFIDENCE", .60))
+                               else getattr(cfg, "ECHO_MIN_CONFIDENCE", 0.62))
     side_sign = 1 if side == "LONG" else -1
     endpoint_ok = (probabilities[end_h] >= .5) if side_sign > 0 else (probabilities[end_h] < .5)
     aligned_h = sum(((probabilities[h] >= .5) if side_sign > 0 else (probabilities[h] < .5))
@@ -762,7 +762,7 @@ def process_market(market: dict) -> list[dict]:
     state = _load_state()
     delivered = state.setdefault("delivered", {})
     pending, candidates = {}, []
-    threshold = int(round(float(getattr(cfg, "ECHO_ALERT_MIN_CONFIDENCE", .75))*100))
+    threshold = int(round(float(getattr(cfg, "ECHO_ALERT_MIN_CONFIDENCE", 0.72))*100))
     analyzed = []
     for symbol in cfg.PAIRS:
         result = analyze(symbol, market.get(symbol) or {})

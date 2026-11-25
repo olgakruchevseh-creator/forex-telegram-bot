@@ -475,7 +475,9 @@ def _levels_lines(symbol: str, info: dict | None) -> list[str]:
     supports = list(info.get("supports") or [])[:2]
     resistances = list(info.get("resistances") or [])[:2]
     current = list(info.get("current_zones") or [])[:1]
-    warnings = list(info.get("observations") or [])[:1]
+    warnings = list(info.get("observations") or [])
+    if not getattr(cfg, "STAGE27C_LEVELS_FILTER_BEFORE_SLICE", True):
+        warnings = warnings[:1]
     if getattr(cfg, "BRIEFING_LEVELS_NO_OVERLAP", True) and warnings:
         # Display coherence ONLY: never mutate the underlying level snapshot,
         # lifecycle or scanner state. A role-change observation that overlaps
@@ -499,6 +501,8 @@ def _levels_lines(symbol: str, info: dict | None) -> list[str]:
             if not overlapping:
                 remaining.append(observation)
         warnings = remaining
+    if getattr(cfg, "STAGE27C_LEVELS_FILTER_BEFORE_SLICE", True):
+        warnings = warnings[:1]
     if info.get("current_price") is None and not (supports or resistances or current):
         return ["Уровни S/R: нет закрытой H1 для расчёта"]
     def fmt(row: dict) -> str:

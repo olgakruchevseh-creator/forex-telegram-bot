@@ -71,7 +71,7 @@ def inspect(market: dict, as_of: datetime | None = None, required_tfs: tuple[str
     if as_of.tzinfo is None:
         return {'ok': False, 'reasons': ['внутреннее время без UTC'], 'per_tf': {}, 'last_closed_h1': None}
     as_of = as_of.astimezone(timezone.utc)
-    age_limits = getattr(cfg, 'MARKET_MAX_CLOSED_TF_AGE_MINUTES', {})
+    age_limits = getattr(cfg, 'MARKET_MAX_CLOSED_TF_AGE_MINUTES', {'M5': 20, 'M15': 45, 'H1': 90, 'H4': 300})
     reasons, per_tf = [], {}
     for tf in required_tfs:
         if tf not in TF_MINUTES:
@@ -85,7 +85,7 @@ def inspect(market: dict, as_of: datetime | None = None, required_tfs: tuple[str
             if reason:
                 reasons.append(f'{pair}:{tf}: {reason}')
                 continue
-            if tf == 'H1' and len(closed) < int(getattr(cfg, 'MARKET_MIN_CLOSED_H1', 20)):
+            if tf == 'H1' and len(closed) < int(getattr(cfg, 'MARKET_MIN_CLOSED_H1', 26)):
                 reasons.append(f'{pair}:H1: недостаточно закрытых свечей ({len(closed)})')
                 continue
             if not closed:

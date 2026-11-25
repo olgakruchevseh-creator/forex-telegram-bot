@@ -120,4 +120,4 @@ def module_affinity(ctx:dict|None, family:str) -> float:
 
 
 def analyze_market(market:dict) -> dict:
-    return {p:c for p in getattr(cfg,'PAIRS',()) if (c:=analyze_symbol(p,(market or {}).get(p) or {}))}
+    return {p:c for p in getattr(cfg,'PAIRS',['EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD', 'NZD/USD', 'USD/CAD']) if (c:=analyze_symbol(p,(market or {}).get(p) or {}))}

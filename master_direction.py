@@ -292,7 +292,7 @@ def analyze_symbol(
         return None
 
     gap = stack.strength_gap
-    minimum_gap = float(getattr(cfg, "MASTER_STRENGTH_MIN_GAP", 0.08))
+    minimum_gap = float(getattr(cfg, "MASTER_STRENGTH_MIN_GAP", 0.05))
     directed_gap = gap * side
     strength_conflict = directed_gap < minimum_gap
 
@@ -476,7 +476,7 @@ def analyze_symbol(
         quality -= 2
     if senior_side == -side:
         quality -= 2
-    if quality < int(getattr(cfg, "MASTER_MIN_QUALITY", 82)):
+    if quality < int(getattr(cfg, "MASTER_MIN_QUALITY", 78)):
         return None
 
     life = None

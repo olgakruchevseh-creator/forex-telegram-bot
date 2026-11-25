@@ -31,8 +31,8 @@ def _bars(by_tf: dict, tf: str, minutes: int) -> list[Candle]:
 def _candidate_level(bars: list[Candle], tf: str, side: int):
     if len(bars) < 25:
         return None
-    pct = float(getattr(cfg, "ZIGZAG_PCT", {}).get(tf, .25))
-    min_bars = int(getattr(cfg, "ZIGZAG_MIN_BARS", 2))
+    pct = float(getattr(cfg, "ZIGZAG_PCT", {'W1': 1.2, 'D1': 0.7, 'H4': 0.35, 'H1': 0.18, 'M15': 0.12, 'M5': 0.08}).get(tf, .25))
+    min_bars = int(getattr(cfg, "ZIGZAG_MIN_BARS", 3))
     swings = zigzag(bars, pct, min_bars)
     # LONG inducement is normally sell-side liquidity below price; SHORT is
     # buy-side liquidity above price. Prefer the nearest recent confirmed swing.

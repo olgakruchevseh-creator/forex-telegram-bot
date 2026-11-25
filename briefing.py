@@ -441,6 +441,22 @@ def pair_side(brief: PairBrief) -> Optional[str]:
     return session_pair_side(brief)
 
 
+def _stage27c_partial_trend(state: str) -> bool:
+    return (getattr(cfg, "STAGE27C_BRIEFING_PARTIAL_TREND_BONUS", True)
+            and str(state).startswith("ТРЕНД") and "НЕЙТРАЛЕН" in state)
+
+
+def _stage27c_strength_rank(scores: dict[str, float], currency: str) -> int | None:
+    """Use ranks only when ALL eight verified currency scores are available."""
+    if not scores or not all(c in scores for c in cfg.CURRENCIES):
+        return None
+    try:
+        ordered = sorted(cfg.CURRENCIES, key=lambda c: (-float(scores[c]), c))
+    except (TypeError, ValueError):
+        return None
+    return ordered.index(currency) + 1 if currency in ordered else None
+
+
 def leader_confidence(brief: PairBrief) -> int:
     conf = 58 + brief.agree_n * 7
     if abs(brief.gap) >= cfg.PAIR_STRENGTH_MIN:
@@ -452,7 +468,9 @@ def leader_confidence(brief: PairBrief) -> int:
         conf += 6
     elif brief.side == "SHORT" and m15 < 0:
         conf += 6
-    if "ТРЕНД" in brief.state:
+    if _stage27c_partial_trend(brief.state):
+        conf += 2
+    elif "ТРЕНД" in brief.state:
         conf += 5
     if brief.zigzag_h4_mixed:
         conf -= 8
@@ -747,7 +765,8 @@ def build_pair_briefs(
         try:
             import pair_character_matrix
             pc = pair_character_matrix.analyze(symbol, market.get(symbol) or {}, strength)
-            regime_hint = "TREND" if "ТРЕНД" in brief.state else ("RANGE" if "RANGE" in brief.state or "СМЕШАН" in brief.state else None)
+            regime_hint = ("TREND" if "ТРЕНД" in brief.state and not _stage27c_partial_trend(brief.state)
+                           else "RANGE" if "RANGE" in brief.state or "СМЕШАН" in brief.state else None)
             mx = pair_character_matrix.interaction_matrix(pc, regime_hint)
             brief.character_matrix_score = float(mx.get("score", 50.0))
             brief.character_matrix_band = str(mx.get("band", "СМЕШАННО"))
@@ -777,7 +796,9 @@ def build_pair_briefs(
             score += 1
         if brief.side == "SHORT" and m15 < 0:
             score += 1
-        if "ТРЕНД" in brief.state:
+        if _stage27c_partial_trend(brief.state):
+            score += 0.75
+        elif "ТРЕНД" in brief.state:
             score += 1.5
         if "RANGE" in brief.state:
             score -= 1.5
@@ -923,7 +944,8 @@ def format_news_block(events: list[newsmod.NewsEvent], strength: dict[str, float
         elif left < 0 and not newsmod.has_actual(e):
             lines.append("Время публикации прошло, фактическое значение источником ещё не получено.")
         else:
-            lines.append(newsmod.scenario_before(e, score))
+            lines.append(newsmod.scenario_before(
+                e, score, rank_position=_stage27c_strength_rank(strength, e.currency)))
         lines.append("")
     completeness = newsmod.pmi_calendar_diagnostic(events)
     if completeness:
@@ -1405,7 +1427,7 @@ def format_news_warning(
     lines.append("🧭 ЧТО МОЖЕТ ПРОИЗОЙТИ")
     lines.append("")
     if newsmod.is_cpi_event(event) or any(x in event.title.lower() for x in ("interest rate", "cash rate", "bank rate", "federal funds rate")):
-        lines.append("Сюрприз по CPI/ставке может изменить ожидания политики ЦБ, но не задаёт направление автоматически.")
+        lines.append("Сюрприз по CPI/PCE/ставке может изменить ожидания политики ЦБ, но не задаёт направление автоматически.")
         lines.append("Сравним фактический релиз с предварительно зафиксированным прогнозом и реакцией H1.")
     elif event.economic_effect == "higher_is_negative":
         lines.append("Если факт существенно выше прогноза → отрицательно для валюты.")
@@ -1417,7 +1439,8 @@ def format_news_warning(
         lines.append("До публикации возможна повышенная волатильность. Новость пока не используется как направляющий фактор.")
     lines.append("")
     if score is not None:
-        lines.append(newsmod.scenario_before(event, score))
+        lines.append(newsmod.scenario_before(
+            event, score, rank_position=(place if verified and isinstance(place, int) else None)))
     else:
         lines.append("Текущую силу и направление нельзя подтвердить без единой закрытой H1 по всем семи парам.")
     lines.append("")
@@ -1453,10 +1476,11 @@ def format_actual_update(
         "neutral": "CPI БЕЗ ЗНАЧИМОГО СЮРПРИЗА",
     }.get(verdict, "КОНТЕКСТ ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ ЦЕНОЙ")
     if newsmod.is_cpi_event(event):
-        tone = {"positive": "CPI ВЫШЕ ПРОГНОЗА — РЕАКЦИЯ ЗАВИСИТ ОТ ОЖИДАНИЙ СТАВОК",
-                "negative": "CPI НИЖЕ ПРОГНОЗА — РЕАКЦИЯ ЗАВИСИТ ОТ ОЖИДАНИЙ СТАВОК",
-                "mixed": "СМЕШАННЫЙ CPI — НАПРАВЛЕНИЕ НЕ УТВЕРЖДАЕМ",
-                "neutral": "CPI БЕЗ ЗНАЧИМОГО СЮРПРИЗА"}.get(verdict, tone)
+        inflation_name = "PCE" if newsmod.is_pce_event(event) else "CPI"
+        tone = {"positive": f"{inflation_name} ВЫШЕ ПРОГНОЗА — РЕАКЦИЯ ЗАВИСИТ ОТ ОЖИДАНИЙ СТАВОК",
+                "negative": f"{inflation_name} НИЖЕ ПРОГНОЗА — РЕАКЦИЯ ЗАВИСИТ ОТ ОЖИДАНИЙ СТАВОК",
+                "mixed": f"СМЕШАННЫЙ {inflation_name} — НАПРАВЛЕНИЕ НЕ УТВЕРЖДАЕМ",
+                "neutral": f"{inflation_name} БЕЗ ЗНАЧИМОГО СЮРПРИЗА"}.get(verdict, tone)
     elif any(x in event.title.lower() for x in ("interest rate", "cash rate", "bank rate", "federal funds rate")):
         tone = "РЕШЕНИЕ ПО СТАВКЕ — НАПРАВЛЕНИЕ ТОЛЬКО ПО РЕАКЦИИ РЫНКА"
     lines = [
@@ -1466,7 +1490,8 @@ def format_actual_update(
     if cpi_consensus and cpi_consensus.get("prints"):
         # Headline/Core показываем вместе: это предотвращает ложный вывод по одной цифре.
         for item in cpi_consensus["prints"]:
-            kind = "Core CPI" if item.get("core") else "CPI"
+            family = "PCE" if newsmod.is_pce_event(event) else "CPI"
+            kind = f"Core {family}" if item.get("core") else family
             lines.append(f"{kind}: факт {item['actual']:g} · прогноз {item['forecast']:g} · сюрприз {item['diff_pp']:+.2f} п.п.")
     else:
         lines.extend([
@@ -1494,7 +1519,8 @@ def format_actual_update(
                      else "Нет проверенной силы USD на этой закрытой H1; вывод по DXY независим")
         lines.append("")
     if newsmod.is_cpi_event(event):
-        lines.append("После CPI первый импульс не считаем самостоятельным входом: ждём пост-CPI стабилизацию и подтверждение цены.")
+        family = "PCE" if newsmod.is_pce_event(event) else "CPI"
+        lines.append(f"После {family} первый импульс не считаем самостоятельным входом: ждём пост-{family} стабилизацию и подтверждение цены.")
         lines.append("")
     lines.append("Это фундаментальный контекст, не самостоятельный торговый сигнал LONG/SHORT.")
     return "\n".join(lines)
