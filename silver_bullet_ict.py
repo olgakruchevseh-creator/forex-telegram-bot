@@ -5,6 +5,7 @@ closed candles, New-York DST-aware windows, currency strength, H1/H4 context,
 high-impact-news protection, event anti-spam and an immutable chart snapshot.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 import io, json, os, time
 from dataclasses import asdict
@@ -186,7 +187,7 @@ def detect(symbol,by_tf,strength,events=None,now_utc=None):
 def _p(symbol,x): return f"{x:.3f}" if "JPY" in symbol else f"{x:.5f}"
 def format_message(e):
     direction="🟢 ЛОНГ" if e["side"]=="LONG" else "🔴 ШОРТ"
-    return "\n".join(["━━━━━━━━━━━━━━━━━━",f"⚡ РЕШЕНИЕ: {direction} · {e['symbol']}","Основание: 🥈 ICT SILVER BULLET",f"Пара: {e['symbol']}",f"Направление: {e['side']}",f"M5 событие (открытие UTC): {e['fill_dt']}",f"качество {e['quality']}/100 · M5 execution · {e['window']}","━━━━━━━━━━━━━━━━━━","","ДЕТАЛИ","━━━━━━━━━━━━━━━━━━",f"Снятая ликвидность: {_p(e['symbol'],e['liquidity'])} · {e.get('liquidity_source','—')}",f"Sweep-экстремум: {_p(e['symbol'],e['sweep'])}",f"MSS: закрытие через {_p(e['symbol'],e['mss_level'])}",f"FVG: {_p(e['symbol'],e['fvg_low'])}–{_p(e['symbol'],e['fvg_high'])}",f"Вход CE 50%: {_p(e['symbol'],e['entry'])} · возврат подтверждён закрытой M5",f"Отмена / SL: {_p(e['symbol'],e['stop'])} · за sweep-экстремумом",f"TR1: {_p(e['symbol'],e['tr1'])} · {e.get('tr1_source','')}",f"TR2: {_p(e['symbol'],e['tr2'])} · {e.get('tr2_source','')}",f"TR3: {_p(e['symbol'],e['tr3'])} · {e.get('tr3_source','')}",f"RR до TR1: {e.get('rr1',0):.2f}R",f"Разница силы валют: {e['gap']:+.2f}",f"Вероятность: {e['confidence']}%","","✅ Факт: ликвидность снята внутри активного окна, закрытая M5 дала MSS + displacement + FVG, затем цена вернулась в CE. Формирующийся FVG без возврата наружу не отправляется."])
+    return "\n".join(["━━━━━━━━━━━━━━━━━━",f"⚡ РЕШЕНИЕ: {direction} · {e['symbol']}","Основание: 🥈 ICT SILVER BULLET",f"Пара: {e['symbol']}",f"Направление: {e['side']}",f"M5 событие (открытие UTC): {e['fill_dt']}",f"качество {e['quality']}/100 · M5 execution · {e['window']}","━━━━━━━━━━━━━━━━━━","","ДЕТАЛИ","━━━━━━━━━━━━━━━━━━",f"Снятая ликвидность: {_p(e['symbol'],e['liquidity'])} · {e.get('liquidity_source','—')}",f"Sweep-экстремум: {_p(e['symbol'],e['sweep'])}",f"MSS: закрытие через {_p(e['symbol'],e['mss_level'])}",f"FVG: {_p(e['symbol'],e['fvg_low'])}–{_p(e['symbol'],e['fvg_high'])}",f"Вход CE 50%: {_p(e['symbol'],e['entry'])} · возврат подтверждён закрытой M5",f"Отмена / SL: {_p(e['symbol'],e['stop'])} · за sweep-экстремумом",f"TR1: {_p(e['symbol'],e['tr1'])} · {e.get('tr1_source','')}",f"TR2: {_p(e['symbol'],e['tr2'])} · {e.get('tr2_source','')}",f"TR3: {_p(e['symbol'],e['tr3'])} · {e.get('tr3_source','')}",f"RR до TR1: {e.get('rr1',0):.2f}R",f"Разница силы валют: {e['gap']:+.2f}",score_line(e['confidence']),"","✅ Факт: ликвидность снята внутри активного окна, закрытая M5 дала MSS + displacement + FVG, затем цена вернулась в CE. Формирующийся FVG без возврата наружу не отправляется."])
 
 def process_market(market,strength,events=None,now_utc=None):
     st=_load(); sent=st.setdefault('sent',{}); out=[]

@@ -1,5 +1,6 @@
 """Сканер Imbalance/FVG: трёхсвечные неэффективности и подтверждённые ретесты."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -239,7 +240,7 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
         f"Разница силы валют: {zone.strength_gap:+.2f}",
         f"Размер FVG: {zone.gap_atr:.2f} ATR · импульс: {zone.impulse_atr:.2f} ATR",
         f"Заполнение зоны: {zone.fill_pct:.0f}%", f"Подтверждение зоны: {zone.reaction_path or '—'}", f"Качество: {zone.quality}/100",
-        f"Вероятность: {zone.confidence}%", "", f"Факт: {fact}"
+        score_line(zone.confidence), "", f"Факт: {fact}"
     ])
 
 

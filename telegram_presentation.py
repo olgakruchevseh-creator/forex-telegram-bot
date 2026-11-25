@@ -15,7 +15,7 @@ _SCORE_PATTERNS = (
     re.compile(r"Killer Score:\s*(\d{1,3})(?:/100)?", re.I),
     re.compile(r"Качество:\s*(\d{1,3})(?:/100)?", re.I),
     re.compile(r"Уверенность(?:\s+контекста)?:\s*(\d{1,3})(?:/100)?", re.I),
-    re.compile(r"Вероятность:\s*(\d{1,3})%", re.I),
+    re.compile(r"(?:Вероятность|Оценка сценария):\s*(\d{1,3})(?:/100|%)", re.I),
 )
 _ENTRY_RE = re.compile(r"(?:Цена подтверждения|Вход|Entry):\s*([^\n]+)", re.I)
 _TR1_RE = re.compile(r"TR1:\s*([^\n]+)", re.I)

@@ -7,6 +7,7 @@ OHLC Movement layer confirms meaningful movement. State is event based, so an
 unchanged zone/reaction cannot spam Navigator.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from dataclasses import asdict, dataclass
 import io, json, logging, os
 from pathlib import Path
@@ -206,7 +207,7 @@ def format_message(zone: BPRZone, side: str, meta: dict) -> str:
         f"🕯 Подтверждение зоны: {meta.get('reaction_path', 'REACTION')} → OHLC Movement",
         f"🕐 Время закрытия: {meta['dt']}", f"💵 Цена закрытия: {_price(zone.symbol, meta['close'])}",
         f"Движение OHLC: {meta['directional']} направл. свеч. · {meta['net_atr']:.2f} ATR · score {meta['score']:.0f}/100",
-        f"Качество: {quality}/100", f"Вероятность: {confidence}%", "",
+        f"Качество: {quality}/100", score_line(confidence), "",
         "Факт: образование BPR само по себе не является сигналом. Событие создано только после возврата цены, подтверждённой реакции/удержания и OHLC-фильтра."
     ])
 

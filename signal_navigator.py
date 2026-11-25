@@ -800,7 +800,7 @@ def build_source_companion(source_text: str, market: dict, strength: dict) -> tu
     master = {
         "symbol": symbol, "side": side,
         "quality": _source_number(source_text, "💪 Качество", _source_number(source_text, "Качество", 75)),
-        "confidence": _source_number(source_text, "📈 Уверенность модели", _source_number(source_text, "📈 Вероятность", _source_number(source_text, "Вероятность", 70))),
+        "confidence": _source_number(source_text, "📈 Уверенность модели", _source_number(source_text, "Оценка сценария", _source_number(source_text, "📈 Вероятность", _source_number(source_text, "Вероятность", 70)))),
         "gap": gap,
         "senior_n": sum(views[tf] == direction for tf in ("D1", "H4", "H1")),
         "junior_n": sum(views[tf] == direction for tf in ("H1", "M15", "M5")),

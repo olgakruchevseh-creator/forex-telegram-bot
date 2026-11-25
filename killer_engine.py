@@ -178,7 +178,7 @@ def _side(t):
  return signal_contract.side_of(t)
 
 def _quality(t):
- vals=[int(x) for x in re.findall(r"(?:Качество|Уверенность модели|Вероятность):\s*(\d{1,3})",t or "",re.I)]
+ vals=[int(x) for x in re.findall(r"(?:Качество|Уверенность модели|Вероятность|Оценка сценария):\s*(\d{1,3})",t or "",re.I)]
  return max(vals) if vals else 70
 def _families(t):
  # One source card is one family. Title beats incidental MSS/FVG/CHOCH words.

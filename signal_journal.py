@@ -144,7 +144,7 @@ def record_sent(text: str, market: dict, closed_h1_dt: str, *, source_text: str 
         "entry": current.close, "entry_basis": "closed_h1_close", "atr": av,
         "target": current.close + wanted * av * target_atr,
         "invalidation": current.close - wanted * av * invalid_atr,
-        "quality": _number(text, "Качество"), "confidence": _number(text, "Вероятность"),
+        "quality": _number(text, "Качество"), "confidence": _number(text, "Оценка сценария") if "Оценка сценария:" in text else _number(text, "Вероятность"),
         "status": "OPEN", "resolved_dt": "", "horizons": {},
         "mfe_atr": 0.0, "mae_atr": 0.0,
         "mfe_bar": 0, "mae_bar": 0, "mfe_before_mae": None,

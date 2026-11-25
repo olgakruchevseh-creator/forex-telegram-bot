@@ -7,6 +7,7 @@
 обязательным: CRT остаётся самостоятельным модулем.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 import hashlib, io, json, logging, os
 from pathlib import Path
@@ -173,7 +174,7 @@ def format_message(e: dict) -> str:
         f"✅ Подтверждение: возврат + displacement через 50% · {_p(e['symbol'],e['confirm_price'])}",
         f"Фаза: {e.get('phase','P3_DELIVERY_CONFIRMED')} · возврат внутрь {e.get('close_back',0)*100:.0f}% · sweep {e.get('sweep_depth_range',0)*100:.0f}% диапазона",
         f"🎯 Противоположная граница CRT: {_p(e['symbol'],e['target'])}", *details, f"🔗 Связка AMD: {amd}",
-        f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", f"Вероятность: {e['confidence']}%", "",
+        f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", score_line(e['confidence']), "",
         "Факт: CRT отправлен только после закрытого sweep, возврата в диапазон и подтверждённого движения через середину диапазона."
     ])
 

@@ -1965,6 +1965,8 @@ def _alert_rank(item: tuple[int, str]) -> tuple[float, int, int]:
         quality = _alert_metric(text, "Killer Score")
     probability = _alert_metric(text, "Уверенность модели")
     if probability is None:
+        probability = _alert_metric(text, "Оценка сценария")
+    if probability is None:
         probability = _alert_metric(text, "Вероятность")
     if probability is None:
         probability = _alert_metric(text, "Killer Score")

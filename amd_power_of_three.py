@@ -1,5 +1,6 @@
 """AMD / Power of Three: накопление -> манипуляция -> направленный выход."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -217,7 +218,7 @@ def format_message(event: dict) -> str:
         f"💵 Цена подтверждения {event.get('exit_tf', 'H1')}: {_price(event['symbol'], event['close'])}",
         "Согласование: sweep → возврат → структура → закрытый выход; H4 не противоречит",
         f"Разница силы валют: {event['gap']:+.2f}",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
+        f"Качество: {event['quality']}/100", score_line(event['confidence']), "",
         f"Состояние: {event.get('lifecycle', 'ЭКСПАНСИЯ')}", "",
         f"✅ Факт: после накопления цена сняла ликвидность за {swept} границей, вернулась в диапазон, подтвердила структуру и только затем перешла в экспансию {event['side']}.",
     ])

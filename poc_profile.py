@@ -6,6 +6,7 @@ at price), never labels it as exchange Volume POC. Alerts are event-driven and
 only emitted after a closed-candle reaction/reclaim/rejection around the POC.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import io
@@ -370,7 +371,7 @@ def format_message(e: dict) -> str:
         (f"VWAP: {_price(e['symbol'], e['profile'].vwap)} · источник: фактический volume провайдера"
          if e['profile'].vwap is not None else "VWAP: недоступен для текущих FX-свечей · поддельный volume не создаётся"),
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100",
-        f"Вероятность: {e['confidence']}%", "",
+        score_line(e['confidence']), "",
         f"✅ Факт: закрытая H1 подтвердила реакцию у {ref_name}; структура подтверждена, H4 не противоречит направлению.",
         "ℹ️ POC рассчитан как TPO/price-acceptance proxy по OHLC, а не как биржевой Volume POC.",
     ])

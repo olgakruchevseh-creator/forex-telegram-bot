@@ -4,6 +4,7 @@ FVG/Order Block здесь не являются отдельным голосо
 они только описывают качество реакции после уже подтверждённого liquidity+structure lifecycle.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -277,7 +278,7 @@ def format_message(event: dict) -> str:
         f"Конфлюэнс после структуры: {event.get('pd_array_confluence', 'не оценён')}",
         f"Lifecycle: {event.get('lifecycle', 'SWEEP → ВОЗВРАТ → CHOCH/BOS')}",
         f"Разница силы валют: {event['gap']:+.2f}",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
+        f"Качество: {event['quality']}/100", score_line(event['confidence']), "",
         f"✅ Факт: ликвидность {where} уровня снята, цена вернулась обратно и последующей закрытой {event.get('confirm_tf', 'H1')}-свечой подтвердила {event['side']}.",
     ])
 

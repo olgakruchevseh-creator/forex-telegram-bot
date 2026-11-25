@@ -119,7 +119,7 @@ def source_name(text: str) -> str:
 
 
 _VOLATILE_EVENT_LINE = re.compile(
-    r"^(?:Текущая цена:|Качество:|Вероятность:|Killer Score:|"
+    r"^(?:Текущая цена:|Качество:|Вероятность:|Оценка сценария:|Killer Score:|"
     r"Уверенность(?: модели)?:|Статус решения:|Currency Strength:|"
     r"Контекст младших ТФ:).*$",
     re.M | re.I,
@@ -142,7 +142,7 @@ def event_fingerprint(text: str) -> str:
 
 
 def _quality(text: str) -> int:
-    match = re.search(r"(?:Killer Score|Качество|Уверенность модели|Вероятность):\s*(\d{1,3})", text or "")
+    match = re.search(r"(?:Killer Score|Качество|Уверенность модели|Вероятность|Оценка сценария):\s*(\d{1,3})", text or "")
     return int(match.group(1)) if match else 70
 
 

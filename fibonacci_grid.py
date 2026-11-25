@@ -1,5 +1,6 @@
 """Сетка Фибоначчи по подтверждённому H1-импульсу и реакции из golden zone."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -194,7 +195,7 @@ def format_message(event: dict) -> str:
         f"Откат: {event['pullback_bars']} H1 · {event['pullback_move_atr']:.2f} ATR · эффективность {event['pullback_efficiency']:.2f}",
         f"Цена закрытия H1: {_price(event['symbol'], event['close'])}",
         "Подтверждение: H1 · M15", f"Разница силы валют: {event['gap']:+.2f}",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
+        f"Качество: {event['quality']}/100", score_line(event['confidence']), "",
         f"✅ Факт: цена скорректировалась в зону 50–61.8% и закрытая H1-свеча подтвердила продолжение {event['side']}.",
     ])
 

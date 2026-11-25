@@ -1,5 +1,6 @@
 """Фазы накопления/распределения по цене и подтверждённый выход из диапазона."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -190,7 +191,7 @@ def format_message(phase: Phase, event: str) -> str:
         f"Диапазон: {_price(phase.symbol, phase.low)}–{_price(phase.symbol, phase.high)}",
         f"Тесты нижней/верхней границы: {phase.touches_low}/{phase.touches_high}",
         f"Предыдущее движение: {phase.prior_atr:+.1f} ATR", f"Качество: {phase.quality}/100",
-        f"Вероятность: {phase.confidence}%", f"Состояние: {phase.status}", "", f"Факт: {fact}"
+        score_line(phase.confidence), f"Состояние: {phase.status}", "", f"Факт: {fact}"
     ])
 
 

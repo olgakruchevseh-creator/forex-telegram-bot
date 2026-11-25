@@ -7,6 +7,7 @@ late-entry gate. Structural ingredients are one correlated structure family,
 not independent votes.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from dataclasses import asdict, dataclass
 import io, json, os
 from pathlib import Path
@@ -193,7 +194,7 @@ def format_message(z,meta):
       f'🕐 Закрытие подтверждения: {meta["dt"]}',f'💵 Цена: {_price(z.symbol,meta["close"])}',
       f'OHLC: {meta["directional"]} направл. свеч. · {meta["net_atr"]:.2f} ATR · score {meta["score"]:.0f}/100',
       f'QML freshness: ретест {meta.get("touch_count",z.touch_count)} · SMC confluence +{meta.get("confluence",z.confluence_score)}',
-      f'Качество QM: {quality}/100',f'Вероятность: {prob}%','',
+      f'Качество QM: {quality}/100',score_line(prob),'',
       'Структурная цепочка ZigZag/экстремум → sweep → MSS/BOS → displacement → QM учитывается как одно коррелированное семейство.',
       'Факт: образование QM-зоны само по себе не отправляется. Событие создано только после подтверждённого возврата и реакции.'
     ])

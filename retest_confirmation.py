@@ -1,5 +1,6 @@
 """Строгий структурный ретест: BOS -> удержание -> отдельный возврат к уровню."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 _RETEST_CHART_CACHE = {}
 
@@ -248,7 +249,7 @@ def format_message(event: dict) -> str:
         f"✅ Подтверждение ретеста: следующая закрытая {event.get('confirm_tf', 'H1')}-свеча",
         f"💵 Цена закрытия: {_price(event['symbol'], event['close'])}",
         f"💪 Разница силы валют: {event['gap']:+.2f}",
-        f"⭐ Качество: {event['quality']}/100", f"📈 Вероятность: {event['confidence']}%",
+        f"⭐ Качество: {event['quality']}/100", "📈 " + score_line(event['confidence']),
         f"🧱 Настоящий слом: {event.get('structure_break_signs', 0)}/5 · качество {event.get('structure_break_score', 0)}/100", "",
         f"Факт: после BOS цена отдельной {event.get('confirm_tf', 'H1')}-свечой удержалась {direction} уровня, затем вернулась к нему и закрылась с подтверждением {event['side']}.",
     ])

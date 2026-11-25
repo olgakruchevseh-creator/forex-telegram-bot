@@ -1,5 +1,6 @@
 """Максимум/минимум последнего закрытого дня и подтверждённые реакции цены."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import io
@@ -231,7 +232,7 @@ def format_message(event: dict) -> str:
         f"TR1: {_price(event['symbol'], event['tr1'])}",
         f"Контекст TF: {event['confirmations']}/3 (ориентир ≥{event.get('min_confirmations', 2)}) · Currency Strength: {'поддерживает' if event.get('strength_ok') else 'не подтверждает'}",
         f"Геометрия уровня: выход {event.get('penetration_atr', 0):.2f} ATR · дистанция закрытия {event.get('reclaim_atr', 0):.2f} ATR",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%", "",
+        f"Качество: {event['quality']}/100", score_line(event['confidence']), "",
         f"Факт: {action} Реакция подтверждена закрытой H1-свечой.",
     ])
 

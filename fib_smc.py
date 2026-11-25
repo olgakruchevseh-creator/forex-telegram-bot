@@ -4,6 +4,7 @@
 ликвидность/SMC-зона -> M15 displacement + BOS/CHOCH -> подтверждение силы валют.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import hashlib
@@ -256,7 +257,7 @@ def format_message(e: dict) -> str:
         f"M15/M5: вспомогательно · {e.get('m15_bias',0):+d}/{e.get('m5_bias',0):+d}",
         f"Цена подтверждения: {_price(e['symbol'], e['close'])}",
         f"Старший контекст: H4 {e['side']} · D1 {'поддерживает' if e['d1_bias'] == (1 if e['side']=='LONG' else -1) else 'нейтрален'}",
-        f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", f"Вероятность: {e['confidence']}%", "",
+        f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", score_line(e['confidence']), "",
         f"✅ Факт: валидный H1 displacement скорректировался в OTE, SMC-контекст подтверждён, после чего закрытая H1 дала структурное подтверждение {e['side']}; M15/M5 используются только как вспомогательный контекст.",
     ])
 

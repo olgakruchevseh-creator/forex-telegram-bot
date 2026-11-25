@@ -431,7 +431,7 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
  except Exception:
   inferred_tf='UNKNOWN'; inferred_close_utc=None
  quality,quality_label=_score(text,['Качество','Качество реакции','Качество пробоя','Сходство фигуры'])
- probability,probability_label=_score(text,['Вероятность','Уверенность модели','Уверенность чертежа'])
+ probability,probability_label=_score(text,['Оценка сценария','Вероятность','Уверенность модели','Уверенность чертежа'])
  progress=_observed_progress(ctx)
  obs=_observed_h1(by_tf)
  if pair and direction:

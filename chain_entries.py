@@ -1,5 +1,6 @@
 """Цепные входы: новый BOS -> ретест пробитого уровня -> продолжение тренда."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -255,7 +256,7 @@ def format_message(event: dict, number: int) -> str:
         f"Подтверждение таймфреймов: {event['confirmations']}/3",
         f"Режим рынка: {event.get('regime', 'UNKNOWN')}",
         f"Продвижение от прошлой ступени: {event.get('advance_atr', 0):.2f} ATR",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%",
+        f"Качество: {event['quality']}/100", score_line(event['confidence']),
         f"Настоящий слом: {event.get('structure_break_signs', 0)}/5 · качество {event.get('structure_break_score', 0)}/100", "",
         f"Факт: структура сломана {direction}; цена вернулась к пробитому уровню, удержала его и закрылась с подтверждением {event['side']}.",
     ])

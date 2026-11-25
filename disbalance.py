@@ -1,5 +1,6 @@
 """Сканер дисбаланса: сильное направленное смещение цены, не FVG."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -204,7 +205,7 @@ def format_message(s: Signal) -> str:
         f"Пробитый уровень BOS: {_price(s.symbol, s.bos_level)}",
         f"Размер тела: {s.impulse_atr:.2f} ATR", f"Тело свечи: {s.body_ratio*100:.0f}% диапазона",
         f"Согласованные ТФ: {' · '.join(s.aligned)}", f"Разница силы валют: {s.strength_gap:+.2f}",
-        f"Качество: {s.quality}/100", f"Вероятность: {s.confidence}%", "",
+        f"Качество: {s.quality}/100", score_line(s.confidence), "",
         f"Факт: {meaning}; BOS подтверждён закрытой свечой и младшим таймфреймом."
     ])
 

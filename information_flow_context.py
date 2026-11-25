@@ -19,7 +19,7 @@ def _family(text: str, i: int) -> str:
     return evidence_families.primary_family(text or '') or f'unknown_{i}'
 
 def _quality(text: str) -> float:
-    for label in ('Качество','Вероятность','Killer Score'):
+    for label in ('Качество','Оценка сценария','Вероятность','Killer Score'):
         m=re.search(rf'{re.escape(label)}:\s*(\d{{1,3}})(?:/100|%)?',text or '',re.I)
         if m: return max(.2,min(1.0,int(m.group(1))/100.0))
     return .5

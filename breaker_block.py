@@ -1,5 +1,6 @@
 """Breaker Block: сломанный Order Block -> BOS -> подтверждённый ретест с другой стороны."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import io
@@ -239,7 +240,7 @@ def format_message(e: dict) -> str:
         f"Режим возврата: {e.get('pullback_mode','LOCAL')} · {e.get('pullback_bars',0)} H1 · {e.get('pullback_move_atr',0):.2f} ATR · эффективность {e.get('pullback_efficiency',0):.0%}",
         "Подтверждение: новая закрытая H1; M15 только подтверждает геометрию реакции",
         f"Разница силы валют: {e['gap']:+.2f}",
-        f"Качество: {e['quality']}/100", f"Вероятность: {e['confidence']}%", "",
+        f"Качество: {e['quality']}/100", score_line(e['confidence']), "",
         f"✅ Факт: исходный {e['source_side']} Order Block был реально пробит, цена вернулась в его зону; реакция и структурный shift подтверждены, а Breaker Block {e['side']} принят только по закрытой H1.",
     ])
 

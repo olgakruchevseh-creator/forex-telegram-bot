@@ -1712,3 +1712,6 @@ STAGE28_SOURCE_LEVELS_INFO_MARKERS = True
 STAGE28_ZIGZAG_PHASE_TF_LABEL = True
 STAGE28_ORDER_BLOCK_QUALITY_FLOOR = True
 ORDER_BLOCK_MIN_EVENT_QUALITY = 74  # Этап 28 · C3
+
+# Этап 28D: точная подпись эвристических баллов вместо ложной статистической вероятности.
+STAGE28D_SCENARIO_SCORE_WORDING = True

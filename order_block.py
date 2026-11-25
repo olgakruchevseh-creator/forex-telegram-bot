@@ -1,5 +1,6 @@
 """Order Block: импульсный BOS, сохранение зоны и подтверждённый H1-ретест."""
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import json
@@ -291,7 +292,7 @@ def format_message(event: dict) -> str:
         "Подтверждение реакции: закрытая H1; M15 только подтверждает реакцию/структуру; H4 не противоречит",
         *( [f"Участие provider-volume: {event['participation_ratio']:.2f}× медианы (контекст, не биржевой FX volume)"] if event.get("participation_ratio") is not None else [] ),
         f"Разница силы валют: {event['gap']:+.2f}",
-        f"Качество: {event['quality']}/100", f"Вероятность: {event['confidence']}%",
+        f"Качество: {event['quality']}/100", score_line(event['confidence']),
         *( [f"Mitigation Block: подтверждённый контекст · {event['mitigation_block']['tf']} · {event['mitigation_block']['reaction_path']} (то же семейство OB/MB, не отдельный голос)"] if event.get('mitigation_block') else [] ), "",
         f"✅ Факт: после импульсного BOS цена вернулась в Order Block; подтверждены реакция зоны и LTF structural shift ({' / '.join(event.get('structure_confirmations') or [])}) в сторону {event['side']}.",
     ])

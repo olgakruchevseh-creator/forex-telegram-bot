@@ -5,6 +5,7 @@
 FVG/OB и возврат в рабочую retracement-зону. Незакрытые свечи не используются.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 
 import io
@@ -286,7 +287,7 @@ def format_message(e: dict) -> str:
         f"Откат: {e.get('pullback_mode','—')} · {e.get('pullback_bars',0)} H1 · {e.get('pullback_move_atr',0):.2f} ATR · эффективность {e.get('pullback_efficiency',0):.0%}",
         f"Временная геометрия: {e.get('time_major_bars_m15',0)}→{e.get('time_correction_bars_m15',0)} M15 · кластер {e.get('time_cluster','NONE')} · ошибка ratio {e.get('time_ratio_error',1.0):.0%}",
         "Подтверждение: H4 направление · H1 sweep+MSS/displacement · H1 реакция · M15/M5 только вспомогательно",
-        f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",f"Вероятность: {e['confidence']}%","",
+        f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",score_line(e['confidence']),"",
         f"✅ Факт: ликвидность снята, структура сменилась в {e['side']}, цена дала многосвечный откат к 61.8% и реакцию на закрытой H1; 62→26 измеряется как две временные ноги и остаётся только конфлюэнцией.",
     ])
 

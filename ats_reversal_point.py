@@ -4,6 +4,7 @@
 Кандидаты ведутся внутри; Telegram получает только подтверждённый разворот.
 """
 from __future__ import annotations
+from score_wording_28d import score_line
 import io, json, logging, os, hashlib, statistics
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -143,7 +144,7 @@ def _format(e):
       f"Режим рынка: {e.get('market_regime','UNKNOWN')} · маршрут: {e.get('pullback_mode','LOCAL')}",
       f"Геометрия возврата: {int(e.get('pullback_bars') or 0)} H1 · {float(e.get('pullback_move_atr') or 0):.2f} ATR · эффективность {float(e.get('pullback_efficiency') or 0):.0%}",
       f"M15/M5: {'СОГЛАСОВАНО' if e.get('m15_bias') in (0, 1 if e['side']=='LONG' else -1) and e.get('m5_bias') in (0, 1 if e['side']=='LONG' else -1) else 'НЕЙТРАЛЬНО'} · только подтверждение",
-      f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",f"Вероятность: {e['confidence']}%",'',
+      f"Разница силы валют: {e['gap']:+.2f}",f"Качество: {e['quality']}/100",score_line(e['confidence']),'',
       '✅ Факт: цена сняла предыдущий H1-экстремум, вернулась за него и следующей закрытой H1-свечой подтвердила смену внутренней структуры.',
       'ℹ️ ATS не создаёт сигнал принудительно: без подтверждённого разворота карточка не отправляется.'
     ])
