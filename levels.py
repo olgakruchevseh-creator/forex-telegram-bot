@@ -1337,7 +1337,8 @@ def _strength_confirms(
 
 
 
-def _briefing_saved_levels(symbol: str, closed_h1_dt: str) -> tuple[list[Zone], bool]:
+def _briefing_saved_levels(symbol: str, closed_h1_dt: str,
+                           previous_h1_dt: str = "") -> tuple[list[Zone], bool]:
     """Read the scanner's last persisted lifecycle without locking or writing it.
 
     An unmatched/stale H1 snapshot is not evidence that a zone remains active.
@@ -1350,8 +1351,14 @@ def _briefing_saved_levels(symbol: str, closed_h1_dt: str) -> tuple[list[Zone], 
         saved = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(saved, dict):
             return [], False
-        synced = (str((saved.get("last_closed") or {}).get(f"{symbol}:H1") or "")
-                  == str(closed_h1_dt))
+        saved_dt = str((saved.get("last_closed") or {}).get(f"{symbol}:H1") or "")
+        # The session briefing fires at the H1 boundary, usually BEFORE the
+        # scanner has processed that bar; the board then showed «СТАТУС НЕ
+        # ПРОВЕРЕН» for every zone while the projection sent minutes later
+        # showed «ОТБОЙ ПОДТВЕРЖДЁН» for the same zones. A lifecycle exactly
+        # one closed H1 behind is still a real, causal state.
+        synced = saved_dt == str(closed_h1_dt) or (
+            bool(previous_h1_dt) and saved_dt == str(previous_h1_dt))
         if not synced:
             return [], False
         result = []
@@ -1451,7 +1458,7 @@ def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dic
     # The alert engine retains only 18 strongest. That is NOT a charting limit:
     # keeping all candidates here prevents weak-but-nearby zones disappearing.
     fresh = merge_cluster(symbol, raw, atr_map, limit=None)
-    persisted, synced = _briefing_saved_levels(symbol, h1[-1].dt)
+    persisted, synced = _briefing_saved_levels(symbol, h1[-1].dt, h1[-2].dt)
     used: set[str] = set()
     combined: list[Zone] = []
     for z in fresh:
@@ -1554,11 +1561,17 @@ def briefing_levels_snapshot(symbol: str, by_tf: dict, max_each: int = 2) -> dic
                 break
         return chosen
     count = max(1, min(3, int(max_each)))
+    chosen_current = select(current_zones, "Z", 1)
+    # A support/resistance overlapping the current zone Z1 is the same price
+    # area (seen live: Z1 159.093–159.298 and R1 159.256–159.686 «до зоны 6 п.»).
+    def outside_current(rows: list[dict]) -> list[dict]:
+        return [r for r in rows if not any(
+            min(r["high"], z["high"]) >= max(r["low"], z["low"]) for z in chosen_current)]
     snapshot = {"symbol": symbol, "current_price": current,
             "as_of_h1": h1[-1].dt, "lifecycle_synced": synced,
-            "supports": select(supports, "S", count),
-            "resistances": select(resistances, "R", count),
-            "current_zones": select(current_zones, "Z", 1),
+            "supports": select(outside_current(supports), "S", count),
+            "resistances": select(outside_current(resistances), "R", count),
+            "current_zones": chosen_current,
             "observations": sorted(observations, key=lambda r: abs(r["price"] - current))[:2]}
     snapshot["movement"] = briefing_level_movement(symbol, snapshot, h1, now_utc=now_utc)
     return snapshot

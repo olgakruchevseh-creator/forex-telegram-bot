@@ -257,6 +257,30 @@ def image_for_alert(text: str) -> io.BytesIO | None:
     return render_chart(card[0], card[1])
 
 
+def _stale_pending_reason(phase: Phase, event: str, market: dict) -> str:
+    """Why an undelivered card must not be sent any more ('' = still valid).
+
+    Only an exit is time-critical. It stays valid while it is within
+    PHASE_EXIT_MAX_AGE_H1 closed H1 of the exit bar AND the newest closed H1
+    is still beyond the broken boundary. Closed bars only: no look-ahead.
+    """
+    if event != "exit" or not phase.exit_dt:
+        return ""
+    h1 = _bars((market or {}).get(phase.symbol) or {}, "H1")
+    if not h1:
+        return ""
+    newer = [c for c in h1 if c.dt > phase.exit_dt]
+    max_age = int(getattr(cfg, "PHASE_EXIT_MAX_AGE_H1", 1))
+    if len(newer) > max_age:
+        return f"выход устарел: {len(newer)} закрытых H1 после {phase.exit_dt}"
+    last = h1[-1].close
+    if phase.side == "LONG" and last <= phase.high:
+        return f"цена {last} вернулась в диапазон (верх {phase.high})"
+    if phase.side == "SHORT" and last >= phase.low:
+        return f"цена {last} вернулась в диапазон (низ {phase.low})"
+    return ""
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     _PENDING_CARDS.clear()
     state = _load()
@@ -273,6 +297,14 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
             pending.pop(digest, None)
             continue
         phase = Phase(**raw_phase)
+        stale = _stale_pending_reason(phase, item.get("event", "exit"), market)
+        if stale:
+            # A card that failed delivery/release gates used to be re-emitted
+            # forever and could reach Telegram hours later with «ВЫХОД
+            # ПОДТВЕРЖДЁН» while price was already back inside the range.
+            log.info("PHASE_PENDING_DROPPED %s %s: %s", phase.symbol, phase.phase_id, stale)
+            pending.pop(digest, None)
+            continue
         text = format_message(phase, item.get("event", "exit"))
         messages.append(text)
         _PENDING_CARDS[text] = (phase, freeze_by_tf(market.get(phase.symbol) or {}))

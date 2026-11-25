@@ -47,6 +47,9 @@ class FVG:
     top: float
     bottom: float
     dt: str
+    # Index of the third (confirming) candle inside the list passed to
+    # ``find_fvgs``; -1 when unknown. Needed to check later fills causally.
+    index: int = -1
 
 
 @dataclass
@@ -224,14 +227,26 @@ def zigzag(candles: list[Candle], pct: float, min_bars: int, scale: float = 1.0)
     if not candidates:
         return []
 
-    av = atr(candles, 14) if len(candles) >= 15 else 0.0
-    pct_part = candles[-1].close * max(float(pct), 0.01) / 100.0
     factor = float(getattr(cfg, "ZIGZAG_ADAPTIVE_PCT_FACTOR", 0.55))
     atr_factor = float(getattr(cfg, "ZIGZAG_MIN_MOVE_ATR", 0.55))
     scale = max(0.35, float(scale or 1.0))
-    threshold = max(pct_part * factor, av * atr_factor) * scale
+    pct_value = max(float(pct), 0.01) / 100.0
 
-    def normalize(need: float) -> list[Swing]:
+    # Causal threshold: each candidate is judged with the ATR(14) and close
+    # known on its CONFIRMATION bar (i + pivot_bars). The old single
+    # threshold used the newest close and the ATR of the whole window, so one
+    # new bar could retroactively erase or add swings months back (repaint),
+    # which then flipped HH/HL structure and bias for every consumer.
+    tr = _true_range(candles)
+    atr_at = _sma(tr, 14)
+
+    def need_at(point: Swing) -> float:
+        confirm = min(len(candles) - 1, point.index + pivot_bars)
+        av = atr_at[confirm] if len(candles) >= 15 and atr_at[confirm] is not None else 0.0
+        pct_part = candles[confirm].close * pct_value
+        return max(pct_part * factor, av * atr_factor) * scale
+
+    def normalize(mult: float) -> list[Swing]:
         out: list[Swing] = []
         for point in candidates:
             if not out:
@@ -243,13 +258,16 @@ def zigzag(candles: list[Candle], pct: float, min_bars: int, scale: float = 1.0)
                 if more_extreme:
                     out[-1] = point
                 continue
-            if abs(point.price - last.price) >= need:
+            if abs(point.price - last.price) >= need_at(point) * mult:
                 out.append(point)
         return out
 
-    swings = normalize(threshold)
+    swings = normalize(1.0)
     if len(swings) < 4:
-        swings = normalize(threshold * 0.65)
+        # Quiet-market fallback. It is decided once per window and only while
+        # fewer than four swings exist, so it cannot rewrite an established
+        # structure of 4+ swings.
+        swings = normalize(0.65)
     return swings[-12:]
 
 
@@ -286,10 +304,27 @@ def find_fvgs(candles: list[Candle], last_n: int = 40) -> list[FVG]:
         a, c = candles[i - 2], candles[i]
         b = candles[i - 1]
         if a.high < c.low:
-            out.append(FVG("bull", c.low, a.high, b.dt))
+            out.append(FVG("bull", c.low, a.high, b.dt, i))
         if a.low > c.high:
-            out.append(FVG("bear", a.low, c.high, b.dt))
+            out.append(FVG("bear", a.low, c.high, b.dt, i))
     return out[-6:]
+
+
+def is_fvg_filled(gap: FVG, candles: list[Candle]) -> bool:
+    """True when a candle AFTER the gap's third bar traded through it fully.
+
+    Bull gap [bottom, top] is filled once a later low reaches ``bottom``;
+    bear gap once a later high reaches ``top``. Uses only bars that already
+    exist in ``candles`` (closed bars), so it never looks ahead.
+    """
+    if gap.index < 0:
+        return False
+    for bar in candles[gap.index + 1:]:
+        if gap.kind == "bull" and bar.low <= gap.bottom:
+            return True
+        if gap.kind == "bear" and bar.high >= gap.top:
+            return True
+    return False
 
 
 def nearest_unfilled(fvgs: list[FVG], price: float) -> Optional[FVG]:
@@ -564,7 +599,9 @@ def analyze_tf(tf_key: str, label: str, candles: list[Candle]) -> Optional[TfVie
     swings = zigzag(candles, pct, cfg.ZIGZAG_MIN_BARS)
     struct = structure_from_swings(swings)
     ph, adx_v = phase(candles)
-    fvgs = find_fvgs(candles)
+    # «nearest_unfilled» used to skip only a gap containing the current price:
+    # a gap fully traded through hours ago was still shown as «Рядом FVG».
+    fvgs = [g for g in find_fvgs(candles) if not is_fvg_filled(g, candles)]
     near = nearest_unfilled(fvgs, last)
     a = atr(candles, cfg.ATR_PERIOD)
     if near and a:

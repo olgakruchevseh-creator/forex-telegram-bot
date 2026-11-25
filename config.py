@@ -570,6 +570,12 @@ PHASE_MIN_EDGE_TOUCHES = AMD_FAMILY_MIN_EDGE_TOUCHES
 PHASE_NOTIFY_FORMATION = False
 PHASE_CHART_IMAGES_ENABLED = True
 PHASE_CHART_LOOKBACK = 120
+# Неотправленная карточка выхода живёт не дольше N закрытых H1 после выхода
+# и только пока цена за границей диапазона (иначе — провал выхода).
+PHASE_EXIT_MAX_AGE_H1 = 1
+# Картинка брифинга: если торговые фильтры не оставили фигуру, рисовать
+# старшую обнаруженную фигуру из текста (только наблюдение). False — откат.
+PATTERN_BRIEFING_IMAGE_OBSERVED_FALLBACK = True
 DAILY_HIGH_LOW_ENABLED = True
 DAILY_HIGH_LOW_CHART_IMAGES_ENABLED = True
 DAILY_LEVEL_CHART_LOOKBACK = 60

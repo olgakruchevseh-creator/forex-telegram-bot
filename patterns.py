@@ -2212,6 +2212,23 @@ def briefing_htf_card(symbol: str, by_tf: dict):
              and _pattern_allowed(p, context_side)
              and not p.name.startswith("Гармонический")]
     found = _adjusted_candidates(symbol, by_tf, found)
+    observed_only = False
+    if not found and getattr(cfg, "PATTERN_BRIEFING_IMAGE_OBSERVED_FALLBACK", True):
+        # Since stages 11–12 the image used only trade-grade figures, while the
+        # text block under it lists every figure confirmed on the last closed
+        # W1/D1/H4/H1 bar. A harmonic, a counter-context candle or a figure
+        # below the trade threshold left the text without its picture, and the
+        # briefing arrived as loose text cards. The picture now falls back to
+        # the SAME «старшая обнаруженная фигура» the text names. It is drawn
+        # only; nothing is sent, queued or used by any signal gate.
+        try:
+            import patterns_mtf
+            obs = patterns_mtf.observe(symbol, by_tf)
+            if obs.primary_tf in priority and obs.patterns_by_tf.get(obs.primary_tf):
+                found = [obs.patterns_by_tf[obs.primary_tf][0]]
+                observed_only = True
+        except Exception:
+            log.exception("PATTERN_BRIEFING_OBSERVED_FALLBACK_FAILED pair=%s", symbol)
     if not found:
         return None
     found.sort(key=lambda p: (priority[p.tf], -p.quality, -p.confidence))
@@ -2220,4 +2237,7 @@ def briefing_htf_card(symbol: str, by_tf: dict):
     side = "ЛОНГ" if p.side == "LONG" else "ШОРТ"
     caption = (f"🧩 {symbol} · {p.tf} · {p.name}\nНаправление фигуры: {side} · "
                f"геометрия {p.quality}/100 · оценка модели {p.confidence}/100 (НЕ вероятность)")
-    return {"image": image, "caption": caption, "tf": p.tf, "pattern": p.name}
+    if observed_only:
+        caption += "\nНаблюдение: фигура не прошла торговые фильтры, это не подтверждение"
+    return {"image": image, "caption": caption, "tf": p.tf, "pattern": p.name,
+            "observed_only": observed_only}

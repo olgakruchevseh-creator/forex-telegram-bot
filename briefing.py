@@ -833,8 +833,24 @@ def format_dxy_block(dxy: Optional[IndexView], usd_score: float | None) -> list[
     lines.append(f"Изменение за последнюю закрытую H1: {dxy.change_pct:+.2f}%")
     dxy_direction = _dir_word(effective_dxy_bias(dxy))
     dxy_icon = "🟢" if dxy_direction == "LONG" else ("🔴" if dxy_direction == "SHORT" else "⚪")
-    lines.append(f"Направление: {dxy_icon} {_ru_display(dxy_direction)} · структурное")
-    impulse = "LONG" if dxy.change_pct > 0 else ("SHORT" if dxy.change_pct < 0 else "НЕЙТРАЛЬНО")
+    # «структурное» is only true when the ZigZag structure itself agrees.
+    # bias_of() lets the EMA/ADX phase win a structure-vs-phase conflict, so a
+    # bearish LH+LL with «тренд вверх» used to print «ЛОНГ · структурное».
+    from analysis import structure_bias as _structure_bias
+    s_bias = _structure_bias(dxy.structure)
+    d_bias = effective_dxy_bias(dxy)
+    if d_bias and s_bias == d_bias:
+        basis = "структурное"
+    elif d_bias and s_bias == -d_bias:
+        basis = "по фазе EMA/ADX · структура против"
+    elif d_bias:
+        basis = "по фазе EMA/ADX · структура не подтверждена"
+    else:
+        basis = "нет согласия структуры и фазы"
+    lines.append(f"Направление: {dxy_icon} {_ru_display(dxy_direction)} · {basis}")
+    # Same precision as the printed change: «-0.00%» is not a SHORT impulse.
+    shown = round(float(dxy.change_pct), 2)
+    impulse = "LONG" if shown > 0 else ("SHORT" if shown < 0 else "НЕЙТРАЛЬНО")
     impulse_icon = "🟢" if impulse == "LONG" else ("🔴" if impulse == "SHORT" else "⚪")
     lines.append(f"Текущий импульс закрытой H1: {impulse_icon} {_ru_display(impulse)}")
     lines.append(f"Структура: {dxy.structure}")
