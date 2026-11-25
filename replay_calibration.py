@@ -7,6 +7,7 @@ from __future__ import annotations
 import json, logging, os, sqlite3, time
 from collections import defaultdict
 from journal_tail import tail_jsonl, tail_jsonl_fields
+from journal_storage import append_text
 import math
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -46,7 +47,7 @@ def _save_json(path,obj):
 
 def _append(obj):
     p=_outcomes(); p.parent.mkdir(parents=True,exist_ok=True)
-    with p.open('a',encoding='utf-8') as f:f.write(json.dumps(obj,ensure_ascii=False,separators=(',',':'))+'\n')
+    append_text(p,json.dumps(obj,ensure_ascii=False,separators=(',',':'))+'\n',critical=True)
 
 def _records(limit=4000):
     # Memory and I/O safe even when /data/decision_journal.jsonl exceeds 1 GB.

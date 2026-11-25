@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib, json, logging, math, os, re
 from collections import deque
 from journal_tail import tail_jsonl_fields
+from journal_storage import append_text
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -350,7 +351,9 @@ def _append(rec):
   eid=rec.get('event_id') if isinstance(rec,dict) else None
   if eid and eid in _SEEN_EVENT_IDS:
    return False
-  with p.open('a',encoding='utf-8') as f: f.write(json.dumps(_json_safe(rec),ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n')
+  line=json.dumps(_json_safe(rec),ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n'
+  saved=append_text(p,line,critical=str(rec.get('status'))=='SENT')
+  if not saved: return False
   if eid:_remember_event(eid)
   return True
  except Exception:
@@ -512,15 +515,14 @@ def record_sent(text,market,strength=None,allies=None,ctx=None,master=None):
   return
  rec=_base(text,market,strength or {},'SENT','telegram_delivered',allies,ctx,master)
  rec['delivery']=True
- if _append(rec):
-  # Preserve every delivered decision in a compact dedicated history. The huge
-  # candidate journal's last 4000 rows may span less than an 8H replay window.
-  try:
-   sent_path=_path().with_name('decision_sent_history.jsonl')
-   with sent_path.open('a',encoding='utf-8') as f:
-    f.write(json.dumps(_json_safe(rec),ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n')
-  except Exception:
-   log.exception('DECISION_SENT_HISTORY_WRITE_SKIPPED')
+ _append(rec)
+ # Record delivered decisions separately even when the large audit journal is
+ # unavailable: this is a compact, high-priority replay history.
+ try:
+  sent_path=_path().with_name('decision_sent_history.jsonl')
+  append_text(sent_path, json.dumps(_json_safe(rec),ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n', critical=True)
+ except Exception:
+  log.exception('DECISION_SENT_HISTORY_WRITE_SKIPPED')
  _killer_gate_observation(text,'telegram_delivered',market)
 
 def record_stage(text,market,strength,status,allies=None,ctx=None,reason='',master=None):

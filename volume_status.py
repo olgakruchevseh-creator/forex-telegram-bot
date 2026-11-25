@@ -96,6 +96,25 @@ def report_ru(root: Path | None = None) -> str:
         percent = 100 * data['used'] / data['capacity']
         lines.append(f"Файловая система: {_readable_size(data['used'])} / {_readable_size(data['capacity'])} ({percent:.1f}%)")
         lines.append(f"Доступно по statvfs: {_readable_size(data['available'])}")
+    if data['capacity'] is not None and data['capacity'] > 0:
+        pct = 100 * data['used'] / data['capacity']
+        if pct >= 90:
+            lines.append("⚠️ КРИТИЧНО: Volume ≥90%; проверить свободное место, важные журналы могут приостановить некритичные записи")
+        elif pct >= 80:
+            lines.append("⚠️ ВНИМАНИЕ: Volume ≥80%; необходима внешняя резервная копия и архивирование")
+        elif pct >= 70:
+            lines.append("⚠️ Volume ≥70%; проверить рост журналов и наличие резервных копий")
+    # Этап 27D: только метаданные, никакого удаления. Большая старая
+    # несжатая история остается на Volume после атомарной ротации.
+    from journal_storage import MANAGED_NAMES, archive_files
+    archived = [f for name in MANAGED_NAMES for f in archive_files(Path(target) / name)]
+    archive_bytes = sum(p.stat().st_size for p in archived)
+    legacy = [p for p in archived if p.suffix == '.jsonl' and p.stat().st_size > 128_000_000]
+    if archived:
+        lines.append(f"Этап 27D · части журналов: {len(archived)} · {_readable_size(archive_bytes)}; "
+                     f"несжатых крупных: {len(legacy)}")
+    if legacy:
+        lines.append("⚠️ Большая старая история сохранена без изменений; для освобождения места нужен отдельный безопасный экспорт/сжатие")
     rotations = list(Path(target).glob("unified_signal_decisions.*.jsonl"))
     rotated_bytes = sum(p.stat().st_size for p in rotations if p.is_file() and not p.is_symlink())
     lines.append(f"Ротации unified_signal_decisions: {len(rotations)} файлов · {_readable_size(rotated_bytes)}")

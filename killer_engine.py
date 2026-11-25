@@ -577,5 +577,6 @@ def _diag(pair, side, meta):
        "ltf_confirmation":meta.get("ltf_confirmation") or meta.get("shadow_ltf") or {},
        "families":sorted(meta.get("families") or []),"family_count":len(meta.get("families") or []),"trap_review":meta.get("trap_review") or {}}
   path.parent.mkdir(parents=True,exist_ok=True)
-  with path.open("a",encoding="utf-8") as f:f.write(json.dumps(rec,ensure_ascii=False,separators=(",",":"))+"\n")
+  from journal_storage import append_text
+  append_text(path, json.dumps(rec,ensure_ascii=False,separators=(",",":"))+"\n")
  except Exception: log.exception("KILLER_DIAGNOSTIC_WRITE_FAILED")

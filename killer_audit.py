@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config as cfg
+from journal_tail import tail_jsonl, tail_jsonl_fields
+from journal_storage import append_text
 from analysis import Candle, atr, closed_candles
 
 log = logging.getLogger("fxbot.killer.audit")
@@ -56,13 +58,11 @@ def _seen(path):
     if key not in _CACHE:
         _CACHE[key] = set()
         _ORDER[key] = deque()
-        if path.is_file():
-            try:
-                with path.open(encoding="utf-8", errors="replace") as fh:
-                    for line in deque(fh, maxlen=_MAX_DEDUP_IDS):
-                        try: _remember_seen(key, json.loads(line).get("id"))
-                        except (ValueError, TypeError): pass
-            except OSError: log.exception("KILLER_AUDIT_DEDUP_LOAD_FAILED")
+        try:
+            for row in tail_jsonl_fields(path, _MAX_DEDUP_IDS, ('id',)):
+                _remember_seen(key, row.get('id'))
+        except OSError:
+            log.exception("KILLER_AUDIT_DEDUP_LOAD_FAILED")
     return _CACHE[key]
 
 
@@ -72,8 +72,9 @@ def _write(name, record):
         seen = _seen(p)
         if record["id"] in seen: return False
         p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n")
+        line = json.dumps(record, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n"
+        if not append_text(p, line, critical=record.get('type') in ('SENT', 'DELIVERED')):
+            return False
         _remember_seen(str(p), record["id"])
         return True
     except (OSError, TypeError, ValueError):
@@ -177,11 +178,9 @@ def record_attempt(pair, side, meta, by_tf, strength, texts, events, now_utc, *,
 
 
 def _tail(path, limit=180):
-    if not path.exists(): return []
     try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
-            return [json.loads(s) for s in deque(fh, maxlen=limit) if s.strip()]
-    except (OSError, ValueError):
+        return tail_jsonl(path, limit)
+    except OSError:
         log.exception("KILLER_AUDIT_READ_FAILED file=%s", path)
         return []
 

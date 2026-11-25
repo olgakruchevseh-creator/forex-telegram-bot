@@ -7,29 +7,18 @@ complete lines, regardless of the size of the older data.
 from __future__ import annotations
 
 import json
+import gzip
+from collections import deque
 from pathlib import Path
+
+from journal_storage import archive_files
 
 
 def tail_lines(path, limit=4000):
-    path = Path(path)
-    limit = max(0, int(limit))
-    if not limit or not path.is_file():
-        return []
-    with path.open("rb") as stream:
-        stream.seek(0, 2)
-        position = stream.tell()
-        blocks = []
-        line_breaks = 0
-        # Read one additional newline to avoid taking a truncated first row.
-        while position > 0 and line_breaks <= limit:
-            size = min(65536, position)
-            position -= size
-            stream.seek(position)
-            block = stream.read(size)
-            blocks.append(block)
-            line_breaks += block.count(b"\n")
-    return [part.decode("utf-8", errors="replace") for part in
-            b"".join(reversed(blocks)).splitlines()[-limit:]]
+    # Stage 27D: recent samples may span a rollover boundary.
+    recent = list(iter_tail_lines_reverse(path, limit))
+    recent.reverse()
+    return recent
 
 
 def tail_jsonl(path, limit=4000):
@@ -47,7 +36,7 @@ def tail_jsonl(path, limit=4000):
 # Stage 8B: memory-bounded reverse iterator. The legacy tail_lines() returns
 # full serialized rows and keeps them all in memory; production journal rows
 # may include large context snapshots. Read one complete line at a time instead.
-def iter_tail_lines_reverse(path, limit=4000):
+def _iter_single_file_reverse(path, limit=4000):
     """Yield up to *limit* physical lines, newest first, using 64-KiB blocks.
 
     A line spanning blocks is reconstructed before it is yielded. No earlier
@@ -103,3 +92,36 @@ def tail_jsonl_fields(path, limit, fields):
             continue
     result.reverse()
     return result
+
+
+def iter_tail_lines_reverse(path, limit=4000):
+    """Newest-first recent physical lines across active and rotated segments.
+
+    The recent active file is visited first. Older segments are read only when
+    the requested line limit is not reached. Never reads an entire 3-GB legacy
+    JSONL into RAM. gzip archives are decoded as a bounded deque of lines.
+    """
+    path = Path(path)
+    remaining = max(0, int(limit))
+    if remaining == 0:
+        return
+    sources = ([path] if path.is_file() else []) + list(reversed(archive_files(path)))
+    for source in sources:
+        if remaining <= 0:
+            break
+        if source.suffix == '.gz':
+            # gzip is forward-only; each new archive is bounded in size.
+            try:
+                with gzip.open(source, 'rt', encoding='utf-8', errors='replace') as inp:
+                    recent = deque(inp, maxlen=remaining)
+                for row in reversed(recent):
+                    remaining -= 1
+                    yield row.rstrip('\r\n')
+            except (OSError, EOFError, ValueError):
+                continue  # Do not hide newer active events after an old corrupt gzip.
+        else:
+            for row in _iter_single_file_reverse(source, remaining):
+                remaining -= 1
+                yield row
+                if remaining <= 0:
+                    break

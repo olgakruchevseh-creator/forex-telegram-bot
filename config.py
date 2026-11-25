@@ -1677,3 +1677,10 @@ STAGE27C_NEWS_EVENT_CLASSIFICATION = True
 STAGE27C_STRENGTH_RANK_WORDING = True
 STAGE27C_BRIEFING_PARTIAL_TREND_BONUS = True
 STAGE27C_LEVELS_FILTER_BEFORE_SLICE = True
+
+# Этап 27D — защита Railway Volume. Только журналы OBSERVE_ONLY, не торговые пороги.
+STAGE27D_JOURNAL_PROTECTION = True  # False: возврат к прямой записи без ротации.
+STAGE27D_JOURNAL_SEGMENT_BYTES = 32_000_000  # Новый активный сегмент: до ~32 МБ.
+STAGE27D_COMPRESS_NEW_SEGMENTS = True  # Проверенное SHA256+gzip-сжатие новых ротаций.
+STAGE27D_AUTO_COMPRESS_MAX_BYTES = 128_000_000  # Старые огромные файлы НЕ сжимать автоматически.
+STAGE27D_DISK_RESERVE_BYTES = 200_000_000  # При нехватке места приостановить только некритичные записи.
