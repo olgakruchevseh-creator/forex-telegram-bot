@@ -627,7 +627,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/now — сила валют сейчас\n"
         "/pair EUR/USD — стек таймфреймов по паре\n"
         "/briefing — брифинг текущей сессии\n"
-        "/status — жив ли я"
+        "/status — жив ли я\n"
+        "/diagnostics — часовая диагностика данных и модулей (наблюдение)\n"
+        "/module_replay, /strength_replay — исследовательский replay по OHLC-архиву\n"
+        "/h1_backfill ДАТА ДАТА — план дозагрузки H1 в архив"
     )
 
 
@@ -791,6 +794,145 @@ def _cached_market_snapshot() -> dict:
         if symbol in out:
             out[symbol][tf_key] = list((hit or {}).get("candles") or [])
     return out
+
+
+async def cmd_diagnostics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Latest hourly OBSERVE_ONLY diagnostics; computes one now if none yet."""
+    _remember_effective_chat(update)
+    try:
+        import diagnostics_observer
+        record = diagnostics_observer.last_result()
+        if record is None:
+            market = _cached_market_snapshot()
+            record = await asyncio.to_thread(diagnostics_observer.observe, market, force=True)
+        await _send_parts(context.application, int(update.effective_chat.id),
+                          diagnostics_observer.format_ru(record))
+    except Exception:
+        log.exception("DIAGNOSTICS_COMMAND_FAILED")
+        await update.message.reply_text("Диагностика временно недоступна. Сигналы не затронуты.")
+
+
+_RESEARCH_COMMAND_LOCK = asyncio.Lock()
+
+
+def _export_archive(tmp: Path, timeframes: list[str]) -> None:
+    """Read-only CSV export of the persistent OHLC archive (no API calls)."""
+    import sqlite3
+    from contextlib import closing
+    from ohlc_history_journal import db_default, export
+    db_path = db_default()
+    if not db_path.is_file():
+        raise ValueError("постоянный OHLC-архив не найден (нужен STATE_DIR и OHLC_JOURNAL_ENABLED)")
+    with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        db.execute("PRAGMA query_only=ON")
+        export(db, tmp, timeframes=timeframes)
+
+
+def _module_replay_report() -> str:
+    import tempfile
+    import historical_module_replay
+    with tempfile.TemporaryDirectory(prefix="fx_replay_") as raw:
+        tmp = Path(raw)
+        _export_archive(tmp, ["H1", "H4", "D1", "M15", "M5"])
+        report = historical_module_replay.evaluate(
+            tmp, step=int(getattr(cfg, "MODULE_REPLAY_STEP_H1", 12)),
+            max_points=int(getattr(cfg, "MODULE_REPLAY_MAX_POINTS", 24)))
+    return historical_module_replay.format_ru(report)
+
+
+def _strength_replay_report() -> str:
+    import tempfile
+    import historical_direction_calibration as hdc
+    with tempfile.TemporaryDirectory(prefix="fx_strength_") as raw:
+        tmp = Path(raw)
+        _export_archive(tmp, ["H1"])
+        report = hdc.evaluate(hdc.read_basket(tmp), tune=True)
+    return hdc.format_report(report)
+
+
+async def _run_research_command(update, context, title: str, builder) -> None:
+    _remember_effective_chat(update)
+    if _RESEARCH_COMMAND_LOCK.locked():
+        await update.message.reply_text("Исследовательский прогон уже идёт. Повтори после его завершения.")
+        return
+    async with _RESEARCH_COMMAND_LOCK:
+        await update.message.reply_text(f"{title}: считаю по OHLC-архиву (без API, OBSERVE_ONLY)…")
+        try:
+            report = await asyncio.to_thread(builder)
+            await _send_parts(context.application, int(update.effective_chat.id), report)
+        except ValueError as exc:
+            await update.message.reply_text(f"{title} недоступен: {str(exc)[:200]}")
+        except Exception as exc:
+            log.error("RESEARCH_COMMAND_FAILED title=%s error_type=%s", title, type(exc).__name__, exc_info=True)
+            await update.message.reply_text(f"{title} временно недоступен. Сигналы не затронуты.")
+
+
+async def cmd_module_replay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_research_command(update, context, "Replay модулей", _module_replay_report)
+
+
+async def cmd_strength_replay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_research_command(update, context, "Replay силы валют", _strength_replay_report)
+
+
+_H1_BACKFILL_LOCK = asyncio.Lock()
+
+
+async def cmd_h1_backfill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/h1_backfill YYYY-MM-DD YYYY-MM-DD — plan only, zero API calls.
+    /h1_backfill YYYY-MM-DD YYYY-MM-DD ПОДТВЕРЖДАЮ — up to 7 Twelve Data
+    requests, owner's private chat only; never overwrites stored candles."""
+    from datetime import date as _date
+    import h1_backfill_pilot
+    from ohlc_history_journal import db_default
+    args = list(getattr(context, "args", []) or [])
+    confirmed = len(args) == 3 and str(args[2]).upper() == "ПОДТВЕРЖДАЮ"
+    try:
+        if len(args) not in (2, 3) or (len(args) == 3 and not confirmed):
+            raise ValueError
+        start, end = _date.fromisoformat(args[0]), _date.fromisoformat(args[1])
+    except ValueError:
+        await update.message.reply_text("Формат: /h1_backfill 2026-11-17 2026-11-20 (план, без API). "
+                                        "Для загрузки добавь ПОДТВЕРЖДАЮ.")
+        return
+    try:
+        result = await asyncio.to_thread(h1_backfill_pilot.plan, start=start, end=end, db_path=db_default())
+    except ValueError as exc:
+        await update.message.reply_text(f"План H1-дозагрузки отклонён: {str(exc)[:200]}")
+        return
+    missing = {p: v["missing_core"] for p, v in result["preflight_core_coverage_by_pair"].items()}
+    lines = [f"🗄 H1-ДОЗАГРУЗКА · {result['start']} — {result['end']} · ПЛАН",
+             f"Не хватает основных торговых H1: " + ", ".join(f"{p} {n}" for p, n in missing.items()),
+             f"Запросов Twelve Data при выполнении: до {result['max_api_requests']}. Сохранённые свечи не перезаписываются."]
+    if not confirmed:
+        lines.append(f"Для загрузки: /h1_backfill {args[0]} {args[1]} ПОДТВЕРЖДАЮ")
+        await update.message.reply_text("\n".join(lines))
+        return
+    owner = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    chat = update.effective_chat
+    if not owner or str(getattr(chat, "id", "")) != owner or getattr(chat, "type", "") != "private":
+        await update.message.reply_text("Загрузка через API разрешена только из личного чата, совпадающего "
+                                        "с TELEGRAM_CHAT_ID. Запросы не выполнены.")
+        return
+    if _H1_BACKFILL_LOCK.locked():
+        await update.message.reply_text("Дозагрузка уже идёт. Повторные запросы не запущены.")
+        return
+    async with _H1_BACKFILL_LOCK:
+        try:
+            done = await asyncio.to_thread(
+                h1_backfill_pilot.run, start=start, end=end, db_path=db_default(),
+                api_key=os.getenv("TWELVE_DATA_API_KEY", ""), execute=True, approve_api_requests=True)
+        except ValueError as exc:
+            await update.message.reply_text(f"Дозагрузка отклонена до записи архива: {str(exc)[:200]}")
+            return
+        except Exception as exc:
+            log.error("H1_BACKFILL_FAILED error_type=%s", type(exc).__name__, exc_info=True)
+            await update.message.reply_text("Дозагрузка не выполнена; архив не изменён.")
+            return
+    await update.message.reply_text(
+        f"🗄 H1-ДОЗАГРУЗКА ВЫПОЛНЕНА · получено {done['received']}, добавлено {done['inserted']}, "
+        f"совпало {done['identical']}, в карантин (расхождения) {done['quarantined_conflicts']}. "
+        "Сигналы не затронуты.")
 
 
 async def cmd_ohlc_timebase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2057,6 +2199,13 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             observe_market(market)
         except Exception:
             log.exception("LIVERMORE_FOREX_OBSERVE_FAILED")
+        # Stage 24: hourly OBSERVE_ONLY diagnostics (data quality, live ZigZag
+        # repaint audit, volatility-regime detectors, pair-character cross-check).
+        try:
+            import diagnostics_observer
+            diagnostics_observer.observe(market)
+        except Exception:
+            log.exception("DIAGNOSTICS_OBSERVE_FAILED")
         # Passive replay/calibration observes matured journal decisions only.
         # It cannot veto, rerank or modify any live signal.
         try:
@@ -3181,6 +3330,10 @@ def main() -> None:
     app.add_handler(CommandHandler("ohlc_triplet", cmd_ohlc_triplet))
     app.add_handler(CommandHandler("ohlc_verify", cmd_ohlc_verify))
     app.add_handler(CommandHandler("patterns_formation", cmd_patterns_formation))
+    app.add_handler(CommandHandler("diagnostics", cmd_diagnostics))
+    app.add_handler(CommandHandler("module_replay", cmd_module_replay))
+    app.add_handler(CommandHandler("strength_replay", cmd_strength_replay))
+    app.add_handler(CommandHandler("h1_backfill", cmd_h1_backfill))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)
     log.info("Бот запущен.")

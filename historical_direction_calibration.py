@@ -209,6 +209,18 @@ def _metrics(records: list[dict], eligible: int) -> dict:
     }
 
 
+def _threshold_scores(train_gaps: list[tuple[float, bool]], eligible: int) -> dict[float, float]:
+    """Same objective as _choose_threshold, for every admissible grid point."""
+    scores: dict[float, float] = {}
+    for eps in EPS_GRID:
+        kept = [right for gap, right in train_gaps if abs(gap) > eps]
+        coverage = len(kept) / eligible if eligible else 0
+        if len(kept) < 50 or coverage < 0.20:
+            continue
+        scores[eps] = (sum(kept) / len(kept) - .5) * (coverage ** 0.5)
+    return scores
+
+
 def _choose_threshold(train_gaps: list[tuple[float, bool]], eligible: int) -> float:
     """Train only; fixed grid, minimum sample and trade-off for selectivity.
 
@@ -351,6 +363,30 @@ def evaluate(basket: dict[str, dict[datetime, Candle]], *, tune: bool = False,
                     })
     threshold = {m: (_choose_threshold(train_candidates[m], eligible["train"][1]) if tune else DEFAULT_EPS) for m in METHODS}
     output["thresholds"] = {m: {"gap_epsilon_pct_points": threshold[m], "selection": "TRAIN_ONLY" if tune else "FIXED"} for m in METHODS}
+    if tune:
+        # Stage 24: a train-selected threshold is trustworthy only on a
+        # plateau, not on a spike of the grid (parameter_stability).
+        import parameter_stability
+        for m in METHODS:
+            scores = _threshold_scores(train_candidates[m], eligible["train"][1])
+            output["thresholds"][m]["plateau"] = parameter_stability.plateau_1d(
+                scores, center=threshold[m], radius=1)
+    # Stage 24: multiple-testing awareness over the compared methods.
+    try:
+        import research_edge_audit
+        keyed = {m: {(r["pair"], r["stamp"]): r["direction_return_atr"]
+                     for phase in ("train", "test") for r in results[phase][m][4]
+                     if abs(r["gap"]) > threshold[m]} for m in METHODS}
+        common = sorted(set.intersection(*(set(v) for v in keyed.values())), key=lambda k: (k[1], k[0]))
+        matrix = [[keyed[m][k] for m in METHODS] for k in common]
+        trials = len(METHODS) * (len(EPS_GRID) if tune else 1)
+        output["research"] = {m: research_edge_audit.research_verdict(
+            [r["direction_return_atr"] for r in results["test"][m][4] if abs(r["gap"]) > threshold[m]],
+            n_trials=trials, returns_matrix=matrix) for m in METHODS}
+        output["research_meta"] = {"trials": trials, "pbo_rows_common_pair_hours": len(common),
+                                   "note": "PBO по общим паро-часам H4-горизонта; перекрывающиеся окна зависимы"}
+    except Exception as exc:
+        output["research_error"] = type(exc).__name__
     for phase in ("train", "test"):
         for method in METHODS:
             by_h = {}
@@ -455,6 +491,22 @@ def format_report(report: dict) -> str:
         share = (f"{100*change['followthrough_rate']:.1f}%" if change['followthrough_rate'] is not None else "нет данных")
         lines.append(f"- {METHOD_LABELS[method]}: перемен знака {change['direction_flips_with_2h_followup']}; "
                      f"движение в новом направлении в течение 2 H1 — {change['followthrough_2h']} ({share}).")
+    if report.get("research"):
+        lines.extend(["", "## Поправка на множественный выбор (DSR / PBO)", ""])
+        meta_r = report.get("research_meta") or {}
+        lines.append(f"Сравнивалось вариантов: {meta_r.get('trials')}; общих паро-часов для PBO: {meta_r.get('pbo_rows_common_pair_hours')}.")
+        for method in METHODS:
+            r = report["research"][method]
+            dsr = r.get("deflated_sharpe_proxy") or {}
+            pbo = r.get("pbo") or {}
+            p_edge = dsr.get("probability_edge_after_selection")
+            lines.append(f"- {METHOD_LABELS[method]}: вердикт {r['verdict']}; "
+                         f"P(преимущество после поправки) = {p_edge if p_edge is not None else 'нет данных'}; "
+                         f"PBO = {pbo.get('pbo', 'нет данных')}.")
+            plateau = (report["thresholds"][method] or {}).get("plateau")
+            if plateau and plateau.get("status") == "OK":
+                lines.append(f"  Порог {plateau['center']}: {'ПЛАТО' if plateau['stable'] else 'ПИК (неустойчив)'}, "
+                             f"падение у соседей {plateau['relative_drop']:.0%}.")
     lines.extend([
         "", "## Ограничения и решение", "",
         "- Сравнение **наблюдательное**, не меняет код допуска сигналов, торговые пороги, TR1/2/3 или сообщения Telegram.",

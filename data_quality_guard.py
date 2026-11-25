@@ -26,7 +26,16 @@ class QualityReport:
 def _get(x, name):
     return x.get(name) if isinstance(x, dict) else getattr(x, name, None)
 
-def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2):
+def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2,
+               is_trading=None):
+    """Audit one OHLC series.
+
+    ``is_trading(datetime_utc) -> bool`` (optional) marks market hours. Stage
+    24: without it, every FX weekend (48 h) was a «MISSING_INTERVALS» gap on
+    H1/M15/M5. With it, a gap counts only when at least one missing slot falls
+    inside trading hours. Duplicates are no longer also counted as
+    non-monotonic time (that reported one defect twice).
+    """
     bars=list(bars or [])
     if len(bars)<2:
         return QualityReport(False,len(bars),reasons=('INSUFFICIENT_BARS',))
@@ -57,10 +66,24 @@ def audit_bars(bars, *, expected_seconds=None, max_gap_bars=3, max_stale_tail=2)
         times.append(t)
     valid=[t for t in times if isinstance(t,datetime)]
     duplicates=max(0,len(valid)-len(set(valid)))
-    nonmono=sum(1 for a,b in zip(valid,valid[1:]) if b<=a)
+    nonmono=sum(1 for a,b in zip(valid,valid[1:]) if b<a)
     gaps=0
     if expected_seconds and expected_seconds>0:
-        gaps=sum(1 for a,b in zip(valid,valid[1:]) if (b-a).total_seconds()>expected_seconds*max_gap_bars)
+        from datetime import timedelta
+        step=timedelta(seconds=expected_seconds)
+        for a,b in zip(valid,valid[1:]):
+            if (b-a).total_seconds()<=expected_seconds*max_gap_bars:
+                continue
+            if is_trading is None:
+                gaps+=1
+                continue
+            # Inspect missing slots (bounded: at most 2 weeks of slots).
+            slot=a+step; checked=0; missing_trading=0
+            while slot<b and checked<4032:
+                if is_trading(slot): missing_trading+=1
+                slot+=step; checked+=1
+            if missing_trading>=max_gap_bars:
+                gaps+=1
     tail=0
     for b in reversed(bars):
         o,h,l,c=(_get(b,k) for k in ('open','high','low','close'))

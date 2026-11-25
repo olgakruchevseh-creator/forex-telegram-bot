@@ -274,5 +274,25 @@ def build(rows):
             recovery_windows=int(getattr(cfg,'STRUCTURAL_BREAK_RECOVERY_WINDOWS',2)),
             cooldown_windows=int(getattr(cfg,'STRUCTURAL_BREAK_COOLDOWN_WINDOWS',1)),
         )
+    # Stage 24: dormant research layers revived (OBSERVE_ONLY).
+    try:
+        import edge_drift_guard
+        import research_edge_audit
+        ordered=sorted(sent,key=lambda r:str(r.get('evaluated_utc') or ''))
+        report['edge_health_overall']=edge_drift_guard.edge_health(_proxy_values(ordered))
+        by_source=defaultdict(list)
+        for row in ordered:
+            by_source[str(row.get('source') or '—')].append(row)
+        report['edge_health_by_source']={name:edge_drift_guard.edge_health(_proxy_values(rows))
+                                          for name,rows in sorted(by_source.items())}
+        # Looking at N sources and trusting the best one is a selection over
+        # N trials: the DSR benchmark rises with N (Bailey & López de Prado).
+        trials=max(1,sum(1 for rows in by_source.values() if len(rows)>=8))
+        report['research_verdict_by_source']={
+            name:research_edge_audit.research_verdict(_proxy_values(rows),n_trials=trials)
+            for name,rows in sorted(by_source.items())}
+        report['research_trials_counted']=trials
+    except Exception as exc:
+        report['research_layers_error']=type(exc).__name__
     report['statistical_note']='PSR/MTRL and structural-break health use the replay ATR proxy, not broker returns; all outputs are OBSERVE_ONLY diagnostics.'
     return report

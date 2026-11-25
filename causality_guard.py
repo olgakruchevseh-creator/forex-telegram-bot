@@ -61,3 +61,32 @@ def execution_lag_audit(decisions, fills, minimum_lag_bars=1):
         except (TypeError,ValueError): continue
         if lag < minimum_lag_bars: bad.append({"index":i,"decision_bar":d,"fill_bar":f,"lag":lag})
     return {"status":"OK","minimum_lag_bars":minimum_lag_bars,"violations":bad,"valid":not bad}
+
+
+def swing_repaint_check(bars, swing_fn, *, checkpoints=4, min_prefix=60):
+    """Live repaint audit for a swing detector (e.g. analysis.zigzag).
+
+    ``swing_fn(bars) -> list`` of objects with ``index``, ``kind``, ``price``
+    and optional ``final``. For several earlier prefixes, every FINAL swing
+    (all but the newest, provisional one) that lies inside the full run's
+    window must still be present in the full run. A missing one means the
+    detector rewrote history after more bars arrived.
+    """
+    bars=list(bars or [])
+    n=len(bars)
+    if n<min_prefix+checkpoints+1:
+        return {'status':'INSUFFICIENT_DATA','n':n,'violations':[]}
+    def key(s): return (int(s.index), str(s.kind), round(float(s.price), 10))
+    full=swing_fn(bars)
+    full_keys={key(s) for s in full}
+    first=min((int(s.index) for s in full), default=n)
+    violations=[]
+    for back in range(1, checkpoints+1):
+        prefix=bars[:n-back]
+        for s in swing_fn(prefix):
+            if not getattr(s,'final',True) or int(s.index)<first:
+                continue
+            if key(s) not in full_keys:
+                violations.append({'bars_back':back,'swing_index':int(s.index),'kind':str(s.kind)})
+    return {'status':'OK','n':n,'checked_prefixes':checkpoints,'violations':violations,
+            'causal':not violations,'live_effect':'NONE'}

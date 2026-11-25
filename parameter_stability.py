@@ -4,7 +4,14 @@ import math
 
 def plateau_1d(points, *, center, radius=2, max_drop_fraction=.25):
     """points: mapping numeric parameter -> score. Good settings should live on a plateau, not a spike."""
-    clean={float(k):float(v) for k,v in (points or {}).items() if math.isfinite(float(v))}
+    clean={}
+    for k,v in (points or {}).items():
+        try:
+            key,val=float(k),float(v)
+        except (TypeError,ValueError):
+            continue
+        if math.isfinite(key) and math.isfinite(val):
+            clean[key]=val
     c=float(center)
     if c not in clean or len(clean)<3: return {'status':'INSUFFICIENT_DATA','stable':False}
     keys=sorted(clean); pos=keys.index(c); neigh=keys[max(0,pos-radius):pos]+keys[pos+1:pos+1+radius]

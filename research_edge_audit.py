@@ -92,14 +92,11 @@ def probability_backtest_overfitting(returns_matrix, n_splits=8):
     blocks=[]; base=len(rows)//s; rem=len(rows)%s; start=0
     for i in range(s):
         size=base+(1 if i<rem else 0); blocks.append(list(range(start,start+size))); start+=size
-    combos=list(combinations(range(s),s//2))
-    # symmetric complements are duplicates; retain one representative
-    seen=set(); unique=[]
-    for c in combos:
-        test=tuple(c); train=tuple(i for i in range(s) if i not in test)
-        key=tuple(sorted((test,train)))
-        if key in seen: continue
-        seen.add(key); unique.append(test)
+    # CSCV (Bailey, Borwein, López de Prado, Zhu) uses ALL C(S, S/2) splits.
+    # A split and its complement are NOT duplicates: IS and OOS swap roles,
+    # so the IS-winner and its OOS rank differ. Stage 24: the old code kept
+    # one of each pair and silently halved the sample of logits.
+    unique=list(combinations(range(s),s//2))
     lambdas=[]
     for test_blocks in unique:
         test_idx=[j for b in test_blocks for j in blocks[b]]
