@@ -67,30 +67,41 @@ def prune(pending: dict, market: dict, module: str, expired: list | None = None)
     removed = 0
     limit = max(0, int(getattr(cfg, 'MODULE_PENDING_MAX_H1', 2)))
     for key, item in list(pending.items()):
-        if not isinstance(item, dict):
-            pending.pop(key, None); removed += 1
-            continue
-        saved = _parse(item.get('saved_h1'))
-        ev = item.get('event') or {}
-        zone = item.get('zone') or {}
-        symbol = (item.get('symbol') or ev.get('symbol') or zone.get('symbol')
-                  or pair_of(item.get('text') or ''))
-        if not saved or not symbol:
+        try:
+            if not isinstance(item, dict):
+                raise TypeError('pending entry is not a mapping')
+            saved = _parse(item.get('saved_h1'))
+            # Imbalance stores event as a string ("new", "retest", ...).
+            # Other scanners use a dict; never call .get() on a string.
+            event_raw = item.get('event')
+            zone_raw = item.get('zone')
+            ev = event_raw if isinstance(event_raw, dict) else {}
+            zone = zone_raw if isinstance(zone_raw, dict) else {}
+            symbol = (item.get('symbol') or ev.get('symbol') or zone.get('symbol')
+                      or pair_of(item.get('text') or ''))
+            if not saved or not symbol:
+                pending.pop(key, None)
+                if expired is not None:
+                    expired.append(item)
+                removed += 1
+                log.info('MODULE_PENDING_EXPIRED module=%s key=%s reason=legacy_timestamp_unknown', module, key)
+                continue
+            ends = _h1_ends((market or {}).get(symbol) or {})
+            if not ends:
+                continue  # no trustworthy clock: release gate remains closed
+            # Close timestamps after the creation close; expiry after >N H1.
+            passed = sum(saved < end <= ends[-1] for end in ends)
+            if passed > limit:
+                pending.pop(key, None)
+                if expired is not None:
+                    expired.append(item)
+                removed += 1
+                log.info('MODULE_PENDING_EXPIRED module=%s key=%s h1_elapsed=%s', module, key, passed)
+        except (TypeError, ValueError, AttributeError) as exc:
+            # Never disable a whole scanner because one persisted row is corrupt.
             pending.pop(key, None)
             if expired is not None:
                 expired.append(item)
             removed += 1
-            log.info('MODULE_PENDING_EXPIRED module=%s key=%s reason=legacy_timestamp_unknown', module, key)
-            continue
-        ends = _h1_ends((market or {}).get(symbol) or {})
-        if not ends:
-            continue  # no trustworthy clock: release gate remains closed
-        # Close timestamps after the creation close; expiry after >N H1.
-        passed = sum(saved < end <= ends[-1] for end in ends)
-        if passed > limit:
-            pending.pop(key, None)
-            if expired is not None:
-                expired.append(item)
-            removed += 1
-            log.info('MODULE_PENDING_EXPIRED module=%s key=%s h1_elapsed=%s', module, key, passed)
+            log.warning('MODULE_PENDING_EXPIRED module=%s key=%s reason=corrupt detail=%s', module, key, type(exc).__name__)
     return removed
