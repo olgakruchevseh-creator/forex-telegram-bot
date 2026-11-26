@@ -55,10 +55,12 @@ def inspect_weekly(raw: list, *, as_of: datetime | None = None) -> dict:
         return {'status': 'INVALID_FUTURE', 'note': 'Последняя W1 имеет метку открытия в будущем'}
     estimate = expected_fx_friday_close(last)
     nominal = last + timedelta(days=7)
-    successor = stamps[-1] if len(stamps) >= 2 else None
     previous = stamps[-2] if len(stamps) >= 2 else None
-    # A successor seen at this as_of is the only independent provider boundary.
-    previous_proven = bool(previous and last <= as_of)
+    # A later vendor W1 OPEN provides a boundary for the preceding bar,
+    # not proof of immutable final OHLC (vendor may revise past candles).
+    gap_hours = round((last - previous).total_seconds()/3600, 1) if previous else None
+    plausible_successor = bool(previous and 5*24 <= (last-previous).total_seconds()/3600 <= 9*24)
+    previous_proven = plausible_successor
     calendar_due = bool(as_of >= estimate + SETTLE)
     nominal_due = bool(as_of >= nominal)
     # Never promote a current W1 based on the Friday estimate alone.
@@ -77,6 +79,10 @@ def inspect_weekly(raw: list, *, as_of: datetime | None = None) -> dict:
         'legacy_due': nominal_due,
         'previous_open_utc': previous.isoformat() if previous else None,
         'previous_proven_by_successor': previous_proven,
+        'previous_to_last_w1_hours': gap_hours,
+        'previous_boundary_evidence': 'NEW_W1_OPEN_SEEN' if previous_proven else 'UNVERIFIED',
+        'friday_to_nominal_gap_hours': round((nominal-estimate).total_seconds()/3600,1),
+        'last_current_bar_immutable_proven': False,
         'provider_label_local_weekday': last.astimezone(NY).strftime('%a'),
         'note': ('Граница пятницы — календарная оценка, не подтверждение финальности W1 у поставщика. '
                  'Торговые расчёты и OHLC не изменены.'),
@@ -86,7 +92,7 @@ def inspect_weekly(raw: list, *, as_of: datetime | None = None) -> dict:
 def format_report(market: dict, *, pairs: tuple | list, as_of: datetime | None = None) -> str:
     as_of = as_of or datetime.now(timezone.utc)
     lines = [
-        'W1 · ПРОВЕРКА ЗАКРЫТИЯ · ЭТАП 28F · OBSERVE_ONLY',
+        'W1 · ПРОВЕРКА ЗАКРЫТИЯ · ЭТАП 28G · OBSERVE_ONLY',
         f'Снимок: {as_of.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}',
         'Сравнение: +7 суток от метки W1 / пятница 17:00 New York (летнее время учтено).',
         'Пятничная граница НЕ доказывает закрытие агрегата Twelve Data.',
@@ -106,9 +112,13 @@ def format_report(market: dict, *, pairs: tuple | list, as_of: datetime | None =
             mismatches += 1
         lines.append(f'{pair}: {state} · открытие {entry["last_open_utc"][:16]}; '
                      f'NY-пятница {entry["friday_fx_close_utc"][:16]}; '
-                     f'+7д {entry["legacy_7d_close_utc"][:16]}')
+                     f'+7д {entry["legacy_7d_close_utc"][:16]}; '
+                     f'разница {entry["friday_to_nominal_gap_hours"]}ч; '
+                     f'предыдущая W1: {entry["previous_boundary_evidence"]} '
+                     f'(интервал {entry["previous_to_last_w1_hours"]}ч)')
     lines.extend([
-        f'Расхождение календаря и правила +7 суток: {mismatches}/{len(pairs)}; нет W1: {missing}.',
+        f'Промежуточное окно (после пятницы, до +7д): {mismatches}/{len(pairs)}; нет W1: {missing}.',
+        'Появление новой метки W1 подтверждает границу предыдущей, но НЕ неизменность предыдущей OHLC. '
         'Для окончательного решения нужна сверка последовательных W1 и H4/H1 по поставщику, '
         'а также подтверждение задержки финализации после пятничного закрытия.',
         'Никаких изменений сигналов, Master/Killer, истории и порогов не сделано.',

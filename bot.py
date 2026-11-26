@@ -666,6 +666,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/module_replay, /strength_replay — исследовательский replay по OHLC-архиву\n"
         "/disbalance_calibration — проверка Disbalance по реальной сохранённой истории\n"
         "/w1_finality — сверка финальности W1 (только наблюдение)\n"
+        "/pdh_pdl_audit — проверка предыдущего торгового дня по NY17 и D1\n"
+        "/storage_growth — динамика размера журналов между ручными проверками\n"
         "/h1_backfill ДАТА ДАТА — план дозагрузки H1 в архив"
     )
 
@@ -1022,6 +1024,38 @@ async def cmd_w1_finality(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         log.exception("W1_FINALITY_DIAGNOSTICS_FAILED")
         await update.message.reply_text("W1-диагностика сейчас недоступна. Торговые сигналы не затронуты.")
+
+
+
+
+async def cmd_pdh_pdl_audit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manual cached-only comparison; does not amend PDH/PDL signal logic."""
+    if not getattr(cfg, 'STAGE28G_PDH_PDL_TIMEBASE_AUDIT', True):
+        await update.message.reply_text('PDH/PDL-диагностика 28G отключена.')
+        return
+    try:
+        from pdh_pdl_audit_28g import format_report
+        snapshot = _cached_market_snapshot()
+        report = await asyncio.to_thread(format_report, snapshot, pairs=tuple(cfg.PAIRS))
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception:
+        log.exception('STAGE28G_PDH_AUDIT_FAILED')
+        await update.message.reply_text('PDH/PDL-диагностика недоступна; сигналы не затронуты.')
+
+
+async def cmd_storage_growth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only, manual metadata growth observation; small bounded state file."""
+    if not getattr(cfg, 'STAGE28G_STORAGE_GROWTH_AUDIT', True):
+        await update.message.reply_text('Наблюдение за ростом хранилища 28G отключено.')
+        return
+    try:
+        import storage_growth_28g
+        result = await asyncio.wait_for(asyncio.to_thread(storage_growth_28g.observe), timeout=12.0)
+        await _send_parts(context.application, int(update.effective_chat.id),
+                          storage_growth_28g.format_ru(result))
+    except Exception:
+        log.exception('STAGE28G_STORAGE_GROWTH_FAILED')
+        await update.message.reply_text('Динамика Volume пока недоступна. Исторические журналы не затронуты.')
 
 
 _H1_BACKFILL_LOCK = asyncio.Lock()
@@ -3514,6 +3548,8 @@ def main() -> None:
     app.add_handler(CommandHandler("strength_replay", _owner_handler(cmd_strength_replay)))
     app.add_handler(CommandHandler("disbalance_calibration", _owner_handler(cmd_disbalance_calibration)))
     app.add_handler(CommandHandler("w1_finality", _owner_handler(cmd_w1_finality)))
+    app.add_handler(CommandHandler("pdh_pdl_audit", _owner_handler(cmd_pdh_pdl_audit)))
+    app.add_handler(CommandHandler("storage_growth", _owner_handler(cmd_storage_growth)))
     app.add_handler(CommandHandler("h1_backfill", _owner_handler(cmd_h1_backfill)))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)

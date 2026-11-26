@@ -1725,3 +1725,7 @@ STAGE28E_ADJACENT_ZONES_DISPLAY_ONLY = True  # False: прежнее отобр�
 STAGE28F_CALIBRATION_DIAGNOSTICS = True  # False: скрыть ручной расчёт Disbalance.
 STAGE28F_W1_FINALITY_DIAGNOSTICS = True  # False: скрыть W1-сверку.
 STAGE28F_CALIBRATION_MAX_ANCHORS = 96  # Ограничение CPU при ручном replay по архиву.
+
+# Этап 28G · только ручные наблюдательные проверки; торговые пороги не меняются.
+STAGE28G_PDH_PDL_TIMEBASE_AUDIT = True
+STAGE28G_STORAGE_GROWTH_AUDIT = True  # создаёт ТОЛЬКО маленький файл снимков, не трогает архивы
