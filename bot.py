@@ -1762,6 +1762,9 @@ class ScanStats:
 def _source_image_for(text: str, source_text: str):
     """Единая точка картинки. Ключ всегда исходный source_text, не подпись с CPI."""
     try:
+        # Stage29D: source identity wins over displayed/allied module headers.
+        if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in source_text:
+            return patterns.image_for_alert(source_text)
         if "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН" in text:
             return disbalance.image_for_alert(source_text)
         if "⚖️ BPR — BALANCED PRICE RANGE" in text:
@@ -1774,8 +1777,6 @@ def _source_image_for(text: str, source_text: str):
             return imbalance.image_for_alert(source_text)
         if "↕️ ZIGZAG —" in text:
             return zigzag_scanner.image_for_alert(source_text)
-        if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in text:
-            return patterns.image_for_alert(source_text)
         if "🎯 AMD / POWER OF THREE" in text:
             return amd_power_of_three.image_for_alert(source_text)
         if "📅 РИТМ НЕДЕЛИ — КОНТЕКСТ" in text:
@@ -1828,7 +1829,9 @@ async def _deliver_trade_card(app: Application, chat_id: int, text: str, image=N
     """Единственный выход торговой карточки в Telegram."""
     display_text = format_trade_card(localize_telegram(text))
     if image is not None:
-        if len(display_text) <= 1000:
+        image.seek(0)
+        # Telegram counts UTF-16 units, not Python codepoints (emoji = 2 units).
+        if briefing_delivery._telegram_len(display_text) <= 1000:
             await app.bot.send_photo(chat_id=int(chat_id), photo=image, caption=display_text)
         else:
             await app.bot.send_photo(
@@ -2093,6 +2096,38 @@ def select_trade_alerts(items: list[tuple[int, str]], limit: int = 2, blocked_pa
     return chosen
 
 
+# Stage29D: in-process evidence of the most recent per-pair image delivery.
+# Bounded to seven FX pairs; no Volume writes and no change to Master/Killer.
+_PATTERN_BRIEFING_IMAGE_STATUS: dict[str, tuple[str, str]] = {}
+
+
+def _stage29d_image_status(symbol: str, status: str, detail: str = "") -> None:
+    if not getattr(cfg, "STAGE29D_BRIEFING_IMAGE_DIAGNOSTICS", True):
+        return
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
+    _PATTERN_BRIEFING_IMAGE_STATUS[symbol] = (timestamp, f"{status} {detail}".strip())
+    while len(_PATTERN_BRIEFING_IMAGE_STATUS) > 10:
+        _PATTERN_BRIEFING_IMAGE_STATUS.pop(next(iter(_PATTERN_BRIEFING_IMAGE_STATUS)))
+    log.info("PATTERN_BRIEFING_IMAGE_STATUS pair=%s status=%s detail=%s",symbol,status,detail)
+
+
+async def cmd_pattern_image_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only in-memory status of the most recent briefing pictures."""
+    if not getattr(cfg, "STAGE29D_BRIEFING_IMAGE_DIAGNOSTICS", True):
+        await update.message.reply_text("Диагностика картинок выключена")
+        return
+    if not _PATTERN_BRIEFING_IMAGE_STATUS:
+        await update.message.reply_text("Картинки: пока нет наблюдений после запуска бота. Запусти /briefing после деплоя.")
+        return
+    rows = ["🧩 КАРТИНКИ ПАТТЕРНОВ · ПОСЛЕДНИЙ БРИФИНГ"]
+    for symbol in getattr(cfg,"SYMBOLS",()) or _PATTERN_BRIEFING_IMAGE_STATUS:
+        if symbol in _PATTERN_BRIEFING_IMAGE_STATUS:
+            stamp, outcome = _PATTERN_BRIEFING_IMAGE_STATUS[symbol]
+            rows.append(f"{symbol}: {outcome} · {stamp}")
+    await update.message.reply_text("\n".join(rows))
+
+
 async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, strength: dict, rank: list, dxy, events: list, upcoming_events: list) -> int:
     """Build the whole briefing first; deliver one overview and one card per pair.
 
@@ -2116,33 +2151,62 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
         # Read-only independent W1/D1/H4/H1/M15/M5 pattern overview.
         # This does not enqueue M15/M5 trading alerts or change any signal gate.
         mtf_patterns_text = ""
+        frozen_pattern_bars = None
         if patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True):
             try:
                 import patterns_mtf
-                # Same frozen bars as the picture below: a bar still forming
-                # when it was downloaded has provisional OHLC and must not
-                # name a figure in the text that the picture cannot show.
-                mtf_patterns_text = patterns_mtf.briefing_summary(symbol, patterns.final_by_tf(market, symbol))
-            except Exception:
+                # Stage29D: one exact final-data snapshot for the text and image.
+                frozen_pattern_bars = patterns.final_by_tf(market, symbol)
+                mtf_patterns_text = patterns_mtf.briefing_summary(symbol, frozen_pattern_bars)
+            except Exception as error:
+                _stage29d_image_status(symbol, "MTF_ERROR", type(error).__name__)
                 log.exception("PATTERN_MTF_BRIEFING_FAILED pair=%s", symbol)
         pair_text = localize_telegram(pair_text)
         card = None
-        if patterns is not None and getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True):
-            try:
-                card = patterns.briefing_htf_card(symbol, patterns.final_by_tf(market, symbol))
-            except Exception:
-                log.exception("PATTERN_BRIEFING_IMAGE_FAILED pair=%s", symbol)
+        image_failure = ""
+        if (patterns is not None and getattr(cfg, "PATTERNS_ENABLED", True)
+                and getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True)):
+            if frozen_pattern_bars is None:
+                try:
+                    frozen_pattern_bars = patterns.final_by_tf(market, symbol)
+                except Exception as error:
+                    image_failure = "OHLC_ERROR:" + type(error).__name__
+                    _stage29d_image_status(symbol, "OHLC_ERROR", type(error).__name__)
+                    log.exception("PATTERN_BRIEFING_FINAL_DATA_FAILED pair=%s", symbol)
+            if frozen_pattern_bars is not None:
+                try:
+                    card = patterns.briefing_htf_card(symbol, frozen_pattern_bars)
+                except Exception as error:
+                    image_failure = "RENDER_ERROR:" + type(error).__name__
+                    _stage29d_image_status(symbol, "RENDER_ERROR", type(error).__name__)
+                    log.exception("PATTERN_BRIEFING_IMAGE_FAILED pair=%s", symbol)
+                if card is None and getattr(cfg,"STAGE29D_BRIEFING_OHLC_FALLBACK",True):
+                    has_figure = any(line.startswith(("W1:", "D1:", "H4:", "H1:", "M15:", "M5:"))
+                                     for line in mtf_patterns_text.splitlines())
+                    try:
+                        card = patterns.briefing_ohlc_overview(
+                            symbol, frozen_pattern_bars, figure_in_text=has_figure,
+                            detection_unavailable=not bool(mtf_patterns_text))
+                    except Exception as error:
+                        image_failure = "FALLBACK_ERROR:" + type(error).__name__
+                        _stage29d_image_status(symbol, "FALLBACK_ERROR", type(error).__name__)
+                        log.exception("PATTERN_BRIEFING_OHLC_FALLBACK_FAILED pair=%s", symbol)
         if card and card.get("image") is not None:
             try:
                 card["image"].seek(0)
                 caption = briefing_delivery.compact_pair_caption(
                     pair_text, localize_telegram("\n".join(filter(None, (mtf_patterns_text, card.get("caption") or ""))))
                 )
-                outgoing.append(("photo", card["image"], caption, symbol))
+                _stage29d_image_status(symbol, "PHOTO_READY", "OHLC" if card.get("fallback") else "PATTERN")
+                outgoing.append(("photo", card["image"], caption, symbol,
+                                 "OHLC" if card.get("fallback") else "PATTERN"))
                 continue
-            except Exception:
+            except Exception as error:
+                image_failure = "CAPTION_ERROR:" + type(error).__name__
+                _stage29d_image_status(symbol, "CAPTION_ERROR", type(error).__name__)
                 log.exception("PATTERN_BRIEFING_CAPTION_FAILED pair=%s", symbol)
-        # No image: one compact text card, not a disconnected photo + long essay.
+        # No image: never invent a confirmed pattern or hide the reason.
+        _stage29d_image_status(symbol, "TEXT_ONLY", image_failure or "no_final_ohlc_or_image_disabled")
         outgoing.append(("text", briefing_delivery.compact_pair_caption(pair_text, localize_telegram(mtf_patterns_text))))
 
     try:
@@ -2157,11 +2221,16 @@ async def _send_briefing_sequence(app: Application, chat_id: int, market: dict, 
             if sent and pause:
                 await asyncio.sleep(pause)
             if item[0] == "photo":
-                _, photo, caption, symbol = item
+                _, photo, caption, symbol, image_kind = item
                 try:
+                    photo.seek(0)
                     await app.bot.send_photo(chat_id=int(chat_id), photo=photo, caption=caption)
+                    _stage29d_image_status(symbol, "PHOTO_SENT", image_kind)
                     sent += 1
-                except Exception:
+                except Exception as error:
+                    # Do not blindly retry a possibly delivered photo on a timeout:
+                    # doing so duplicates the briefing. Deliver the text and log.
+                    _stage29d_image_status(symbol, "SEND_FAILED", type(error).__name__)
                     log.exception("PATTERN_BRIEFING_IMAGE_SEND_FAILED pair=%s; fallback to text", symbol)
                     await send(app, int(chat_id), caption)
                     sent += 1
@@ -3209,6 +3278,9 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 log.exception("MULTI_TF_STRENGTH_CARD_FAILED pair=%s", pair)
             source_image = _source_image_for(text, source_text)
+            if (patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in source_text
+                    and source_image is None):
+                log.warning("PATTERN_ALERT_IMAGE_UNAVAILABLE pair=%s source=original_pattern", pair)
             await _deliver_trade_card(context.application, int(chat_id), text, source_image)
             if patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in source_text:
                 # Pattern state/cache is keyed by the original detector text. The
@@ -3559,6 +3631,7 @@ def main() -> None:
     app.add_handler(CommandHandler("briefing", _owner_handler(cmd_briefing)))
     app.add_handler(CommandHandler("briefing_full", _owner_handler(cmd_briefing)))
     app.add_handler(CommandHandler("patterns_history", _owner_handler(cmd_patterns_history)))
+    app.add_handler(CommandHandler("pattern_image_status", _owner_handler(cmd_pattern_image_status)))
     app.add_handler(CommandHandler("ohlc_sources", cmd_ohlc_sources))
     app.add_handler(CommandHandler("ohlc_timebase", cmd_ohlc_timebase))
     app.add_handler(CommandHandler("ohlc_conflicts", _owner_handler(cmd_ohlc_conflicts)))

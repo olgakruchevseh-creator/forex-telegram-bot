@@ -1723,6 +1723,86 @@ def render_pattern_chart(symbol: str, pattern: Pattern, by_tf: dict) -> io.Bytes
     return out
 
 
+def briefing_ohlc_overview(symbol: str, by_tf: dict, *, figure_in_text: bool = False,
+                            detection_unavailable: bool = False) -> dict | None:
+    """Truthful, small OHLC-only image when a briefing figure chart is unavailable.
+
+    A missing latest-close pattern does NOT justify drawing an invented pattern.
+    This function neither changes the detector nor queues a trading alert.
+    """
+    if not getattr(cfg, "PATTERN_CHART_IMAGES_ENABLED", True) or not getattr(
+            cfg, "STAGE29D_BRIEFING_OHLC_FALLBACK", True):
+        return None
+    from PIL import Image, ImageDraw, ImageFont
+
+    chosen = None
+    for tf, minimum in (("H1", 12), ("H4", 8), ("D1", 5)):
+        try:
+            candles = closed_candles((by_tf or {}).get(tf) or [], TF_MINUTES[tf])
+            candles = candles[-52:]
+            if len(candles) < minimum or not _validated_ohlc(candles):
+                continue
+            if not all(math.isfinite(float(v)) and float(v) > 0
+                       for b in candles for v in (b.open, b.high, b.low, b.close)):
+                continue
+            chosen = tf, candles
+            break
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            continue
+    if chosen is None:
+        log.warning("PATTERN_BRIEFING_FALLBACK_UNAVAILABLE pair=%s reason=no_valid_closed_ohlc", symbol)
+        return None
+    tf, bars = chosen
+    width, height = 960, 550
+    image = Image.new("RGB", (width, height), "#10131d")
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
+        small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
+    except OSError:
+        font, small = ImageFont.load_default(), ImageFont.load_default()
+    left, right, top, bottom = 62, width - 36, 105, height - 84
+    low = min(float(b.low) for b in bars)
+    high = max(float(b.high) for b in bars)
+    pad = max((high-low)*0.08, max(high, 1e-8)*0.0001)
+    low, high = low-pad, high+pad
+    def x_at(i: float) -> float:
+        return left + i*(right-left)/max(1,len(bars)-1)
+    def y_at(price: float) -> float:
+        return bottom-(price-low)*(bottom-top)/max(1e-12,high-low)
+    for i in range(5):
+        y = top+(bottom-top)*i/4
+        draw.line((left,y,right,y),fill="#293040",width=1)
+    candle_w = max(3,int((right-left)/len(bars)*0.56))
+    for i,b in enumerate(bars):
+        x=x_at(i)
+        color="#37d67a" if b.close>=b.open else "#ff5c6c"
+        draw.line((x,y_at(b.high),x,y_at(b.low)),fill=color,width=2)
+        draw.rectangle((x-candle_w/2,min(y_at(b.open),y_at(b.close)),
+                        x+candle_w/2,max(y_at(b.open),y_at(b.close))+1),fill=color)
+    fmt = '.3f' if 'JPY' in symbol else '.5f'
+    draw.text((left,28),f"{symbol} · {tf} · OHLC", fill="#f1f5fb", font=font)
+    draw.text((left,65),f"Метка свечи поставщика: {str(bars[-1].dt)[:32]}",
+              fill="#c6d0e1",font=small)
+    draw.text((left, height-60),f"Закрытие: {format(float(bars[-1].close),fmt)} · только наблюдение",
+              fill="#c6d0e1",font=small)
+    status_note = ("обнаружение паттернов недоступно, показаны только закрытые OHLC"
+                   if detection_unavailable else
+                   "геометрия указанной фигуры недоступна, показаны только закрытые OHLC"
+                   if figure_in_text else
+                   "нет подтверждённой фигуры на последних закрытиях, показаны только OHLC")
+    # The briefing caption compressor always keeps the "Наблюдение:" prefix.
+    caption = f"🧩 {symbol} · {tf} · обзор OHLC\nНаблюдение: {status_note}; НЕ торговый сигнал"
+    out = io.BytesIO()
+    out.name = f"briefing_ohlc_{symbol.replace('/', '')}_{tf}.png"
+    image.save(out,format="PNG",optimize=True)
+    out.seek(0)
+    log.info("PATTERN_BRIEFING_OHLC_FALLBACK pair=%s tf=%s figure_in_text=%s bars=%d",
+             symbol,tf,figure_in_text,len(bars))
+    return {"image":out,"caption":caption,"tf":tf,"pattern":None,
+            "observed_only":True,"fallback":True}
+
+
 def _chart_cache_dir() -> Path:
     root = os.getenv("STATE_DIR", "").strip()
     dest = (Path(root) if root else Path(__file__).resolve().parent) / "pattern_chart_cache"
@@ -1755,7 +1835,13 @@ def image_for_alert(text: str) -> io.BytesIO | None:
     card = _PENDING_CARDS.get(text)
     if card:
         symbol, pattern, by_tf = card
-        return render_pattern_chart(symbol, pattern, by_tf)
+        try:
+            return render_pattern_chart(symbol, pattern, by_tf)
+        except Exception:
+            # Stage29D: original event-time PNG was persisted on creation.
+            # A transient Pillow/geometry failure must not bypass that cache.
+            log.exception("PATTERN_ALERT_RENDER_FAILED pair=%s tf=%s; try persisted PNG",
+                          symbol, pattern.tf)
     # A confirmed pattern exists for only one first-break candle. On the next scan
     # it can disappear from detector output while remaining PENDING in the delivery
     # queue. The persisted immutable PNG is therefore the authoritative fallback.

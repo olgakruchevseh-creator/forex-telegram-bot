@@ -1751,3 +1751,8 @@ STAGE29_RAW_QUALITY_JOURNAL = True  # Исходные баллы до пото�
 STAGE29_EVENT_TIME_MISSING_OBSERVE = True  # Один диагностический лог на пару/источник/H1.
 STAGE29_PENDING_STALE_H1_OBSERVE = True  # Наблюдаем старые pending, пока TTL=2 сохранён.
 # STAGE27A_REQUIRE_EVENT_TIME оставлен False до подтверждения полных живых логов.
+
+
+# Этап 29D: устойчивость картинок паттернов в брифинге (только представление).
+STAGE29D_BRIEFING_OHLC_FALLBACK = True  # Не выдумывать фигуру: обзор реальных закрытых OHLC.
+STAGE29D_BRIEFING_IMAGE_DIAGNOSTICS = True  # Последний исход картинки в /pattern_image_status.
