@@ -23,6 +23,7 @@ import killer_trap_guard
 from signal_contract import pair_of, side_of, is_information_card, source_timeframe, event_close_utc, infer_source_header, SOURCE_MARKERS as SINGLE_SOURCE_MARKERS
 
 log = logging.getLogger("fxbot.release_guard")
+_STAGE29_MISSING_TIME_SEEN: set[tuple[str, str, str]] = set()
 
 # Every scanning module belongs to exactly one independent primary family.
 SOURCE_FAMILIES = {
@@ -204,6 +205,15 @@ def review(text: str, market: dict, peers=(), source_ids=None, *, now=None, cach
     elif tf == "UNKNOWN":
         return Decision("BLOCK", "unknown_source_timeframe", pair, side, source, family, end.isoformat(), tuple(checks))
     else:
+        if (getattr(cfg, "STAGE29_EVENT_TIME_MISSING_OBSERVE", True)
+                and family not in ("context",)):
+            marker = (source, pair, end.isoformat())
+            if marker not in _STAGE29_MISSING_TIME_SEEN:
+                if len(_STAGE29_MISSING_TIME_SEEN) > 3000:
+                    _STAGE29_MISSING_TIME_SEEN.clear()
+                _STAGE29_MISSING_TIME_SEEN.add(marker)
+                log.warning("EVENT_TIME_MISSING_OBSERVE source=%s pair=%s h1=%s tf=%s",
+                            source, pair, end.isoformat(), tf)
         if getattr(cfg, "STAGE27A_REQUIRE_EVENT_TIME", False) and family not in ("context",):
             return Decision("BLOCK", "event_timestamp_missing", pair, side, source, family,
                             end.isoformat(), tuple(checks))

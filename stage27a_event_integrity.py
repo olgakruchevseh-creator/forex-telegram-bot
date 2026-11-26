@@ -15,6 +15,7 @@ from analysis import closed_candles
 from signal_contract import pair_of
 
 log = logging.getLogger('fxbot.stage27a')
+_STAGE29_STALE_SEEN: set[tuple[str, str, str]] = set()
 AMSTERDAM = ZoneInfo('Europe/Amsterdam')
 
 
@@ -91,6 +92,18 @@ def prune(pending: dict, market: dict, module: str, expired: list | None = None)
                 continue  # no trustworthy clock: release gate remains closed
             # Close timestamps after the creation close; expiry after >N H1.
             passed = sum(saved < end <= ends[-1] for end in ends)
+            # Stage 29C: observe stale rows while preserving the two-H1 TTL.
+            # Reducing TTL globally to 0 would incorrectly discard some M15/M5
+            # setups that are waiting for the next H1 release.
+            if (passed > 0 and passed <= limit
+                    and getattr(cfg, 'STAGE29_PENDING_STALE_H1_OBSERVE', True)):
+                marker = (module, str(key), str(saved))
+                if marker not in _STAGE29_STALE_SEEN:
+                    if len(_STAGE29_STALE_SEEN) > 3000:
+                        _STAGE29_STALE_SEEN.clear()
+                    _STAGE29_STALE_SEEN.add(marker)
+                    log.info('MODULE_PENDING_STALE_OBSERVE module=%s key=%s h1_elapsed=%s',
+                             module, key, passed)
             if passed > limit:
                 pending.pop(key, None)
                 if expired is not None:

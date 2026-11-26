@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import config as cfg
+import stage29c_quality_observer as quality_observer
 import market_state
 import evidence_families
 import numerical_parameter_registry
@@ -430,8 +431,9 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   inferred_close_utc=inferred_close.isoformat() if inferred_close is not None else None
  except Exception:
   inferred_tf='UNKNOWN'; inferred_close_utc=None
- quality,quality_label=_score(text,['Качество','Качество реакции','Качество пробоя','Сходство фигуры'])
+ quality,quality_label=_score(text,['Качество','Качество зоны','Качество реакции','Качество пробоя','Сходство фигуры'])
  probability,probability_label=_score(text,['Оценка сценария','Вероятность','Уверенность модели','Уверенность чертежа'])
+ raw_quality = quality_observer.lookup(text, quality)
  progress=_observed_progress(ctx)
  obs=_observed_h1(by_tf)
  if pair and direction:
@@ -449,7 +451,9 @@ def _base(text,market,strength,status,reason='',allies=None,ctx=None,master=None
   'pair':pair,'side':side,'source':source,'sources':sources,'confirmation_families':_families(source_cards),
   'master_snapshot':_master_snapshot(master),
   'observed_h1_dt':obs.get('dt') or '','h1_close_price':obs.get('close'),
-  'quality':quality,'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'confirmation_tf':('H1' if (ctx or {}).get('h1_release_close_utc') else _confirmation_tf(text)),'session':_session(local_now),
+  'quality':quality,
+  **({'raw_quality':raw_quality} if raw_quality is not None else {}),
+  'quality_label':quality_label,'probability':probability,'probability_label':probability_label,'timeframe':_tf(text),'confirmation_tf':('H1' if (ctx or {}).get('h1_release_close_utc') else _confirmation_tf(text)),'session':_session(local_now),
   'source_tf_contract':inferred_tf,'source_event_close_utc':inferred_close_utc,
   'verified_h1_close_utc':(ctx or {}).get('h1_release_close_utc'),
   'final_entry_gate':(ctx or {}).get('final_entry_gate') or {},

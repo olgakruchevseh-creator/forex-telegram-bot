@@ -15,6 +15,7 @@ from stage27a_event_integrity import _parse as _utc_parse, _h1_ends
 import stage27a_event_integrity as stage27a
 
 import config as cfg
+import stage29c_quality_observer as quality_observer
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
 
@@ -47,6 +48,7 @@ class Phase:
     last_dt: str = ""
     exit_dt: str = ""
     exit_price: float = 0.0
+    raw_quality: int = 0  # Этап 29C: только наблюдение.
 
 
 def _path() -> Path:
@@ -114,13 +116,14 @@ def detect_phase(symbol: str, tf: str, bars: list[Candle]) -> Phase | None:
     touch_pts = min(18, (touches_low + touches_high) * 2)
     prior_pts = min(18, int(abs(prior_atr) * 4))
     efficiency_pts = min(12, int((max_eff - efficiency) * 35))
-    quality = min(95, 48 + compression + touch_pts + prior_pts + efficiency_pts)
+    raw_quality = 48 + compression + touch_pts + prior_pts + efficiency_pts
+    quality = min(95, raw_quality)
     if quality < int(getattr(cfg, "PHASE_MIN_QUALITY", 74)):
         return None
     return Phase(
         _phase_id(symbol, tf, kind, low, high), symbol, tf, kind, side, low, high,
         quality, max(70, min(91, quality - 5)), touches_low, touches_high,
-        efficiency, prior_atr, box[-1].dt, last_dt=box[-1].dt,
+        efficiency, prior_atr, box[-1].dt, last_dt=box[-1].dt, raw_quality=raw_quality,
     )
 
 
@@ -185,7 +188,7 @@ def format_message(phase: Phase, event: str) -> str:
             if phase.side == "LONG" else
             "После предшествующего роста цена перешла в подтверждённый диапазон; основной сценарий SHORT."
         )
-    return "\n".join([
+    message = "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "", f"Пара: {phase.symbol}",
         f"Таймфрейм: {phase.tf}", f"Направление: {phase.side}",
         f"Диапазон: {_price(phase.symbol, phase.low)}–{_price(phase.symbol, phase.high)}",
@@ -194,6 +197,7 @@ def format_message(phase: Phase, event: str) -> str:
         score_line(phase.confidence), f"Состояние: {phase.status}", "", f"Факт: {fact}"
     ])
 
+    return quality_observer.register(message, phase.raw_quality or None, phase.quality, "accumulation_distribution")
 
 def render_chart(phase: Phase, by_tf: dict) -> io.BytesIO:
     """Закрытые M15-свечи с диапазоном фазы и подтверждённым выходом."""
@@ -495,6 +499,7 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     else:
                         same.low, same.high = phase.low, phase.high
                         same.quality = max(same.quality, phase.quality)
+                        same.raw_quality = max(same.raw_quality, phase.raw_quality)
                         same.touches_low, same.touches_high = phase.touches_low, phase.touches_high
                 else:
                     # Rounded phase IDs can coincide even if ranges differ.

@@ -1744,3 +1744,10 @@ STAGE29_ZIGZAG_INFO_ACK = True  # Подтверждать успешную от
 STAGE29_CALIBRATION_ALL_HOURS = True  # Последовательный replay с сохранением курсора.
 STAGE29_CALIBRATION_BATCH_ANCHORS = 96  # Не более H1-якорей за одну ручную команду.
 STAGE29_CALIBRATION_TIME_BUDGET_SECONDS = 20  # Ограничение обработки Railway.
+
+
+# Этап 29C — наблюдение без изменения сигналов, целей, ATR и H1-close.
+STAGE29_RAW_QUALITY_JOURNAL = True  # Исходные баллы до потолка, только в журнале решений.
+STAGE29_EVENT_TIME_MISSING_OBSERVE = True  # Один диагностический лог на пару/источник/H1.
+STAGE29_PENDING_STALE_H1_OBSERVE = True  # Наблюдаем старые pending, пока TTL=2 сохранён.
+# STAGE27A_REQUIRE_EVENT_TIME оставлен False до подтверждения полных живых логов.

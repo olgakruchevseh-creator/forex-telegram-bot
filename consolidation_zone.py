@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage29c_quality_observer as quality_observer
 import stage27a_event_integrity as stage27a
 import ohlc_movement
 from analysis import Candle, analyze_tf, atr, closed_candles, split_pair
@@ -56,6 +57,7 @@ class Zone:
     failed_breakout_side: str = ""
     failed_breakout_dt: str = ""
     failed_reclaim_dt: str = ""
+    raw_quality: int = 0  # Этап 29C, только журнал, не сигнальная шкала.
 
 
 def _path() -> Path:
@@ -135,7 +137,8 @@ def detect_zone(symbol: str, tf: str, bars: list[Candle]) -> Zone | None:
     if boundary_score < float(getattr(cfg, "CONSOLIDATION_MIN_BOUNDARY_SCORE", 55.0)):
         return None
     boundary_pts = min(6, int(max(0.0, boundary_score-50.0)/8.0))
-    quality = min(95, 52 + compression + touch_pts + eff_pts + compression_pts + boundary_pts)
+    raw_quality = 52 + compression + touch_pts + eff_pts + compression_pts + boundary_pts
+    quality = min(95, raw_quality)
     if quality < int(getattr(cfg, "CONSOLIDATION_MIN_QUALITY", 76)):
         return None
     z = Zone(_zone_id(symbol, tf, low, high), symbol, tf, low, high, quality,
@@ -143,6 +146,7 @@ def detect_zone(symbol: str, tf: str, bars: list[Candle]) -> Zone | None:
     z.compression_ratio = compression_ratio
     z.compression_percentile = compression_percentile
     z.boundary_score = boundary_score
+    z.raw_quality = raw_quality
     return z
 
 
@@ -336,7 +340,10 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
         zone.sweep_price = lifecycle["sweep_price"]
         zone.reclaim_dt = lifecycle["reclaim_dt"]
         zone.retest_dt = lifecycle["retest_dt"]
-        zone.quality = min(100, zone.quality + int(getattr(cfg, "CONSOLIDATION_LIQUIDITY_LIFECYCLE_BONUS", 3)))
+        bonus = int(getattr(cfg, "CONSOLIDATION_LIQUIDITY_LIFECYCLE_BONUS", 3))
+        if zone.raw_quality:
+            zone.raw_quality += bonus
+        zone.quality = min(100, zone.quality + bonus)
     else:
         zone.liquidity_lifecycle = "STANDARD_BREAKOUT"
         zone.liquidity_source = ""
@@ -358,7 +365,7 @@ def _price(symbol: str, value: float) -> str:
 
 
 def format_message(zone: Zone) -> str:
-    return "\n".join([
+    message = "\n".join([
         "━━━━━━━━━━━━━━━━━━", "📦 ВЫХОД ИЗ ЗОНЫ КОНСОЛИДАЦИИ", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {zone.symbol}", f"Направление: {zone.breakout_side}",
         f"Таймфрейм зоны: {zone.tf}",
@@ -376,6 +383,7 @@ def format_message(zone: Zone) -> str:
         f"Факт: подтверждённый выход {zone.breakout_side} из ранее зафиксированной зоны консолидации."
     ])
 
+    return quality_observer.register(message, zone.raw_quality or None, zone.quality, "consolidation_zone")
 
 def render_chart(zone: Zone, by_tf: dict) -> io.BytesIO:
     from PIL import Image, ImageDraw, ImageFont

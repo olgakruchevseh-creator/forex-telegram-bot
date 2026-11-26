@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config as cfg
+import stage29c_quality_observer as quality_observer
 import stage27a_event_integrity as stage27a
 import module_evidence_bus
 import ohlc_movement
@@ -41,6 +42,7 @@ class Signal:
     strength_gap: float
     dt: str
     saved_h1: str = ""
+    raw_quality: int = 0  # Этап 29C: OBSERVE_ONLY, до потолка 96.
 
 
 def _state_path() -> Path:
@@ -178,7 +180,8 @@ def analyze_symbol(symbol: str, by_tf: dict, strength: dict[str, float]) -> Sign
         body_pts = min(12, int(max(0, sig.body_ratio - 0.5) * 30))
         align_pts = min(18, len(sig.aligned) * 4)
         strength_pts = min(12, int(max(0.0, gap * wanted) * 40))
-        sig.quality = min(96, 52 + impulse_pts + body_pts + align_pts + strength_pts)
+        sig.raw_quality = 52 + impulse_pts + body_pts + align_pts + strength_pts
+        sig.quality = min(96, sig.raw_quality)
         sig.confidence = min(92, max(70, sig.quality - 4))
         og=ohlc_movement.guard_event(by_tf,sig.side,sig.quality)
         if not og.get('allow',True):
@@ -198,7 +201,7 @@ def _price(symbol: str, value: float) -> str:
 def format_message(s: Signal) -> str:
     module_evidence_bus.publish('DISBALANCE', s)
     meaning = "покупатели создали сильное смещение вверх" if s.side == "LONG" else "продавцы создали сильное смещение вниз"
-    return "\n".join([
+    message = "\n".join([
         "━━━━━━━━━━━━━━━━━━", "⚖️ ДИСБАЛАНС ПОДТВЕРЖДЁН", "━━━━━━━━━━━━━━━━━━", "",
         f"Пара: {s.symbol}", f"Таймфрейм импульса: {s.tf}", f"Направление: {s.side}",
         f"Зона импульса: {_price(s.symbol, s.zone_low)}–{_price(s.symbol, s.zone_high)}",
@@ -209,6 +212,7 @@ def format_message(s: Signal) -> str:
         f"Факт: {meaning}; BOS подтверждён закрытой свечой и младшим таймфреймом."
     ])
 
+    return quality_observer.register(message, s.raw_quality or None, s.quality, "disbalance")
 
 def render_chart(signal: Signal, by_tf: dict) -> io.BytesIO:
     """PNG: импульсная свеча, её зона и подтверждённый BOS."""

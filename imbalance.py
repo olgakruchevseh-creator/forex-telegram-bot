@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import config as cfg
+import stage29c_quality_observer as quality_observer
 import stage27a_event_integrity as stage27a
 import ohlc_movement
 import displacement
@@ -59,6 +60,7 @@ class FvgZone:
     ifvg_side: str = ""
     ifvg_retest_sent: bool = False
     test_count: int = 0
+    raw_quality: int = 0  # Этап 29C: исходный счёт до ограничений, OBSERVE_ONLY.
 
 
 def _path() -> Path:
@@ -156,14 +158,15 @@ def newest_fvg(symbol: str, tf: str, bars: list[Candle]) -> FvgZone | None:
         bars, len(bars)-2, side, av
     )
     structural_bonus = int(getattr(cfg, "IMBALANCE_STRUCTURAL_FVG_BONUS", 7)) if structural_fvg else 0
-    quality = min(96, 48 + size_pts + impulse_pts + body_pts + structural_bonus)
+    raw_quality = 48 + size_pts + impulse_pts + body_pts + structural_bonus
+    quality = min(96, raw_quality)
     return FvgZone(
         _zone_id(symbol, tf, side, c.dt), symbol, tf, side, low, high, c.dt,
         quality, max(70, min(92, quality - 4)), [], 0.0, last_seen_dt=c.dt,
         gap_atr=gap_atr, impulse_atr=impulse_atr,
         fvg_class=("BISI" if side == "LONG" else "SIBI"),
         structural_fvg=structural_fvg, structural_shift=structural_shift,
-        structural_level=structural_level,
+        structural_level=structural_level, raw_quality=raw_quality,
     )
 
 
@@ -194,12 +197,17 @@ def validate_zone(zone: FvgZone, closed_map: dict, strength: dict[str, float]) -
         return False
     zone.aligned = aligned_main + confirms
     zone.strength_gap = gap
-    zone.quality = min(96, zone.quality + min(16, len(zone.aligned) * 3) + min(8, int(max(0.0, gap * wanted) * 30)))
+    bonus = min(16, len(zone.aligned) * 3) + min(8, int(max(0.0, gap * wanted) * 30))
+    if zone.raw_quality:
+        zone.raw_quality += bonus
+    zone.quality = min(96, zone.quality + bonus)
     og = ohlc_movement.combine([(tf, closed_map.get(tf) or []) for tf in ("D1","H4","H1","M15","M5")], wanted)
     if og.get("weak_reversal"): return False
     if og.get("available"):
         delta = 4 if og.get("score",50)>=72 else 2 if og.get("score",50)>=62 else -4 if og.get("score",50)<=35 else -2 if og.get("score",50)<=44 else 0
         if og.get("range_like"): delta=min(delta,-2)
+        if zone.raw_quality:
+            zone.raw_quality += delta
         zone.quality=max(0,min(100,zone.quality+delta))
     zone.confidence = max(70, min(92, zone.quality - 4))
     return zone.quality >= int(getattr(cfg, "IMBALANCE_MIN_QUALITY", 74))
@@ -230,7 +238,7 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
     else:
         title = "🔄 IMBALANCE — РЕТЕСТ ПОДТВЕРЖДЁН"
         fact = "Цена вернулась в FVG; реакция подтверждена через Sweep+Reclaim или Recovery Closure и прошла общие фильтры."
-    return "\n".join([
+    message = "\n".join([
         "━━━━━━━━━━━━━━━━━━", title, "━━━━━━━━━━━━━━━━━━", "", f"Пара: {zone.symbol}",
         f"Таймфрейм: {zone.tf}", f"Направление: {zone.ifvg_side if event == 'ifvg_retest' else zone.side}",
         f"Классификация FVG: {_fvg_class(zone)}" + (" · STRUCTURAL FVG" if zone.structural_fvg else ""),
@@ -243,6 +251,7 @@ def format_message(zone: FvgZone, event: str = "new") -> str:
         score_line(zone.confidence), "", f"Факт: {fact}"
     ])
 
+    return quality_observer.register(message, zone.raw_quality or None, zone.quality, "imbalance")
 
 def render_chart(zone: FvgZone, event: str, by_tf: dict) -> io.BytesIO:
     """PNG: закрытые свечи, FVG-зона и подтверждённый ретест."""
