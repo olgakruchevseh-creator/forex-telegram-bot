@@ -1720,6 +1720,12 @@ STAGE28D_SCENARIO_SCORE_WORDING = True
 # Фактические зоны Levels, сигналы и SQLite-наблюдение НЕ изменяются.
 STAGE28E_ADJACENT_ZONES_DISPLAY_ONLY = True  # False: прежнее отображение.
 
+# Этап 29A — привязка CRT к реальной закрытой свече подтверждения и
+# память фактически доставленного снятия ликвидности, включая заменённые setups.
+STAGE29_CRT_EVENT_TIME_FROM_CONFIRM = True  # False: прежнее время последней H1.
+STAGE29_LIQUIDITY_RECORD_FROM_PENDING = True  # False: прежний commit через setups.
+STAGE29_PENDING_SETUP_ACK_PROTECT = True  # ATS/SMC: не удалять setup до подтверждения доставки.
+
 # Этап 28F: только ручная диагностика на реальных OHLC и проверка W1.
 # НЕТ автоизменения порогов, весов, Master/Killer, W1-свечей или журналов.
 STAGE28F_CALIBRATION_DIAGNOSTICS = True  # False: скрыть ручной расчёт Disbalance.

@@ -300,20 +300,25 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
         if getattr(setup,"setup_id",None) in expired_ids:
             setup.invalid = True
     messages=[item["text"] for item in pending.values() if isinstance(item,dict) and item.get("text")]
+    pending_ids={item.get("setup_id") for item in pending.values() if isinstance(item,dict)}
     for symbol in cfg.PAIRS:
         try:
             by_tf=market.get(symbol) or {}
             d1,h4,h1,m15,m5=(_bars(by_tf,tf) for tf in ("D1","H4","H1","M15","M5"))
             for s in list(setups.values()):
-                if s.symbol!=symbol or s.sent or s.invalid: continue
+                if (s.symbol!=symbol or s.sent or s.invalid
+                        or (getattr(cfg,"STAGE29_PENDING_SETUP_ACK_PROTECT",True) and s.setup_id in pending_ids)):
+                    continue
                 e=_confirm(s,by_tf,d1,h4,h1,m15,m5,strength)
                 if e and not first:
-                    saved_h1=stage27a.closed_h1_iso(by_tf); text=stage27a.stamp(format_message(e), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"setup_id":s.setup_id,"text":text,"saved_h1":saved_h1}; messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
+                    saved_h1=stage27a.closed_h1_iso(by_tf); text=stage27a.stamp(format_message(e), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]; pending[digest]={"setup_id":s.setup_id,"text":text,"saved_h1":saved_h1}; pending_ids.add(s.setup_id); messages.append(text); _LAST_CHART_CARDS[text]=(e,freeze_by_tf(by_tf))
             fresh=_find_setup(symbol,d1,h4,h1,m15)
             if fresh and fresh.setup_id not in setups:
                 # Новый setup заменяет старые незавершённые того же направления.
                 for old in setups.values():
-                    if old.symbol==symbol and old.side==fresh.side and not old.sent: old.invalid=True
+                    if (old.symbol==symbol and old.side==fresh.side and not old.sent
+                            and (not getattr(cfg,"STAGE29_PENDING_SETUP_ACK_PROTECT",True)
+                                 or old.setup_id not in pending_ids)): old.invalid=True
                 setups[fresh.setup_id]=fresh
         except Exception:
             log.exception("Smart Money 62-26 %s",symbol)

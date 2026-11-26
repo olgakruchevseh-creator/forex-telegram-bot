@@ -10,6 +10,7 @@ from __future__ import annotations
 from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
 import hashlib, io, json, logging, os
+from datetime import timedelta
 from pathlib import Path
 
 import config as cfg
@@ -22,6 +23,12 @@ import amd_power_of_three
 log = logging.getLogger("fxbot.crt")
 TF_MINUTES = {"H4": 240, "H1": 60, "M15": 15}
 _PENDING_CARDS: dict[str, tuple[dict, dict]] = {}
+
+
+def _confirm_close_utc(event: dict) -> str:
+    """Real close of the H1 confirmation candle (not the latest H1)."""
+    opened = stage27a._parse(event.get("confirm_dt"))
+    return (opened + timedelta(hours=1)).isoformat() if opened else ""
 
 
 def _path() -> Path:
@@ -143,6 +150,7 @@ def detect_crt(symbol: str, h1: list[Candle], h4: list[Candle], m15: list[Candle
             candidates.append({
                 "key": f"{symbol}|{side}|{ref.dt}|{sweep.dt}|{confirm.dt}", "symbol": symbol, "side": side,
                 "ref_dt": ref.dt, "sweep_dt": sweep.dt, "confirm_dt": confirm.dt,
+                "confirm_close_utc": _confirm_close_utc({"confirm_dt": confirm.dt}),
                 "low": ref.low, "high": ref.high, "mid": mid,
                 "sweep_price": sweep.low if side == "LONG" else sweep.high,
                 "confirm_price": confirm.close, "target": ref.high if side == "LONG" else ref.low,
@@ -219,6 +227,15 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
     for digest,item in list(pending.items()):
         e=item.get("event") if isinstance(item,dict) else None
         if not e or e.get("key") in sent: pending.pop(digest,None); continue
+        if getattr(cfg, "STAGE29_CRT_EVENT_TIME_FROM_CONFIRM", True):
+            # Old persisted rows might have been stamped with a later H1.
+            # Fail closed instead of re-delivering a falsely fresh card.
+            true_close = _confirm_close_utc(e)
+            if not true_close or stage27a._parse(item.get("saved_h1")) != stage27a._parse(true_close):
+                pending.pop(digest, None)
+                expired_keys[e["key"]] = true_close
+                log.warning("CRT_LEGACY_EVENT_TIME_RETIRED key=%s", e["key"])
+                continue
         text=stage27a.stamp(format_message(e), item.get("saved_h1", "")); msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(market.get(e["symbol"]) or {}))
     pkeys={v.get("key") for v in pending.values() if isinstance(v,dict)}
     for symbol in cfg.PAIRS:
@@ -229,7 +246,11 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
             og=ohlc_movement.guard_event(by,e.get("side"),e.get("quality"))
             if not og.get("allow",True): continue
             e["quality"]=ohlc_movement.capped_event_quality(og,e["quality"],96); e["confidence"]=min(e.get("confidence",93),max(0,e["quality"]-4))
-            saved_h1=stage27a.closed_h1_iso(by); text=stage27a.stamp(format_message(e), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]
+            saved_h1 = (_confirm_close_utc(e) if getattr(cfg, "STAGE29_CRT_EVENT_TIME_FROM_CONFIRM", True)
+                        else stage27a.closed_h1_iso(by))
+            if not saved_h1:
+                continue  # Cannot prove the source candle closed; fail closed.
+            text=stage27a.stamp(format_message(e), saved_h1); digest=hashlib.sha256(text.encode()).hexdigest()[:20]
             if first: sent[e["key"]]=e["key"]
             else: pending[digest]={"key":e["key"],"event":e,"saved_h1":saved_h1}; msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(by)); pkeys.add(e["key"])
         except Exception: log.exception("CRT %s",symbol)

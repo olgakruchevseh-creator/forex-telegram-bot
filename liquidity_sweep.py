@@ -370,6 +370,32 @@ def _stage28_pool_consumed(setup: SweepSetup, memory: list[dict], h1: list[Candl
     return False
 
 
+def _pending_pool_records(pending: dict, setups: dict) -> list[dict]:
+    """Uncommitted pools protect their queued card until Telegram ACK.
+
+    Historical pending rows have only setup_id: fall back to an extant setup.
+    New rows are self-contained even if the setup is replaced in the meantime.
+    """
+    records = []
+    for item in pending.values():
+        if not isinstance(item, dict):
+            continue
+        rec = item if all(item.get(k) is not None for k in
+                          ("symbol", "side", "level", "sweep_price")) else setups.get(item.get("setup_id"))
+        if rec is None:
+            continue
+        if isinstance(rec, SweepSetup):
+            rec = asdict(rec)
+        if not isinstance(rec, dict):
+            continue
+        if not all(rec.get(k) is not None for k in ("symbol", "side", "level", "sweep_price")):
+            continue
+        records.append({"symbol":rec["symbol"], "side":rec["side"],
+                        "level":rec["level"], "sweep_price":rec["sweep_price"],
+                        "sent_dt":item.get("saved_h1") or rec.get("sweep_dt")})
+    return records
+
+
 def process_market(market: dict, strength: dict[str, float]) -> list[str]:
     state = _load()
     first = not bool(state.get("bootstrapped"))
@@ -398,17 +424,27 @@ def process_market(market: dict, strength: dict[str, float]) -> list[str]:
                     message = stage27a.stamp(format_message(event), saved_h1)
 
                     digest=hashlib.sha256(message.encode()).hexdigest()[:20]
-                    pending[digest]={"setup_id":setup.setup_id,"text":message,"saved_h1":saved_h1}; pending_setups.add(setup.setup_id)
+                    item = {"setup_id":setup.setup_id,"text":message,"saved_h1":saved_h1}
+                    if getattr(cfg, "STAGE29_LIQUIDITY_RECORD_FROM_PENDING", True):
+                        item.update({"symbol":setup.symbol,"side":setup.side,
+                                     "level":setup.level,"sweep_price":setup.sweep_price})
+                    pending[digest]=item; pending_setups.add(setup.setup_id)
                     messages.append(message)
 
                     _LAST_CHART_CARDS[message] = (event, freeze_by_tf(by_tf))
             fresh = detect_new_sweep(symbol, d1, h4, h1, by_tf)
+            protected = (_pending_pool_records(pending, setups)
+                         if getattr(cfg, "STAGE29_LIQUIDITY_RECORD_FROM_PENDING", True) else [])
             if (fresh and fresh.setup_id not in setups
                     and not _stage28_pool_consumed(fresh, consumed, h1)
-                    and not _pool_already_consumed(fresh, consumed, h1)):
-                # Один активный sweep каждого направления на пару.
+                    and not _pool_already_consumed(fresh, consumed, h1)
+                    and not _stage28_pool_consumed(fresh, protected, h1)):
+                # Replace only uncommitted setups WITHOUT a pending delivery.
+                # A distinct, more-extreme level can still create another setup.
                 for old in setups.values():
-                    if old.symbol == symbol and old.side == fresh.side and not old.sent:
+                    if (old.symbol == symbol and old.side == fresh.side and not old.sent
+                            and (not getattr(cfg, "STAGE29_LIQUIDITY_RECORD_FROM_PENDING", True)
+                                 or old.setup_id not in pending_setups)):
                         old.invalid = True
                 setups[fresh.setup_id] = fresh
         except Exception:
@@ -432,14 +468,42 @@ def mark_delivered(text: str) -> bool:
     setups=state.get("setups") or {}; rec=setups.get(item.get("setup_id"))
     if rec:
         rec["sent"] = True
-        if getattr(cfg, "STAGE27C_LIQUIDITY_POOL_CONSUMED_ONCE", True):
-            memory = state.setdefault("consumed_pools", [])
-            record = {"symbol": rec.get("symbol"), "side": rec.get("side"),
-                      "level": rec.get("level"), "sweep_price": rec.get("sweep_price"),
-                      "sent_dt": item.get("saved_h1") or rec.get("sweep_dt")}
-            if record["sent_dt"] and record["level"] is not None:
+    if getattr(cfg, "STAGE27C_LIQUIDITY_POOL_CONSUMED_ONCE", True):
+        from_pending = getattr(cfg, "STAGE29_LIQUIDITY_RECORD_FROM_PENDING", True)
+        source = (item if from_pending and all(item.get(k) is not None for k in
+                  ("symbol", "side", "level", "sweep_price")) else rec)
+        if source:
+            record = {"symbol":source.get("symbol"), "side":source.get("side"),
+                      "level":source.get("level"), "sweep_price":source.get("sweep_price"),
+                      "sent_dt":item.get("saved_h1") or source.get("sweep_dt")}
+            if (record["sent_dt"] and record["level"] is not None
+                    and record["sweep_price"] is not None
+                    and record["symbol"] and record["side"] in ("LONG", "SHORT")):
+                memory = state.setdefault("consumed_pools", [])
                 memory.append(record)
                 state["consumed_pools"] = memory[-500:]
+                if from_pending and getattr(cfg, "STAGE28_LIQUIDITY_REARM_BY_NEW_LEVEL", True):
+                    # Expire other *uncommitted* setups from this exact consumed area.
+                    invalidated_ids = set()
+                    for sid, raw in setups.items():
+                        if not isinstance(raw, dict) or raw.get("sent") or sid == item.get("setup_id"):
+                            continue
+                        try:
+                            candidate = SweepSetup(**raw)
+                        except (TypeError, ValueError):
+                            continue
+                        if _stage28_pool_consumed(candidate, [record], []):
+                            raw["invalid"] = True
+                            invalidated_ids.add(sid)
+                    # Also retire stale queued duplicates that already referenced
+                    # the invalidated setup (e.g. migrated pre-29A state).
+                    for other_digest, other in list((state.get("pending") or {}).items()):
+                        if isinstance(other, dict) and other.get("setup_id") in invalidated_ids:
+                            state["pending"].pop(other_digest, None)
+            else:
+                log.warning("LIQUIDITY_DELIVERY_METADATA_MISSING setup_id=%s", item.get("setup_id"))
+        else:
+            log.warning("LIQUIDITY_DELIVERY_METADATA_MISSING setup_id=%s", item.get("setup_id"))
     _save(state); _LAST_CHART_CARDS.pop(text,None); return True
 
 def render_chart(event: dict, by_tf: dict):

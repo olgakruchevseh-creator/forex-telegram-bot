@@ -156,21 +156,26 @@ def process_market(market,strength):
         if getattr(setup,"id",None) in expired_ids:
             setup.invalid = True
     out=[item['text'] for item in pending.values() if isinstance(item,dict) and item.get('text')]
+    pending_ids={item.get('id') for item in pending.values() if isinstance(item,dict)}
     for symbol in cfg.PAIRS:
       try:
         by_tf=market.get(symbol) or {}; h4,h1,m15,m5=(_bars(by_tf,t) for t in ('H4','H1','M15','M5'))
         for s in list(setups.values()):
-          if s.symbol!=symbol or s.sent or s.invalid:continue
+          if (s.symbol!=symbol or s.sent or s.invalid
+                  or (getattr(cfg,'STAGE29_PENDING_SETUP_ACK_PROTECT',True) and s.id in pending_ids)):
+            continue
           e=_confirm(s,h4,h1,m15,m5,strength,by_tf)
           if e and not first:
             og=ohlc_movement.guard_event(by_tf,e.get('side'),e.get('quality'))
             if not og.get('allow',True): continue
             if 'quality' in og: e['quality']=ohlc_movement.capped_event_quality(og,e['quality'],94); e['confidence']=min(e.get('confidence',90), max(0,e['quality']-3))
-            saved_h1=stage27a.closed_h1_iso(by_tf); msg=stage27a.stamp(_format(e), saved_h1); digest=hashlib.sha256(msg.encode()).hexdigest()[:20]; pending[digest]={'id':s.id,'text':msg,'saved_h1':saved_h1}; out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
+            saved_h1=stage27a.closed_h1_iso(by_tf); msg=stage27a.stamp(_format(e), saved_h1); digest=hashlib.sha256(msg.encode()).hexdigest()[:20]; pending[digest]={'id':s.id,'text':msg,'saved_h1':saved_h1}; pending_ids.add(s.id); out.append(msg); _LAST_CHART_CARDS[msg]=(e,freeze_by_tf(by_tf))
         fresh=_candidate(symbol,h4,h1)
         if fresh and fresh.id not in setups:
           for old in setups.values():
-            if old.symbol==symbol and old.side==fresh.side and not old.sent: old.invalid=True
+            if (old.symbol==symbol and old.side==fresh.side and not old.sent
+                and (not getattr(cfg,'STAGE29_PENDING_SETUP_ACK_PROTECT',True)
+                     or old.id not in pending_ids)): old.invalid=True
           setups[fresh.id]=fresh
       except Exception: log.exception('ATS Reversal Point %s',symbol)
     st['bootstrapped']=True
