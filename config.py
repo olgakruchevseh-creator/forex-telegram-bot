@@ -1766,3 +1766,10 @@ STAGE29E_CONSOLIDATION_QUALITY_CAP95 = True  # Единый потолок 95 д
 STAGE29E_H1_ONLY_PENDING_0 = True  # Только проверенные H1-источники; M15/M5 прежний TTL.
 STAGE29E_STRICT_EVENT_TIME = True  # Без проверяемого времени закрытия не выпускать торговую карточку.
 STAGE29E_QUALITY_JOURNAL_TAIL_BYTES = 4000000  # Читать только хвост активного журнала, без архивов.
+
+
+# Этап 30A — только наблюдение за активной старшей фигурой и пояснение
+# конфликтов в брифинге. Не меняет отбор/доставку сигналов, TR, Master/Killer.
+STAGE30_PATTERN_SENIOR_CONTEXT = True  # False: не вычислять активные старшие фигуры.
+STAGE30_PATTERN_BRIEFING_VERDICT = True  # False: текст брифинга побайтно как до 30A.
+PATTERN_SENIOR_ACTIVE_BARS = {"W1": 2, "D1": 3, "H4": 6, "H1": 8}

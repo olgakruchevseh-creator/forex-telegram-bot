@@ -11,7 +11,7 @@ import hashlib
 import logging
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import config as cfg
 import patterns
@@ -32,6 +32,11 @@ class MTFObservation:
     primary_tf: str
     primary_side: str
     has_conflict: bool
+    # Этап 30A: отдельный, только наблюдательный слой уже активных HTF-фигур.
+    # Старое patterns_by_tf по-прежнему содержит ТОЛЬКО последнее закрытие TF.
+    active_by_tf: dict[str, tuple[patterns.Pattern, ...]] = field(default_factory=dict)
+    session_leader: patterns.Pattern | None = None
+    senior_verdicts: tuple[str, ...] = ()
 
 
 def _closed(tf: str, by_tf: dict):
@@ -102,6 +107,116 @@ def _ltfs(symbol: str, by_tf: dict) -> list[patterns.Pattern]:
     return found
 
 
+
+# Этап 30A: cache хранит только подписи закрытого OHLC и короткие
+# summaries фигур. Никаких массивов свечей / sent / pending / торговых решений.
+_ACTIVE_HTF_CACHE: OrderedDict[str, tuple[bytes, dict[str, tuple[patterns.Pattern, ...]]]] = OrderedDict()
+
+
+def _active_htf(symbol: str, by_tf: dict, current: list[patterns.Pattern]):
+    """Read-only replay: предыдущие подтверждённые H4 нельзя терять на новом H4.
+
+    Сам production detector детектирует фигурy на ПЕРВОМ подтверждающем
+    закрытии. Поэтому один текущий scan_symbol не раскрывает ещё активную
+    H4 от 1–5 свечей назад. Replay использует те же детекторы и OHLC префиксы,
+    не пишет историю, не меняет никакой торговой параметр.
+    """
+    signature = patterns._closed_market_signature(by_tf)
+    cached = _ACTIVE_HTF_CACHE.get(symbol) if signature is not None else None
+    if cached is not None and cached[0] == signature:
+        _ACTIVE_HTF_CACHE.move_to_end(symbol)
+        return {tf: tuple(group) for tf, group in cached[1].items()}
+    found: dict[str, tuple[patterns.Pattern, ...]] = {}
+    for tf in patterns._STAGE30_HTF_ORDER:
+        bars = _closed(tf, by_tf)
+        recent_count = max(1, int(cfg.PATTERN_SENIOR_ACTIVE_BARS.get(tf, 1)))
+        candidates = [q for q in current if q.tf == tf and q.name not in patterns.CANDLE_PATTERN_NAMES]
+        # Never use a younger TF or the open bar as an HTF detector input.
+        for offset in range(1, min(recent_count, len(bars))):
+            prefix = bars[:-offset]
+            if len(prefix) < 30:
+                continue
+            try:
+                # One TF only, the SAME real detector roster as production.
+                # No more than 18 historical prefixes per pair, cached by
+                # the closed-OHLC signature; no disk reads or writes.
+                detected = patterns.scan_symbol(symbol, {tf: prefix})
+                candidates.extend(q for q in detected if q.tf == tf and
+                                  q.name not in patterns.CANDLE_PATTERN_NAMES)
+            except Exception:
+                log.exception('PATTERN_SENIOR_REPLAY_FAILED pair=%s tf=%s', symbol, tf)
+        unique: dict[str, patterns.Pattern] = {}
+        for q in candidates:
+            if not patterns.senior_figure_state(q, by_tf).get('active'):
+                continue
+            key = patterns._pattern_key(symbol, q)
+            if key not in unique or (q.quality, q.confidence) > (unique[key].quality, unique[key].confidence):
+                unique[key] = q
+        # Newest confirmation first, then confidence. Independent shapes
+        # remain distinct; shared-geometry alternatives collapse via key.
+        selected = sorted(unique.values(), key=lambda q: (
+            -patterns._parse_utc(q.dt).timestamp() if patterns._parse_utc(q.dt) else 0,
+            -q.quality, -q.confidence, q.name))
+        found[tf] = tuple(selected[:5])
+    if signature is not None:
+        _ACTIVE_HTF_CACHE[symbol] = (signature, found)
+        _ACTIVE_HTF_CACHE.move_to_end(symbol)
+        size = max(1, min(16, int(getattr(cfg, 'PATTERN_ANALYSIS_CACHE_MAX_SYMBOLS', 8))))
+        while len(_ACTIVE_HTF_CACHE) > size:
+            _ACTIVE_HTF_CACHE.popitem(last=False)
+    return found
+
+
+def _price(symbol: str, value: float) -> str:
+    return f'{value:.3f}' if 'JPY' in symbol else f'{value:.5f}'
+
+
+def _session_leader(grouped: dict, active_by_tf: dict):
+    # Stage30A: H4 leads INTRADAY, D1 context then H1. W1 is background only.
+    for tf in ('H4', 'D1', 'H1'):
+        active = active_by_tf.get(tf) or ()
+        if active:
+            return active[0]
+        latest = grouped.get(tf) or ()
+        if latest:
+            return latest[0]
+    return None
+
+
+def _senior_verdicts(symbol: str, grouped: dict, active_by_tf: dict, by_tf: dict):
+    visible = []
+    for tf in ('H4', 'H1', 'D1'):
+        # Historical active H1 can be relevant even when its confirmation was
+        # one or two closed hours earlier, but never a stale/outdated pattern.
+        figs = active_by_tf.get(tf) or ()
+        if not figs:
+            figs = grouped.get(tf) or ()
+        for p in figs:
+            if p.name in patterns.CANDLE_PATTERN_NAMES:
+                continue
+            senior_pool = [q for higher in ('W1', 'D1', 'H4')
+                           for q in (active_by_tf.get(higher) or ())]
+            relation = patterns.senior_figure_context(symbol, p, senior_pool, by_tf)
+            kind = relation['relation']
+            if kind not in ('pullback', 'possible_break'):
+                continue
+            senior = relation['senior']
+            senior_text = f"{senior['tf']} {_ru_side(senior['side'])} {senior['name']}"
+            if kind == 'pullback':
+                outcome = (f"Вывод: {p.tf} {_ru_side(p.side)} {p.name} — откат внутри "
+                           f"{senior_text}, предел {_price(symbol, relation['cap'])}")
+            else:
+                outcome = (f"Вывод: {p.tf} {_ru_side(p.side)} {p.name} — возможный слом "
+                           f"{senior_text}: цель {_price(symbol, relation['junior_target'])} "
+                           f"за отменой {_price(symbol, relation['invalidation'])}, "
+                           f"ждать закрытия {senior['tf']}")
+            if outcome not in visible:
+                visible.append(outcome)
+            if len(visible) >= 2:
+                return tuple(visible)
+    return tuple(visible)
+
+
 def observe(symbol: str, by_tf: dict) -> MTFObservation:
     """All latest-close confirmed patterns, grouped by independent TF.
 
@@ -121,10 +236,27 @@ def observe(symbol: str, by_tf: dict) -> MTFObservation:
         grouped[tf] = tuple(_latest_only(tf, bars, matches))
     main = next(((tf, grouped[tf][0].side) for tf in ORDER[:4] if grouped[tf]), ("", ""))
     sides = {p.side for group in grouped.values() for p in group}
+    active_htf = {}
+    leader = None
+    verdicts = ()
+    if getattr(cfg, 'STAGE30_PATTERN_SENIOR_CONTEXT', True):
+        try:
+            active_htf = _active_htf(symbol, by_tf, htf_candidates)
+            leader = _session_leader(grouped, active_htf)
+            verdicts = _senior_verdicts(symbol, grouped, active_htf, by_tf)
+            log.info('PATTERN_SENIOR_ACTIVE_VIEW pair=%s active=%s lead=%s verdicts=%d',
+                     symbol, ','.join(f'{tf}:{len(active_htf.get(tf, ()))}'
+                                      for tf in patterns._STAGE30_HTF_ORDER),
+                     leader.tf if leader else '-', len(verdicts))
+        except Exception:
+            # Presentation is optional; never break a whole session briefing.
+            log.exception('PATTERN_SENIOR_VIEW_FAILED pair=%s', symbol)
+            active_htf, leader, verdicts = {}, None, ()
     log.info("PATTERNS_MTF_VIEW pair=%s counts=%s duration_ms=%d cache_pairs=%d",
              symbol, ",".join(f"{tf}:{len(grouped[tf])}" for tf in ORDER),
              int((time.monotonic() - started) * 1000), len(_LTF_CACHE))
-    return MTFObservation(symbol, grouped, main[0], main[1], len(sides) > 1)
+    return MTFObservation(symbol, grouped, main[0], main[1], len(sides) > 1,
+                          active_htf, leader, verdicts)
 
 
 def _ru_side(side: str) -> str:
@@ -152,6 +284,25 @@ def format_observation(observation: MTFObservation, *, max_per_tf: int | None = 
             lines.append(f"Старшая обнаруженная фигура: {observation.primary_tf} {side} (не торговое направление)")
         if observation.has_conflict:
             lines.append("Есть конфликт направлений между фигурами; подтверждение HTF по M5 не установлено")
+    if (getattr(cfg, 'STAGE30_PATTERN_SENIOR_CONTEXT', True) and
+            getattr(cfg, 'STAGE30_PATTERN_BRIEFING_VERDICT', True)):
+        leader = observation.session_leader
+        if leader is not None:
+            # D1 is comparison context only, never substitutes H4 session lead.
+            d1 = observation.active_by_tf.get('D1') or observation.patterns_by_tf.get('D1') or ()
+            comparison = ('H4 фигуры нет' if leader.tf == 'D1' else
+                          'на D1 фигуры нет' if not d1 else
+                          'D1 совпадает' if d1[0].side == leader.side else 'D1 против')
+            lines.append(f'Ведущая фигура сессии: {leader.tf} {_ru_side(leader.side)} '
+                         f'{leader.name} · {comparison} · НЕ торговое направление')
+            # Distinguish active-but-older H4 from latest-close observation;
+            # do NOT insert an old pattern into the latest-close TF list.
+            latest_group = observation.patterns_by_tf.get(leader.tf) or ()
+            if not any((q.name, q.side, q.dt) == (leader.name, leader.side, leader.dt)
+                       for q in latest_group):
+                lines.append(f'Контекст: {leader.tf} — активная ранее подтверждённая фигура, '
+                             'не новая фигура текущего закрытия')
+        lines.extend(observation.senior_verdicts[:2])
     return "\n".join(lines)
 
 

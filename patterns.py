@@ -1343,6 +1343,123 @@ def _pattern_origin(pattern: Pattern, bars: list[Candle]) -> float:
             else max(float(b.high) for b in recent))
 
 
+
+# Этап 30A — только наблюдение. Это НЕ торговый фильтр и НЕ замена
+# _residual_potential: последняя функция управляет запретом позднего входа.
+_STAGE30_HTF_ORDER = ("W1", "D1", "H4", "H1")
+
+
+def senior_figure_state(pattern: Pattern, by_tf: dict) -> dict:
+    """Read-only: активность уже подтверждённой структурной фигуры.
+
+    В отличие от _residual_potential, возвращает измеренную цель даже для
+    первой подтверждающей свечи (у неё нет ключа `remaining`). Только закрытые
+    свечи своего TF: ни текущая незакрытая H4, ни M15/M5 здесь не участвуют.
+    """
+    tf = pattern.tf
+    if (tf not in _STAGE30_HTF_ORDER or pattern.name in CANDLE_PATTERN_NAMES
+            or pattern.side not in ("LONG", "SHORT")):
+        return {"active": False, "reason": "unsupported_pattern"}
+    bars = closed_candles(by_tf.get(tf) or [], TF_MINUTES[tf])
+    if not bars or not _validated_ohlc(bars):
+        return {"active": False, "reason": "missing_closed_data"}
+    idx = next((i for i, bar in enumerate(bars) if str(bar.dt) == str(pattern.dt)), None)
+    if idx is None:
+        return {"active": False, "reason": "confirmation_not_found"}
+    try:
+        max_bars = max(1, int(cfg.PATTERN_SENIOR_ACTIVE_BARS.get(tf, 1)))
+    except (TypeError, ValueError, AttributeError):
+        max_bars = 1
+    if len(bars) - 1 - idx >= max_bars:
+        return {"active": False, "reason": "expired_confirmation"}
+    av = atr(bars[:idx + 1], 14) or _range(bars[idx])
+    if not math.isfinite(av) or av <= 0:
+        return {"active": False, "reason": "invalid_atr"}
+    level = float(pattern.level)
+    if not math.isfinite(level) or level <= 0:
+        return {"active": False, "reason": "invalid_trigger"}
+    origin = float(_pattern_origin(pattern, bars[:idx + 1]))
+    direction = 1 if pattern.side == "LONG" else -1
+    if not math.isfinite(origin) or (level - origin) * direction <= 0:
+        # The original geometry cannot be recovered reliably: conservative
+        # ATR fallback from the same confirming TF, never from current H1.
+        origin = level - direction * av
+    measured = max(abs(level - origin), av * .45)
+    target = level + direction * measured
+    later = bars[idx + 1:]
+    if any((float(bar.close) - origin) * direction < 0 for bar in later):
+        return {"active": False, "reason": "invalidation_closed"}
+    # A touched measured target already completes the senior figure. Use
+    # closed candle OHLC including the confirming bar, not only last close.
+    if any((float(bar.high if direction > 0 else bar.low) - target) * direction >= 0
+           for bar in bars[idx:]):
+        return {"active": False, "reason": "target_reached"}
+    return {"active": True, "reason": "active", "invalidation": origin,
+            "target": target, "atr": av, "level": level,
+            "confirmation_index": idx, "age_bars": len(bars) - 1 - idx}
+
+
+def senior_figure_context(symbol: str, p: Pattern, candidates: list[Pattern], by_tf: dict) -> dict:
+    """Этап 30A: направление младшей фигуры относительно АКТИВНОЙ старшей.
+
+    Только W1/D1/H4/H1 и read-only. При отсутствии проверяемой фигуры,
+    H1 или её геометрии возвращаем none, не изобретаем уровень/разворот.
+    """
+    empty = {"relation": "none", "senior": None, "invalidation": None,
+             "cap": None, "junior_target": None}
+    if p.tf not in _STAGE30_HTF_ORDER:
+        return empty
+    junior = senior_figure_state(p, by_tf)
+    if not junior.get("active"):
+        return empty
+    index = _STAGE30_HTF_ORDER.index(p.tf)
+    above = _STAGE30_HTF_ORDER[:index]
+    junior_closed = _pattern_close_dt(p)
+    if junior_closed is None:
+        return empty
+    seniors = []
+    for candidate in candidates:
+        if candidate.tf not in above or candidate.name in CANDLE_PATTERN_NAMES:
+            continue
+        senior_closed = _pattern_close_dt(candidate)
+        # An H1 that predates the H4 confirmation is NOT a pullback of H4.
+        if senior_closed is None or senior_closed > junior_closed:
+            continue
+        state = senior_figure_state(candidate, by_tf)
+        if state.get("active"):
+            seniors.append((candidate, state))
+    if not seniors:
+        return empty
+    # Nearest higher TF first: for H1 choose H4, then D1, then W1.
+    seniors.sort(key=lambda entry: (-_STAGE30_HTF_ORDER.index(entry[0].tf),
+                                     entry[1]["age_bars"], -entry[0].quality,
+                                     -entry[0].confidence, entry[0].name))
+    senior, state = seniors[0]
+    invalidation = float(state["invalidation"])
+    junior_target = float(junior["target"])
+    h1 = closed_candles(by_tf.get("H1") or [], TF_MINUTES["H1"])
+    # A missing/invalid last closed H1 cannot substantiate a break level.
+    if not h1 or not _validated_ohlc(h1[-1:]):
+        cap = invalidation
+    else:
+        h1_close = float(h1[-1].close)
+        senior_dir = 1 if senior.side == "LONG" else -1
+        cap = (float(senior.level)
+               if (h1_close - float(senior.level)) * senior_dir > 0 else invalidation)
+    if senior.side == p.side:
+        relation = "aligned"
+    else:
+        senior_dir = 1 if senior.side == "LONG" else -1
+        relation = ("possible_break" if (junior_target - invalidation) * senior_dir < 0
+                    else "pullback")
+    return {"relation": relation,
+            "senior": {"tf": senior.tf, "name": senior.name,
+                       "side": senior.side, "level": float(senior.level),
+                       "dt": senior.dt},
+            "invalidation": invalidation, "cap": cap,
+            "junior_target": junior_target}
+
+
 def _residual_potential(pattern: Pattern, by_tf: dict) -> dict:
     """Late-entry guard for structural/chart patterns.
 
