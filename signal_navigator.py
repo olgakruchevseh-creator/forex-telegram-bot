@@ -440,7 +440,18 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
     )
     tolerance = av * merge_atr
     min_target_distance = av * float(getattr(cfg, "NAVIGATOR_MIN_TR1_ATR", 0.6))
+    source_targets = _module_targets(symbol, side, by_tf, source_text, anchor, av)
+    explicit_tr1 = None
+    if getattr(cfg, "STAGE29_NAVIGATOR_SOURCE_TR1_WINS", True):
+        explicit_tr1 = next((item for item in source_targets
+                             if str(item.get("tf", "")).startswith("TR1 источника")), None)
+        if explicit_tr1 is not None:
+            targets.append(dict(explicit_tr1))
     for _distance, price, tf in candidates:
+        # An explicit source TR1 is the first route milestone. Senior H4/D1
+        # swings at or before it may provide context but cannot replace it.
+        if explicit_tr1 is not None and (price - float(explicit_tr1["price"])) * direction <= tolerance:
+            continue
         # A structural extremum almost at the entry is part of the reaction
         # zone, not a useful TR1 milestone.  Skip it so Navigator cannot emit
         # an immediate "TR1 reached" card a few ticks after entry.
@@ -458,7 +469,11 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
 
     # Сначала геометрия самого сигнала и его таймфрейма. Общая лестница H4/D1
     # только дополняет её отдельными уровнями. Третья цель не добирается ATR.
-    for item in _module_targets(symbol, side, by_tf, source_text, anchor, av):
+    for item in source_targets:
+        if explicit_tr1 is not None and item is explicit_tr1:
+            continue
+        if explicit_tr1 is not None and (float(item["price"]) - float(explicit_tr1["price"])) * direction <= tolerance:
+            continue
         # Keep explicit source TR1 unchanged: this is the source's reported
         # target, not a Navigator-invented milestone. All other module targets
         # obey the same TR1 minimum distance as senior swing targets.

@@ -1735,3 +1735,12 @@ STAGE28F_CALIBRATION_MAX_ANCHORS = 96  # Ограничение CPU при ру�
 # Этап 28G · только ручные наблюдательные проверки; торговые пороги не меняются.
 STAGE28G_PDH_PDL_TIMEBASE_AUDIT = True
 STAGE28G_STORAGE_GROWTH_AUDIT = True  # создаёт ТОЛЬКО маленький файл снимков, не трогает архивы
+
+
+# Этап 29B — независимый откат, без изменения Master/Killer, H1 или журналов.
+STAGE29_NAVIGATOR_SOURCE_TR1_WINS = True  # Приоритет собственной TR1 над близким свингом H4/D1.
+STAGE29_PDH_AUDIT_SAME_DATE = True  # Только диагностическая D1 той же даты NY-сессии.
+STAGE29_ZIGZAG_INFO_ACK = True  # Подтверждать успешную отправку INFO-карточки ZigZag.
+STAGE29_CALIBRATION_ALL_HOURS = True  # Последовательный replay с сохранением курсора.
+STAGE29_CALIBRATION_BATCH_ANCHORS = 96  # Не более H1-якорей за одну ручную команду.
+STAGE29_CALIBRATION_TIME_BUDGET_SECONDS = 20  # Ограничение обработки Railway.

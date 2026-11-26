@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
 import math
+import config as cfg
 
 import market_hours
 from market_data_coherence import opened_utc
@@ -72,6 +73,20 @@ def inspect_pair(by_tf: dict, *, as_of: datetime | None = None, min_h1: int = 15
         return {'status': 'INSUFFICIENT_COMPLETED_SESSION', 'current_session': str(current_session)}
     prior_day = max(candidates)
     prior = days[prior_day]
+    if getattr(cfg, 'STAGE29_PDH_AUDIT_SAME_DATE', True):
+        matched = [(stamp, row) for stamp, row in d1 if stamp.date() == prior_day]
+        if not matched:
+            # Distinguish a still-forming D1 from a missing vendor record.
+            vendor_due = datetime.combine(prior_day + timedelta(days=1), time.min, tzinfo=timezone.utc)
+            status = ('VENDOR_D1_NOT_CLOSED_YET' if as_of < vendor_due
+                      else 'VENDOR_D1_DATE_MISSING')
+            return {'status': status,
+                    'prior_ny_session': prior_day.isoformat(),
+                    'vendor_latest_date': d1[-1][0].date().isoformat(),
+                    'market_strategy_changed': False}
+        vendor_d1 = matched[-1]
+    else:
+        vendor_d1 = d1[-1]
     # A partial session can have a deceptive high/low. Show it, but do not
     # grade vendor OHLC against an incomplete reconstruction.
     gaps = sum((b[0] - a[0]) != timedelta(hours=1) for a, b in zip(prior, prior[1:]))
@@ -80,9 +95,9 @@ def inspect_pair(by_tf: dict, *, as_of: datetime | None = None, min_h1: int = 15
               'prior_ny_session': prior_day.isoformat(), 'h1_bars': len(prior), 'missing_h1_gaps': gaps,
               'ny_high': max(float(c.high) for _,c in prior),
               'ny_low': min(float(c.low) for _,c in prior),
-              'vendor_d1_stamp_utc': d1[-1][0].isoformat(),
-              'vendor_d1_high': float(d1[-1][1].high),
-              'vendor_d1_low': float(d1[-1][1].low),
+              'vendor_d1_stamp_utc': vendor_d1[0].isoformat(),
+              'vendor_d1_high': float(vendor_d1[1].high),
+              'vendor_d1_low': float(vendor_d1[1].low),
               'vendor_weekend_d1_removed': len(raw_d1) - len(market_hours.drop_weekend_bars(raw_d1,'D1')),
               'market_strategy_changed': False}
     result['max_abs_difference'] = max(abs(result['ny_high'] - result['vendor_d1_high']),
@@ -91,18 +106,20 @@ def inspect_pair(by_tf: dict, *, as_of: datetime | None = None, min_h1: int = 15
 
 
 def format_report(market: dict, *, pairs, as_of: datetime | None = None) -> str:
-    lines = ['PDH/PDL · ПРОВЕРКА ДНЕВНОЙ ГРАНИЦЫ · 28G · OBSERVE_ONLY',
-             'Сравнение только по кэшу: прошедший торговый день NY17:00 / последний закрытый D1 поставщика.',
+    lines = ['PDH/PDL · ПРОВЕРКА ДНЕВНОЙ ГРАНИЦЫ · 29B · OBSERVE_ONLY',
+              'Сравнение по кэшу: торговый день NY17:00 / закрытая D1 ТОЙ ЖЕ календарной даты.', 
              'Разные календари могут давать разные уровни; торговые PDH/PDL НЕ изменены.']
     for pair in pairs:
         r = inspect_pair((market or {}).get(pair) or {}, as_of=as_of)
         if r['status'] in ('OK', 'PARTIAL_H1_SESSION'):
             lines.append(f"{pair}: {r['status']} · NY {r['prior_ny_session']} ({r['h1_bars']} H1, разрывов {r['missing_h1_gaps']}) · "
                          f"NY H/L {r['ny_high']:.5f}/{r['ny_low']:.5f} · "
-                         f"D1 H/L {r['vendor_d1_high']:.5f}/{r['vendor_d1_low']:.5f} · "
+                         f"D1 {r['vendor_d1_stamp_utc'][:10]} H/L {r['vendor_d1_high']:.5f}/{r['vendor_d1_low']:.5f} · "
                          f"|Δ|max {r['max_abs_difference']:.5f} · "
                          f"выходные D1 в исходном кэше {r['vendor_weekend_d1_removed']}")
         else:
-            lines.append(f'{pair}: {r["status"]}; не сравнивать неполную историю')
+            lines.append(f'{pair}: {r["status"]} · NY {r.get("prior_ny_session", "—")} '
+                         f'· последняя закрытая D1 {r.get("vendor_latest_date", "—")}; '
+                         'не сравнивать разные даты или неполную историю')
     lines.append('Никакой автоматической коррекции D1, торговых уровней или истории нет.')
     return '\n'.join(lines)

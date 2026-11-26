@@ -977,16 +977,25 @@ async def cmd_strength_replay(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _run_research_command(update, context, "Replay силы валют", _strength_replay_report)
 
 
-def _disbalance_calibration_report_28f(pair: str | None = None) -> str:
+def _disbalance_calibration_report_28f(pair: str | None = None, *, reset_progress: bool = False) -> str:
     """Read-only historical OHLC replay; no market fetch and no strategy writes."""
     import tempfile
     import disbalance_calibration_28f
     with tempfile.TemporaryDirectory(prefix="fx_disbalance_observe_") as raw:
         tmp = Path(raw)
         _export_archive(tmp, ["H1", "H4", "D1", "M15", "M5"])
+        # Manual progressive replay: cursor is a small JSON under STATE_DIR.
+        # Only the OHLC export is read; historical journals are never written.
+        progressive = bool(getattr(cfg, "STAGE29_CALIBRATION_ALL_HOURS", True))
+        raw_state = os.getenv("STATE_DIR", "").strip()
+        progress = (Path(raw_state) / ("disbalance_replay_29b_" +
+                    ((pair or "ALL").replace("/", "_")) + ".json")) if progressive and raw_state else None
         result = disbalance_calibration_28f.evaluate(
-            tmp, max_anchors=int(getattr(cfg, "STAGE28F_CALIBRATION_MAX_ANCHORS", 96)),
-            pair_filter=pair)
+            tmp, max_anchors=int(getattr(cfg, "STAGE29_CALIBRATION_BATCH_ANCHORS", 96)
+                                  if progress is not None else getattr(cfg, "STAGE28F_CALIBRATION_MAX_ANCHORS", 96)),
+            pair_filter=pair, progress_path=progress, reset_progress=reset_progress)
+        if progressive and progress is None:
+            result.setdefault('notes', []).append('STATE_DIR не задан: нет постоянного курсора; используется ограниченная выборка.')
         manifest_path = tmp / "ohlc_manifest.json"
         if manifest_path.is_file():
             meta = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1001,14 +1010,17 @@ async def cmd_disbalance_calibration(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text("Диагностика Disbalance 28F выключена в config.py.")
         return
     args = list(getattr(context, "args", []) or [])
+    reset = bool(args and args[-1].lower() == "reset")
+    if reset:
+        args.pop()
     code = args[0].upper().replace(" ", "") if args else None
     if code and "/" not in code and len(code) == 6:
         code = code[:3] + "/" + code[3:]
     if len(args) > 1 or (code and code not in cfg.PAIRS):
-        await update.message.reply_text("Формат: /disbalance_calibration [EUR/USD]. Без пары — вся корзина.")
+        await update.message.reply_text("Формат: /disbalance_calibration [EUR/USD] [reset]. Без пары — вся корзина.")
         return
     await _run_research_command(update, context, "Историческая диагностика Disbalance",
-                                lambda: _disbalance_calibration_report_28f(code))
+                                lambda: _disbalance_calibration_report_28f(code, reset_progress=reset))
 
 
 async def cmd_w1_finality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2808,6 +2820,11 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                             log.exception("UNIFIED_INFO_SEND_FAILED source=%s", ruling.source)
                         else:
                             _mark_event_delivered(state, info_id)
+                            if getattr(cfg, "STAGE29_ZIGZAG_INFO_ACK", True) and "↕️ ZIGZAG —" in raw:
+                                try:
+                                    zigzag_scanner.mark_delivered(raw)
+                                except Exception:
+                                    log.exception("ZIGZAG_INFO_ACK_FAILED")
                             if "IMBALANCE — НОВАЯ FVG" in raw:
                                 try:
                                     imbalance.mark_delivered(raw)
@@ -2818,6 +2835,11 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     weekly_rhythm_context.mark_delivered(raw)
                                 except Exception:
                                     log.exception("WEEKLY_RHYTHM_INFO_ACK_FAILED")
+                    elif getattr(cfg, "STAGE29_ZIGZAG_INFO_ACK", True) and "↕️ ZIGZAG —" in raw:
+                        try:
+                            zigzag_scanner.mark_delivered(raw)
+                        except Exception:
+                            log.exception("ZIGZAG_INFO_RECONCILE_FAILED")
                     elif "IMBALANCE — НОВАЯ FVG" in raw:
                         try:
                             imbalance.mark_delivered(raw)
