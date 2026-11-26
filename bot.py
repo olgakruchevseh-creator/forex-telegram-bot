@@ -664,6 +664,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/storage_archive status — статус архивации 27E (без удаления)\n"
         "/diagnostics — часовая диагностика данных и модулей (наблюдение)\n"
         "/module_replay, /strength_replay — исследовательский replay по OHLC-архиву\n"
+        "/disbalance_calibration — проверка Disbalance по реальной сохранённой истории\n"
+        "/w1_finality — сверка финальности W1 (только наблюдение)\n"
         "/h1_backfill ДАТА ДАТА — план дозагрузки H1 в архив"
     )
 
@@ -971,6 +973,55 @@ async def cmd_module_replay(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def cmd_strength_replay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _run_research_command(update, context, "Replay силы валют", _strength_replay_report)
+
+
+def _disbalance_calibration_report_28f(pair: str | None = None) -> str:
+    """Read-only historical OHLC replay; no market fetch and no strategy writes."""
+    import tempfile
+    import disbalance_calibration_28f
+    with tempfile.TemporaryDirectory(prefix="fx_disbalance_observe_") as raw:
+        tmp = Path(raw)
+        _export_archive(tmp, ["H1", "H4", "D1", "M15", "M5"])
+        result = disbalance_calibration_28f.evaluate(
+            tmp, max_anchors=int(getattr(cfg, "STAGE28F_CALIBRATION_MAX_ANCHORS", 96)),
+            pair_filter=pair)
+        manifest_path = tmp / "ohlc_manifest.json"
+        if manifest_path.is_file():
+            meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+            result["archive_sources"] = sorted({source for item in (meta.get("csv") or {}).values()
+                                                 for source in (item.get("sources") or [])})
+    return disbalance_calibration_28f.format_ru(result)
+
+
+async def cmd_disbalance_calibration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only manual read-only retrospective research, never changes parameters."""
+    if not getattr(cfg, "STAGE28F_CALIBRATION_DIAGNOSTICS", True):
+        await update.message.reply_text("Диагностика Disbalance 28F выключена в config.py.")
+        return
+    args = list(getattr(context, "args", []) or [])
+    code = args[0].upper().replace(" ", "") if args else None
+    if code and "/" not in code and len(code) == 6:
+        code = code[:3] + "/" + code[3:]
+    if len(args) > 1 or (code and code not in cfg.PAIRS):
+        await update.message.reply_text("Формат: /disbalance_calibration [EUR/USD]. Без пары — вся корзина.")
+        return
+    await _run_research_command(update, context, "Историческая диагностика Disbalance",
+                                lambda: _disbalance_calibration_report_28f(code))
+
+
+async def cmd_w1_finality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only current W1 timebase diagnostic, never marks candles as closed."""
+    if not getattr(cfg, "STAGE28F_W1_FINALITY_DIAGNOSTICS", True):
+        await update.message.reply_text("Диагностика W1 28F выключена в config.py.")
+        return
+    try:
+        from w1_finality_audit_28f import format_report
+        snapshot = _cached_market_snapshot()
+        report = await asyncio.to_thread(format_report, snapshot, pairs=tuple(cfg.PAIRS))
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception:
+        log.exception("W1_FINALITY_DIAGNOSTICS_FAILED")
+        await update.message.reply_text("W1-диагностика сейчас недоступна. Торговые сигналы не затронуты.")
 
 
 _H1_BACKFILL_LOCK = asyncio.Lock()
@@ -3461,6 +3512,8 @@ def main() -> None:
     app.add_handler(CommandHandler("diagnostics", _owner_handler(cmd_diagnostics)))
     app.add_handler(CommandHandler("module_replay", _owner_handler(cmd_module_replay)))
     app.add_handler(CommandHandler("strength_replay", _owner_handler(cmd_strength_replay)))
+    app.add_handler(CommandHandler("disbalance_calibration", _owner_handler(cmd_disbalance_calibration)))
+    app.add_handler(CommandHandler("w1_finality", _owner_handler(cmd_w1_finality)))
     app.add_handler(CommandHandler("h1_backfill", _owner_handler(cmd_h1_backfill)))
     app.job_queue.run_repeating(scan_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=20)
     app.job_queue.run_repeating(briefing_job, interval=cfg.SCAN_EVERY_MINUTES * 60, first=45)

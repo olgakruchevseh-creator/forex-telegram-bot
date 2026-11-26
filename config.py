@@ -1719,3 +1719,9 @@ STAGE28D_SCENARIO_SCORE_WORDING = True
 # Этап 28E — объединять смежные S/R/Z только в изображении и подписи брифинга.
 # Фактические зоны Levels, сигналы и SQLite-наблюдение НЕ изменяются.
 STAGE28E_ADJACENT_ZONES_DISPLAY_ONLY = True  # False: прежнее отображение.
+
+# Этап 28F: только ручная диагностика на реальных OHLC и проверка W1.
+# НЕТ автоизменения порогов, весов, Master/Killer, W1-свечей или журналов.
+STAGE28F_CALIBRATION_DIAGNOSTICS = True  # False: скрыть ручной расчёт Disbalance.
+STAGE28F_W1_FINALITY_DIAGNOSTICS = True  # False: скрыть W1-сверку.
+STAGE28F_CALIBRATION_MAX_ANCHORS = 96  # Ограничение CPU при ручном replay по архиву.
