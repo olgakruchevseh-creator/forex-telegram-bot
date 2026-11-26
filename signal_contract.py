@@ -85,6 +85,13 @@ def side_of(text: str) -> str:
 def is_information_card(text: str) -> bool:
     upper = (text or "").upper()
     import config as cfg
+    # Этап 29E: do not allow a real CRT with weak R:R to enter Master/Killer
+    # as a trade; its source identity, SL, TR1 and pending ACK stay unchanged.
+    if (getattr(cfg, "STAGE29E_CRT_LOW_RR_INFO", True)
+            and "CRT — CANDLE RANGE THEORY" in upper
+            and any("· КОНТЕКСТ · НЕ ТОРГОВЫЙ СИГНАЛ" in ln
+                    for ln in upper.splitlines()[:4])):
+        return True
     if getattr(cfg, "STAGE28_ZIGZAG_PULLBACK_INFO_ONLY", True):
         import re as _re
         header = "\n".join((text or "").splitlines()[:4]).upper()

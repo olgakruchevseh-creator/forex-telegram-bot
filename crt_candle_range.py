@@ -9,7 +9,7 @@
 from __future__ import annotations
 from score_wording_28d import score_line
 from chart_snapshot import freeze_by_tf
-import hashlib, io, json, logging, os
+import hashlib, io, json, logging, math, os
 from datetime import timedelta
 from pathlib import Path
 
@@ -170,12 +170,16 @@ def format_message(e: dict) -> str:
     risk = abs(float(e['confirm_price']) - float(e['sweep_price']))
     reward = (float(e['target']) - float(e['confirm_price'])) * (1 if e['side'] == 'LONG' else -1)
     rr = reward/risk if risk > 0 else 0.0
+    # Этап 29E: the parent range boundary is the real TR1, not a projected TR2.
+    # Missing/invalid risk or less than 1:1 makes the same card observation only.
+    low_rr = (getattr(cfg, "STAGE29E_CRT_LOW_RR_INFO", True)
+              and (not math.isfinite(rr) or rr < float(getattr(cfg, "CRT_MIN_RR_TO_TR1", 1.0))))
     details = ([f"Отмена / SL: {_p(e['symbol'], e['sweep_price'])}",
                 f"TR1: {_p(e['symbol'], e['target'])}",
                 f"Риск/цель до границы CRT: 1:{rr:.2f}"]
                if getattr(cfg, 'STAGE28_CRT_EXPLICIT_TR1_SL', True) and risk > 0 and reward > 0 else [])
     return "\n".join([
-        "━━━━━━━━━━━━━━━━━━", f"🕯 CRT — CANDLE RANGE THEORY · {e['side']}", "━━━━━━━━━━━━━━━━━━", "",
+        "━━━━━━━━━━━━━━━━━━", f"🕯 CRT — CANDLE RANGE THEORY · {e['side']}" + (" · КОНТЕКСТ · НЕ ТОРГОВЫЙ СИГНАЛ" if low_rr else ""), "━━━━━━━━━━━━━━━━━━", "",
         f"💱 Пара: {e['symbol']}", "📊 Рабочий диапазон: H1", f"Направление: {e['side']} {icon}",
         f"📦 CRT Range: {_p(e['symbol'],e['low'])}–{_p(e['symbol'],e['high'])}",
         f"50% диапазона: {_p(e['symbol'],e['mid'])}", f"🧹 Манипуляция: снят {swept} до {_p(e['symbol'],e['sweep_price'])}",
@@ -183,7 +187,8 @@ def format_message(e: dict) -> str:
         f"Фаза: {e.get('phase','P3_DELIVERY_CONFIRMED')} · возврат внутрь {e.get('close_back',0)*100:.0f}% · sweep {e.get('sweep_depth_range',0)*100:.0f}% диапазона",
         f"🎯 Противоположная граница CRT: {_p(e['symbol'],e['target'])}", *details, f"🔗 Связка AMD: {amd}",
         f"Разница силы валют: {e['gap']:+.2f}", f"Качество: {e['quality']}/100", score_line(e['confidence']), "",
-        "Факт: CRT отправлен только после закрытого sweep, возврата в диапазон и подтверждённого движения через середину диапазона."
+        ("Факт: геометрия CRT подтверждена, но риск/цель до собственной TR1 недостаточен — только наблюдение."
+         if low_rr else "Факт: CRT отправлен только после закрытого sweep, возврата в диапазон и подтверждённого движения через середину диапазона.")
     ])
 
 def render_chart(e: dict, by_tf: dict) -> io.BytesIO:
@@ -236,7 +241,15 @@ def process_market(market: dict, strength: dict[str,float]) -> list[str]:
                 expired_keys[e["key"]] = true_close
                 log.warning("CRT_LEGACY_EVENT_TIME_RETIRED key=%s", e["key"])
                 continue
-        text=stage27a.stamp(format_message(e), item.get("saved_h1", "")); msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(market.get(e["symbol"]) or {}))
+        text=stage27a.stamp(format_message(e), item.get("saved_h1", ""))
+        # Этап 29E: existing undelivered 29A/29D rows used the old CRT text
+        # as hash key.  Migrate ONLY the pending key when our INFO label changes,
+        # so Telegram delivery can still ACK the exact sent card.
+        new_digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+        if new_digest != digest:
+            pending.pop(digest, None)
+            pending[new_digest] = item
+        msgs.append(text); _PENDING_CARDS[text]=(e,freeze_by_tf(market.get(e["symbol"]) or {}))
     pkeys={v.get("key") for v in pending.values() if isinstance(v,dict)}
     for symbol in cfg.PAIRS:
         try:

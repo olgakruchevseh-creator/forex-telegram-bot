@@ -343,7 +343,8 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
         bonus = int(getattr(cfg, "CONSOLIDATION_LIQUIDITY_LIFECYCLE_BONUS", 3))
         if zone.raw_quality:
             zone.raw_quality += bonus
-        zone.quality = min(100, zone.quality + bonus)
+        cap = 95 if getattr(cfg, "STAGE29E_CONSOLIDATION_QUALITY_CAP95", True) else 100
+        zone.quality = min(cap, zone.quality + bonus)
     else:
         zone.liquidity_lifecycle = "STANDARD_BREAKOUT"
         zone.liquidity_source = ""
@@ -352,7 +353,8 @@ def detect_breakout(zone: Zone, by_tf: dict, strength: dict[str, float]) -> bool
         zone.retest_dt = ""
     og = ohlc_movement.guard_event(by_tf, side, zone.quality)
     if not og.get("allow", True): return False
-    zone.quality = ohlc_movement.capped_event_quality(og, zone.quality, 100)
+    cap = 95 if getattr(cfg, "STAGE29E_CONSOLIDATION_QUALITY_CAP95", True) else 100
+    zone.quality = min(cap, ohlc_movement.capped_event_quality(og, zone.quality, cap))
     zone.breakout_sent = True
     zone.breakout_side = side
     zone.breakout_dt = cur.dt

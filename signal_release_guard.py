@@ -155,6 +155,22 @@ def review(text: str, market: dict, peers=(), source_ids=None, *, now=None, cach
     family = SOURCE_FAMILIES.get(source, "")
     pair, side = pair_of(text), side_of(text)
     if is_information_card(text):
+        # Этап 29E: CRT with insufficient R:R is INFO, but a stale H1
+        # confirmation must still be BLOCK (stage 29A anti-late contract).
+        if (source == "crt_candle_range"
+                and getattr(cfg, "STAGE29E_CRT_LOW_RR_INFO", True)):
+            bars_info = closed_candles(((market or {}).get(pair) or {}).get("H1") or [], 60)
+            event_info = event_close_utc(text, source)
+            if bars_info and event_info is not None:
+                try:
+                    opened = datetime.fromisoformat(str(bars_info[-1].dt).replace("Z", "+00:00"))
+                    opened = opened.replace(tzinfo=timezone.utc) if opened.tzinfo is None else opened.astimezone(timezone.utc)
+                    expected_close = opened + timedelta(hours=1)
+                    if abs((expected_close - event_info).total_seconds()) > 120:
+                        return Decision("BLOCK", "event_not_current_h1", pair, side, source, family,
+                                        expected_close.isoformat())
+                except (ValueError, TypeError, OverflowError):
+                    return Decision("BLOCK", "event_timestamp_invalid", pair, side, source, family)
         return Decision("INFO", "analytics_not_order", pair, side, source, family)
     if not pair or side not in ("LONG", "SHORT") or pair not in cfg.PAIRS:
         return Decision("BLOCK", "unrecognized_trade_identity", pair, side, source, family)
@@ -214,7 +230,9 @@ def review(text: str, market: dict, peers=(), source_ids=None, *, now=None, cach
                 _STAGE29_MISSING_TIME_SEEN.add(marker)
                 log.warning("EVENT_TIME_MISSING_OBSERVE source=%s pair=%s h1=%s tf=%s",
                             source, pair, end.isoformat(), tf)
-        if getattr(cfg, "STAGE27A_REQUIRE_EVENT_TIME", False) and family not in ("context",):
+        if (family not in ("context",)
+                and (getattr(cfg, "STAGE29E_STRICT_EVENT_TIME", True)
+                     or getattr(cfg, "STAGE27A_REQUIRE_EVENT_TIME", False))):
             return Decision("BLOCK", "event_timestamp_missing", pair, side, source, family,
                             end.isoformat(), tuple(checks))
         checks.append({"check": "event_confirmation", "status": "PASS", "source_tf": tf,

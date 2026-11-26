@@ -35,7 +35,10 @@ def market(hour_end=None):
 
 
 def levels(side='LONG'):
-    return f'⚡ ПРОБОЙ УРОВНЯ\n💱 Пара: EUR/USD\nНаправление пробоя: {side}\nTR1: 1.40000'
+    return (f'⚡ ПРОБОЙ УРОВНЯ\n💱 Пара: EUR/USD\nНаправление пробоя: {side}\nTR1: 1.40000'
+            + '\n🕐 Время закрытия: '
+            + clock().replace(minute=0).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+            + ' · H1 закрыта')
 
 
 def silver(dt):
@@ -167,7 +170,7 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual('WARN', mtf['status'])
 
     def test_invalidation_already_breached_is_blocked(self):
-        text='⚡ ПРОБОЙ УРОВНЯ\nПара: EUR/USD\nНаправление: LONG\nОтмена: 1.50000\nВход: 1.60000'
+        text=(levels() + '\nОтмена: 1.50000\nВход: 1.60000')
         self.assertEqual('stop_already_breached', self.check(text).reason)
 
     def test_silver_event_chart_survives_restart(self):

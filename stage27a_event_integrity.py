@@ -67,6 +67,10 @@ def prune(pending: dict, market: dict, module: str, expired: list | None = None)
         return 0
     removed = 0
     limit = max(0, int(getattr(cfg, 'MODULE_PENDING_MAX_H1', 2)))
+    # Этап 29E: fail-closed after the next H1 for known H1-only event sources.
+    # All mixed M5/M15 scanners retain their original pending window.
+    strict_h1_sources = {'crt_candle_range', 'liquidity_sweep', 'daily_high_low',
+                         'disbalance', 'consolidation_zone'}
     for key, item in list(pending.items()):
         try:
             if not isinstance(item, dict):
@@ -90,12 +94,24 @@ def prune(pending: dict, market: dict, module: str, expired: list | None = None)
             ends = _h1_ends((market or {}).get(symbol) or {})
             if not ends:
                 continue  # no trustworthy clock: release gate remains closed
+            # Only complete native H1 pending records may expire at the very
+            # next close. Legacy/incomplete entries keep their old TTL; the
+            # release guard still refuses stale H1 events on delivery.
+            identity_ok = {
+                'crt_candle_range': bool(ev.get('key')),
+                'liquidity_sweep': bool(item.get('setup_id') and item.get('text')),
+                'daily_high_low': bool(item.get('event_id') and item.get('text')),
+                'disbalance': bool(item.get('dt') and item.get('tf')),
+                'consolidation_zone': bool(item.get('event_id') and zone),
+            }.get(module, False)
+            item_limit = (0 if getattr(cfg, 'STAGE29E_H1_ONLY_PENDING_0', True)
+                          and module in strict_h1_sources and identity_ok else limit)
             # Close timestamps after the creation close; expiry after >N H1.
             passed = sum(saved < end <= ends[-1] for end in ends)
             # Stage 29C: observe stale rows while preserving the two-H1 TTL.
             # Reducing TTL globally to 0 would incorrectly discard some M15/M5
             # setups that are waiting for the next H1 release.
-            if (passed > 0 and passed <= limit
+            if (passed > 0 and passed <= item_limit
                     and getattr(cfg, 'STAGE29_PENDING_STALE_H1_OBSERVE', True)):
                 marker = (module, str(key), str(saved))
                 if marker not in _STAGE29_STALE_SEEN:
@@ -104,7 +120,7 @@ def prune(pending: dict, market: dict, module: str, expired: list | None = None)
                     _STAGE29_STALE_SEEN.add(marker)
                     log.info('MODULE_PENDING_STALE_OBSERVE module=%s key=%s h1_elapsed=%s',
                              module, key, passed)
-            if passed > limit:
+            if passed > item_limit:
                 pending.pop(key, None)
                 if expired is not None:
                     expired.append(item)

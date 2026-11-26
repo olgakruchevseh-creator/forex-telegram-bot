@@ -665,6 +665,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/diagnostics — часовая диагностика данных и модулей (наблюдение)\n"
         "/module_replay, /strength_replay — исследовательский replay по OHLC-архиву\n"
         "/disbalance_calibration — проверка Disbalance по реальной сохранённой истории\n"
+        "/quality_calibration — распределение качества на реальных журналах (29E)\n"
         "/w1_finality — сверка финальности W1 (только наблюдение)\n"
         "/pdh_pdl_audit — проверка предыдущего торгового дня по NY17 и D1\n"
         "/storage_growth — динамика размера журналов между ручными проверками\n"
@@ -1021,6 +1022,17 @@ async def cmd_disbalance_calibration(update: Update, context: ContextTypes.DEFAU
         return
     await _run_research_command(update, context, "Историческая диагностика Disbalance",
                                 lambda: _disbalance_calibration_report_28f(code, reset_progress=reset))
+
+
+async def cmd_quality_calibration_29e(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only OBSERVE_ONLY. Small bounded read of current decision journal."""
+    try:
+        import quality_calibration_29e
+        report = await asyncio.to_thread(quality_calibration_29e.current_report)
+        await _send_parts(context.application, int(update.effective_chat.id), report)
+    except Exception:
+        log.exception("QUALITY_CALIBRATION_29E_FAILED")
+        await update.message.reply_text("Диагностика качества недоступна; торговля не затронута.")
 
 
 async def cmd_w1_finality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2904,6 +2916,12 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     weekly_rhythm_context.mark_delivered(raw)
                                 except Exception:
                                     log.exception("WEEKLY_RHYTHM_INFO_ACK_FAILED")
+                            if (getattr(cfg, "STAGE29E_CRT_INFO_ACK", True)
+                                    and "CRT — CANDLE RANGE THEORY" in raw):
+                                try:
+                                    crt_candle_range.mark_delivered(raw)
+                                except Exception:
+                                    log.exception("CRT_INFO_ACK_FAILED")
                     elif getattr(cfg, "STAGE29_ZIGZAG_INFO_ACK", True) and "↕️ ZIGZAG —" in raw:
                         try:
                             zigzag_scanner.mark_delivered(raw)
@@ -2920,6 +2938,12 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                             weekly_rhythm_context.mark_delivered(raw)
                         except Exception:
                             log.exception("WEEKLY_RHYTHM_INFO_RECONCILE_FAILED")
+                    elif (getattr(cfg, "STAGE29E_CRT_INFO_ACK", True)
+                          and "CRT — CANDLE RANGE THEORY" in raw):
+                        try:
+                            crt_candle_range.mark_delivered(raw)
+                        except Exception:
+                            log.exception("CRT_INFO_RECONCILE_FAILED")
                 continue
             if ruling.status != "ALLOW":
                 if ruling.reason == "h1_not_fresh":
@@ -3642,6 +3666,7 @@ def main() -> None:
     app.add_handler(CommandHandler("module_replay", _owner_handler(cmd_module_replay)))
     app.add_handler(CommandHandler("strength_replay", _owner_handler(cmd_strength_replay)))
     app.add_handler(CommandHandler("disbalance_calibration", _owner_handler(cmd_disbalance_calibration)))
+    app.add_handler(CommandHandler("quality_calibration", _owner_handler(cmd_quality_calibration_29e)))
     app.add_handler(CommandHandler("w1_finality", _owner_handler(cmd_w1_finality)))
     app.add_handler(CommandHandler("pdh_pdl_audit", _owner_handler(cmd_pdh_pdl_audit)))
     app.add_handler(CommandHandler("storage_growth", _owner_handler(cmd_storage_growth)))

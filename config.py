@@ -1756,3 +1756,13 @@ STAGE29_PENDING_STALE_H1_OBSERVE = True  # Наблюдаем старые pendi
 # Этап 29D: устойчивость картинок паттернов в брифинге (только представление).
 STAGE29D_BRIEFING_OHLC_FALLBACK = True  # Не выдумывать фигуру: обзор реальных закрытых OHLC.
 STAGE29D_BRIEFING_IMAGE_DIAGNOSTICS = True  # Последний исход картинки в /pattern_image_status.
+
+
+# Этап 29E: закрытие замечаний B1/B2/C3/C4. Все изменения обратимы.
+STAGE29E_CRT_LOW_RR_INFO = True  # R:R до собственной TR1 <1 => аналитика, не торговый сигнал.
+CRT_MIN_RR_TO_TR1 = 1.0  # До исходной границы CRT, без замены TR1/SL.
+STAGE29E_CRT_INFO_ACK = True  # Подтверждать pending только после успешной отправки INFO.
+STAGE29E_CONSOLIDATION_QUALITY_CAP95 = True  # Единый потолок 95 до/после lifecycle.
+STAGE29E_H1_ONLY_PENDING_0 = True  # Только проверенные H1-источники; M15/M5 прежний TTL.
+STAGE29E_STRICT_EVENT_TIME = True  # Без проверяемого времени закрытия не выпускать торговую карточку.
+STAGE29E_QUALITY_JOURNAL_TAIL_BYTES = 4000000  # Читать только хвост активного журнала, без архивов.
