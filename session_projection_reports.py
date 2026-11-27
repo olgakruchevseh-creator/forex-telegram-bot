@@ -494,7 +494,12 @@ def _levels_lines(symbol: str, info: dict | None) -> list[str]:
                 for z in supports + resistances + current:
                     if (min(o_high, float(z["high"])) >=
                             max(o_low, float(z["low"]))):
-                        z["status"] = str(z.get("status") or "НЕ ПРОВЕРЕНА") + " · роль под вопросом"
+                        status = str(z.get("status") or "НЕ ПРОВЕРЕНА")
+                        # Stage30A-fix B2: two overlapping observations must
+                        # not print the same suffix twice.
+                        if "роль под вопросом" not in status:
+                            status += " · роль под вопросом"
+                        z["status"] = status
                         overlapping = True
             except (TypeError, ValueError, KeyError):
                 pass
@@ -557,15 +562,29 @@ def combined_pair_caption(bundle: dict, limit: int = 1000) -> str:
     # Telegram scan block: exactly one item per line.  Direction circles are
     # intentionally restricted to these three engine rows.
     lines = [f"Пара: {symbol}"]
-    if eside:
-        lines.append(f"Эхо: {_side_badge(eside)} · доля похожих путей {er.get('raw_confidence', er.get('direction_probability', '—'))}%")
+    share = er.get('raw_confidence', er.get('direction_probability', '—'))
+    weak_echo = False
+    if eside and getattr(cfg, "STAGE30A_ECHO_BADGE_THRESHOLD", True):
+        # Stage30A-fix B6: 50–61 % of similar paths is not a direction.
+        try:
+            weak_echo = float(share) < 100.0 * float(getattr(cfg, "ECHO_MIN_CONFIDENCE", 0.62))
+        except (TypeError, ValueError):
+            weak_echo = False
+    if eside and weak_echo:
+        lines.append(f"Эхо: {_side_badge(None)} · нет перевеса · доля похожих путей {share}%")
+    elif eside:
+        lines.append(f"Эхо: {_side_badge(eside)} · доля похожих путей {share}%")
     else:
         lines.append(f"Эхо: {_side_badge(None)}")
+    if weak_echo:
+        eside = None  # a weak Echo does not form a «Связка» with Pivot
 
     if pr and pside:
         decimals = 3 if "JPY" in symbol else 5
         kind = "ВЕРШИНЫ" if pr.get("kind") == "high" else "ОСНОВАНИЯ"
         lines.append(f"Next Pivot: {_side_badge(pside)} · {kind} {pr.get('zone_low', 0):.{decimals}f}–{pr.get('zone_high', 0):.{decimals}f}")
+    elif pr and pr.get("zone_passed"):
+        lines.append(f"Next Pivot: {_side_badge(None)} · расчётная зона уже пройдена ценой · без направления")
     else:
         lines.append(f"Next Pivot: {_side_badge(None)} · надёжная следующая зона пока не рассчитана")
 
@@ -857,6 +876,25 @@ def render_unified_scenario_chart(bundle: dict, by_tf: dict) -> io.BytesIO:
     draw.text((left,758),"Зоны S/R из закрытых свечей · без гарантии отскока или пробоя · не сигнал",fill="#9aa4b5",font=small)
     out=io.BytesIO(); out.name=f"echo_pivot_zigzag_{symbol.replace('/','')}.png"; image.save(out,format="PNG",optimize=True); out.seek(0); return out
 
+def _one_level_map(symbol: str, fresh: dict | None) -> dict:
+    """Stage30A-fix B1: reuse the board's level map for the same closed H1.
+
+    The board snapshot and this block used to be recomputed at different
+    moments (scanner lifecycle may change in between), so one message could
+    show two different S1/R1/Z1 sets for the same pair. Display only.
+    """
+    fresh = fresh or {}
+    if not getattr(cfg, "STAGE30A_ONE_LEVEL_MAP", True):
+        return fresh
+    board = (getattr(briefing, "_LEVELS_BRIEF_CACHE", {}) or {}).get(symbol) or {}
+    if board and fresh and str(board.get("as_of_h1")) == str(fresh.get("as_of_h1")):
+        return board
+    if board and fresh:
+        log.info("SESSION_LEVELS_RECOMPUTED pair=%s board_h1=%s fresh_h1=%s",
+                 symbol, board.get("as_of_h1"), fresh.get("as_of_h1"))
+    return fresh
+
+
 def pending_report_bundles(
     market: dict, events: list[newsmod.NewsEvent], state: dict,
     *, force_symbols: set[str] | None = None, revision_id: str = "",
@@ -903,6 +941,8 @@ def pending_report_bundles(
             side = brief.side or briefing.technical_pair_side(brief)
             if side:
                 session_sides[brief.symbol] = side
+            if getattr(cfg, "STAGE30A_ONE_LEVEL_MAP", True):
+                session_levels[brief.symbol] = brief.levels_brief or {}
     except Exception:
         log.exception("SESSION_THESIS_CONTEXT_FAILED; Echo/Pivot без сверки с брифингом")
 
@@ -928,7 +968,8 @@ def pending_report_bundles(
             zz = zigzag_scanner.analyze_symbol(symbol, by_tf)
             character = pair_character_matrix.attach_interaction(pair_character_matrix.analyze(symbol, by_tf, strength), by_tf=by_tf)
             try:
-                levels_brief = session_levels.get(symbol) or levels.briefing_levels_snapshot(symbol, by_tf, max_each=2)
+                levels_brief = _one_level_map(symbol, session_levels.get(symbol) or
+                                              levels.briefing_levels_snapshot(symbol, by_tf, max_each=2))
             except Exception:
                 log.exception("SESSION_LEVELS_BRIEF_FAILED symbol=%s", symbol)
                 levels_brief = {}

@@ -196,8 +196,9 @@ def test_opposite_fresh_pattern_is_flagged_on_the_card(scanner):
     cands = [patterns.Pattern("BOS вверх", "LONG", "H1", 90, 86, "f", 1.0, ago(62)),
              patterns.Pattern("Восходящий клин", "SHORT", "H4", 88, 84, "f", 1.01, ago(245))]
     first = scanner(cands)
-    assert card_name(first[0]) == "BOS вверх"
-    assert "Конфликт направлений" in first[0] and "Восходящий клин" in first[0]
+    # Этап 30B П4: при равной роли старший TF (H4 88) выходит раньше H1 90.
+    assert card_name(first[0]) == "Восходящий клин"
+    assert "Конфликт направлений" in first[0] and "BOS вверх" in first[0]
 
 
 # ---------------------------------------------- A7: bot.py classification

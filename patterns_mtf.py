@@ -171,13 +171,21 @@ def _price(symbol: str, value: float) -> str:
     return f'{value:.3f}' if 'JPY' in symbol else f'{value:.5f}'
 
 
+def _figures_only(group):
+    """Stage30A-fix A2: candles are filtered separately, never a session figure."""
+    group = tuple(group or ())
+    if not getattr(cfg, 'STAGE30A_LEADER_NO_CANDLES', True):
+        return group
+    return tuple(p for p in group if p.name not in patterns.CANDLE_PATTERN_NAMES)
+
+
 def _session_leader(grouped: dict, active_by_tf: dict):
     # Stage30A: H4 leads INTRADAY, D1 context then H1. W1 is background only.
     for tf in ('H4', 'D1', 'H1'):
-        active = active_by_tf.get(tf) or ()
+        active = _figures_only(active_by_tf.get(tf))
         if active:
             return active[0]
-        latest = grouped.get(tf) or ()
+        latest = _figures_only(grouped.get(tf))
         if latest:
             return latest[0]
     return None
@@ -289,7 +297,8 @@ def format_observation(observation: MTFObservation, *, max_per_tf: int | None = 
         leader = observation.session_leader
         if leader is not None:
             # D1 is comparison context only, never substitutes H4 session lead.
-            d1 = observation.active_by_tf.get('D1') or observation.patterns_by_tf.get('D1') or ()
+            d1 = (_figures_only(observation.active_by_tf.get('D1')) or
+                  _figures_only(observation.patterns_by_tf.get('D1')))
             comparison = ('H4 фигуры нет' if leader.tf == 'D1' else
                           'на D1 фигуры нет' if not d1 else
                           'D1 совпадает' if d1[0].side == leader.side else 'D1 против')

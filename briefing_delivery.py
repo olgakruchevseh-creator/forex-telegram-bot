@@ -6,6 +6,20 @@ The original long analysis remains available through /briefing_full.
 """
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger("fxbot.briefing_delivery")
+_TF_PREFIXES = ("W1:", "D1:", "H4:", "H1:", "M15:", "M5:", "M5 (подтв.):")
+
+
+def _stage30_caption_enabled() -> bool:
+    try:
+        import config as cfg
+        return bool(getattr(cfg, "STAGE30A_CAPTION_VERDICT", True))
+    except Exception:
+        return True
+
+
 CAPTION_LIMIT = 1000  # UTF-16 units; leave margin below Telegram's 1024.
 
 
@@ -49,7 +63,7 @@ def _relevant_lines(pair_text: str) -> list[str]:
         lambda x: x.startswith("Согласие D1/H4/H1:"),
         lambda x: x.startswith("Зигзаг:"),
         lambda x: x.startswith("AMD:"),
-        lambda x: x.startswith("🧠 Основа рынка:"),
+        lambda x: x.startswith("🧠 Основа рынка"),
         lambda x: x.startswith("📅 Недельный") or x.startswith("Недельное"),
         lambda x: x.startswith("📅 Ритм недели:"),
         lambda x: x.startswith("Сила:"),
@@ -111,9 +125,36 @@ def compact_pair_caption(pair_text: str, visual: str = "", *, limit: int = CAPTI
                 compact = line.split(' · разные модели', 1)[0]
                 if _telegram_len('\n'.join(pieces + [compact])) <= limit - 52:
                     pieces.append(compact)
-    for line in chart_selected:
-        if line and line not in pieces and _telegram_len("\n".join(pieces + [line])) <= limit - 80:
-            pieces.append(line)
+    stage30 = _stage30_caption_enabled()
+    if stage30:
+        # Stage30A-fix A1: session leader / context / verdict rows are part of
+        # the pattern block. Fit them by PRIORITY, then print in natural order.
+        verdicts = [line for line in chart_lines if line.startswith("Вывод:")][:2]
+        lead = [line for line in chart_lines if line.startswith("Ведущая фигура сессии:")][:1]
+        context = [line for line in chart_lines if line.startswith("Контекст:")][:1]
+        natural = list(dict.fromkeys(chart_selected + lead + context + verdicts))
+        tf_rows = [line for line in natural if line.startswith(_TF_PREFIXES)]
+        header = [line for line in natural if line.startswith("🧩 ")]
+        notes = [line for line in natural if line.startswith(("Наблюдение:", "Младший TF:"))]
+        senior = [line for line in natural if line.startswith("Старшая обнаруженная фигура:")]
+        rest = [line for line in natural if line not in set(tf_rows + header + notes + senior + lead
+                                                           + context + verdicts)]
+        priority = (notes + header + lead + verdicts[:1] + tf_rows + rest + senior
+                    + verdicts[1:] + context)
+        accepted: set[str] = set()
+        used = list(pieces)
+        for line in priority:
+            if line and line not in used and _telegram_len("\n".join(used + [line])) <= limit - 80:
+                used.append(line)
+                accepted.add(line)
+        for line in lead + context + verdicts:
+            if line not in accepted:
+                log.warning("BRIEFING_CAPTION_STAGE30_DROPPED line=%s", line[:80])
+        pieces.extend(line for line in natural if line in accepted)
+    else:
+        for line in chart_selected:
+            if line and line not in pieces and _telegram_len("\n".join(pieces + [line])) <= limit - 80:
+                pieces.append(line)
     count = 1 if selected else 0
     for line in selected[count:]:
         if line in pieces or line.startswith('⚠️ РАСХОЖДЕНИЕ МЕТОДОВ:'):

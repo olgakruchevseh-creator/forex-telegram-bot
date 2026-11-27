@@ -40,6 +40,21 @@ import weekly_bias_context
 import weekly_rhythm_context
 
 log = logging.getLogger("fxbot.briefing")
+_LEVELS_BRIEF_CACHE: dict[str, dict] = {}  # Stage30A-fix B1, display-only
+_DIVERGENCE_RU = {  # Stage30A-fix B4: no internal codes in Telegram text
+    "MACD_H_REGULAR_BULLISH": "бычья дивергенция MACD-гистограммы",
+    "MACD_H_REGULAR_BEARISH": "медвежья дивергенция MACD-гистограммы",
+    "RSI_REGULAR_BULLISH": "бычья дивергенция RSI",
+    "RSI_REGULAR_BEARISH": "медвежья дивергенция RSI",
+    "RSI_HIDDEN_BULLISH": "скрытая бычья дивергенция RSI",
+    "RSI_HIDDEN_BEARISH": "скрытая медвежья дивергенция RSI",
+}
+
+
+def _divergence_ru(kind) -> str:
+    if not getattr(cfg, "STAGE30A_DIVERGENCE_RU", True):
+        return str(kind)
+    return _DIVERGENCE_RU.get(str(kind or ""), "дивергенция подтверждена")
 LOCAL_TZ = ZoneInfo(getattr(cfg, "LOCAL_TZ_NAME", "Europe/Amsterdam"))
 TD_URL = "https://api.twelvedata.com/time_series"
 
@@ -733,6 +748,10 @@ def build_pair_briefs(
         except Exception:
             log.exception("Levels snapshot для брифинга %s", symbol)
             level_snapshot = {}
+        if level_snapshot and level_snapshot.get("as_of_h1"):
+            # Stage30A-fix B1: one level map per pair and H1 cut-off for the
+            # whole session message (board + Echo/Pivot block). Display only.
+            _LEVELS_BRIEF_CACHE[symbol] = level_snapshot
         brief = PairBrief(
             symbol=symbol,
             stack=stack,
@@ -1075,7 +1094,7 @@ def format_board(briefs: list[PairBrief]) -> list[str]:
             wr = b.weekly_rhythm
             wr_dir = "ЛОНГ" if getattr(wr, "expansion_side", 0) > 0 else ("ШОРТ" if getattr(wr, "expansion_side", 0) < 0 else "НЕЙТРАЛЬНО")
             lines.append(f"📅 Ритм недели: {getattr(wr, 'day_name', '—')} · {getattr(wr, 'phase', '—')} · {wr_dir} · реализация {float(getattr(wr, 'realization', 0) or 0)*100:.0f}%")
-        lines.append(f"🧠 Основа рынка: {market_direction_regime.compact_ru(b.adaptive_direction)}")
+        lines.append(f"🧠 Основа рынка (адаптивная модель): {market_direction_regime.compact_ru(b.adaptive_direction)}")
         zz_icon = "🟢" if b.zigzag_h4_side > 0 else ("🔴" if b.zigzag_h4_side < 0 else "🟡")
         position_icon = _position_direction_icon(b.position)
         amd_text = (b.amd or "").replace(
@@ -1226,11 +1245,19 @@ def format_next_session_bias(briefs: list[PairBrief], market: dict) -> list[str]
             continue
         direction=1 if tech=="LONG" else -1
         directed=b.gap*direction
-        score=52 + min(18,b.agree_n*4) + (7 if directed>0.05 else -7 if directed<-.05 else 0)
+        if getattr(cfg, "STAGE30A_ONE_STRENGTH_GAP", True):
+            # Stage30A-fix B7: the SAME threshold as the leader's
+            # «сила валют против» (_strength_relation), not a second 0.05 one.
+            relation = _strength_relation(b.gap, tech)
+            strength_points = (7 if relation == "поддерживает направление" else
+                               -7 if relation == "против направления" else 0)
+        else:
+            strength_points = (7 if directed>0.05 else -7 if directed<-.05 else 0)
+        score=52 + min(18,b.agree_n*4) + strength_points
         div=divergence_context.analyze_symbol(b.symbol,market,direction)
         score += divergence_context.score_delta(div,direction)*2
         score=max(45,min(82,int(round(score))))
-        note=(f" · {div.kind}" if div and div.confirmed else "")
+        note=(f" · {_divergence_ru(div.kind)}" if div and div.confirmed else "")
         tech_icon = "🟢" if tech == "LONG" else "🔴"
         lines.append(f"{b.symbol}: сценарий {tech_icon} {_ru_display(tech)} · балл прогноза сессии {score}/100 · текущая разница силы {b.gap:+.2f}{note}")
     if len(lines)==3: lines.append("Нет подтверждённого прогнозного направления")

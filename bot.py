@@ -2922,6 +2922,14 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     crt_candle_range.mark_delivered(raw)
                                 except Exception:
                                     log.exception("CRT_INFO_ACK_FAILED")
+                            if (patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in raw
+                                    and "Роль: ВОЗМОЖНЫЙ СЛОМ" in raw):
+                                # Stage30B: an INFO pattern card must leave PENDING
+                                # once delivered (same bug class as 29-C1 ZigZag).
+                                try:
+                                    patterns.mark_card_delivered(raw)
+                                except Exception:
+                                    log.exception("PATTERN_INFO_ACK_FAILED")
                     elif getattr(cfg, "STAGE29_ZIGZAG_INFO_ACK", True) and "↕️ ZIGZAG —" in raw:
                         try:
                             zigzag_scanner.mark_delivered(raw)
@@ -2944,6 +2952,12 @@ async def _scan_job_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                             crt_candle_range.mark_delivered(raw)
                         except Exception:
                             log.exception("CRT_INFO_RECONCILE_FAILED")
+                    elif (patterns is not None and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in raw
+                          and "Роль: ВОЗМОЖНЫЙ СЛОМ" in raw):
+                        try:
+                            patterns.mark_card_delivered(raw)
+                        except Exception:
+                            log.exception("PATTERN_INFO_RECONCILE_FAILED")
                 continue
             if ruling.status != "ALLOW":
                 if ruling.reason == "h1_not_fresh":

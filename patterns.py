@@ -1460,6 +1460,70 @@ def senior_figure_context(symbol: str, p: Pattern, candidates: list[Pattern], by
             "junior_target": junior_target}
 
 
+# Этап 30B (Claude, 27.11.2026) — торговая интеграция старшей фигуры.
+# П2: роль младшей фигуры в карточке; П4: порядок выбора одной фигуры на пару.
+_STAGE30B_ROLE_RANK = {"aligned": 0, "none": 0, "pullback": 1, "possible_break": 2}
+_STAGE30B_TF_RANK = {"W1": 0, "D1": 1, "H4": 2, "H1": 3, "M15": 4, "M5": 5}
+
+
+def _stage30b_price(symbol: str, value: float) -> str:
+    return f"{float(value):.3f}" if "JPY" in symbol else f"{float(value):.5f}"
+
+
+def stage30b_senior_pool(symbol: str, by_tf: dict, candidates: list[Pattern]) -> list[Pattern]:
+    """Same-scan structural figures + replayed still-active W1/D1/H4/H1.
+
+    The production detector sees a figure only on its first confirming close,
+    so an H4 confirmed 1–5 bars ago is NOT in `candidates`. The replay is the
+    same read-only one the briefing uses (cached by closed-OHLC signature).
+    """
+    pool = [q for q in candidates if q.name not in CANDLE_PATTERN_NAMES]
+    try:
+        import patterns_mtf
+        active = patterns_mtf._active_htf(symbol, by_tf, candidates)
+        for group in active.values():
+            pool.extend(group)
+    except Exception:
+        log.exception("PATTERN_SENIOR_POOL_FAILED pair=%s", symbol)
+    unique: dict[str, Pattern] = {}
+    for q in pool:
+        unique.setdefault(_pattern_key(symbol, q), q)
+    return list(unique.values())
+
+
+def stage30b_card_role(symbol: str, p: Pattern, pool: list[Pattern], by_tf: dict) -> tuple[str, list[str], dict]:
+    """П2: (relation, card lines, raw context). Candles have no role."""
+    if p.name in CANDLE_PATTERN_NAMES:
+        return "none", [], {}
+    relation = senior_figure_context(symbol, p, pool, by_tf)
+    kind = relation.get("relation") or "none"
+    senior = relation.get("senior")
+    if kind == "none" or not senior:
+        return "none", [], relation
+    head = f"Старшая фигура: {senior['tf']} {senior['name']} {senior['side']}"
+    if kind == "aligned":
+        return kind, [head + " · совпадает"], relation
+    head += (f" · уровень {_stage30b_price(symbol, senior['level'])}"
+             f" · отмена {_stage30b_price(symbol, relation['invalidation'])}")
+    if kind == "pullback":
+        return kind, [head,
+                      f"Роль: ОТКАТ внутри {senior['tf']} · цель ограничена уровнем старшей фигуры",
+                      f"Предел отката: {_stage30b_price(symbol, relation['cap'])}"], relation
+    return kind, [head,
+                  f"Роль: ВОЗМОЖНЫЙ СЛОМ {senior['tf']} · цель "
+                  f"{_stage30b_price(symbol, relation['junior_target'])} за отменой · ждать закрытия "
+                  f"{senior['tf']} за {_stage30b_price(symbol, relation['invalidation'])}"], relation
+
+
+def stage30b_order(symbol: str, candidates: list[Pattern], pool: list[Pattern], by_tf: dict) -> list[Pattern]:
+    """П4: role first, then senior TF, then quality/confidence (stable)."""
+    def key(item: Pattern):
+        relation = stage30b_card_role(symbol, item, pool, by_tf)[0]
+        return (_STAGE30B_ROLE_RANK.get(relation, 0), _STAGE30B_TF_RANK.get(item.tf, 9),
+                -item.quality, -item.confidence)
+    return sorted(candidates, key=key)
+
+
 def _residual_potential(pattern: Pattern, by_tf: dict) -> dict:
     """Late-entry guard for structural/chart patterns.
 
@@ -2328,6 +2392,13 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                 continue
 
             news_note, penalty = _pattern_news_context(symbol, now_utc, pattern_events)
+            senior_pool = None
+            role_enabled = bool(getattr(cfg, "STAGE30B_PATTERN_ROLE_CARD", True))
+            if getattr(cfg, "STAGE30B_PATTERN_TF_PRIORITY", True):
+                unsent = [q for q in candidates if _pattern_key(symbol, q) not in sent]
+                if len(unsent) > 1:
+                    senior_pool = stage30b_senior_pool(symbol, by_tf, candidates)
+                    candidates = stage30b_order(symbol, candidates, senior_pool, by_tf)
             for p in candidates:
                 key = _pattern_key(symbol, p)
                 group_key = _delivery_group_key(symbol, p)
@@ -2388,7 +2459,25 @@ def process_market(market: dict, strength: dict[str, float] | None = None) -> li
                         log.info("PATTERN_BELOW_MIN_AFTER_NEWS pair=%s tf=%s pattern=%s conf=%d",
                                  symbol, p.tf, p.name, p.confidence)
                         continue
-                extra = []
+                role_lines: list[str] = []
+                if role_enabled and p.name not in CANDLE_PATTERN_NAMES:
+                    if senior_pool is None:
+                        senior_pool = stage30b_senior_pool(symbol, by_tf, candidates)
+                    relation, role_lines, _ctx = stage30b_card_role(symbol, p, senior_pool, by_tf)
+                    if relation == "pullback":
+                        cut = max(0, int(getattr(cfg, "PATTERN_COUNTER_SENIOR_PENALTY", 8)))
+                        p = Pattern(p.name, p.side, p.tf, p.quality, max(1, p.confidence - cut),
+                                    p.fact, p.level, p.dt, p.geometry_id)
+                        if not _passes_thresholds(p):
+                            # Not consumed: the senior figure may stop being
+                            # active while this junior is still fresh.
+                            log.info("PATTERN_BELOW_MIN_AFTER_SENIOR pair=%s tf=%s pattern=%s conf=%d",
+                                     symbol, p.tf, p.name, p.confidence)
+                            continue
+                    if relation in ("pullback", "possible_break"):
+                        log.info("PATTERN_SENIOR_ROLE pair=%s tf=%s pattern=%s role=%s",
+                                 symbol, p.tf, p.name, relation)
+                extra = list(role_lines)
                 same_event = [q.name for q in candidates
                               if q.name != p.name and group_key and _delivery_group_key(symbol, q) == group_key]
                 if same_event:

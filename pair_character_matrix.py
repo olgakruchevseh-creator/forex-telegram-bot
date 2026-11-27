@@ -435,9 +435,12 @@ def interaction_matrix(profile: dict, regime: str | None = None) -> dict:
     floor=0.01
     score=100*math.prod(max(floor,min(1.0,x)) for x in components01)**(1.0/len(components01))
     score=_clip(score)
-    if score >= 72: band='СИЛЬНОЕ СОГЛАСОВАНИЕ'
-    elif score >= 58: band='РАБОЧЕЕ СОГЛАСОВАНИЕ'
-    elif score >= 43: band='СМЕШАННО'
+    # Stage30A-fix B3: Telegram prints the score with :.0f; the band must be
+    # chosen from the SAME shown value (57.6 prints 58 → РАБОЧЕЕ, not СМЕШАННО).
+    shown = float(f"{round(score, 1):.0f}") if getattr(cfg, 'STAGE30A_MATRIX_BAND_ROUNDED', True) else score
+    if shown >= 72: band='СИЛЬНОЕ СОГЛАСОВАНИЕ'
+    elif shown >= 58: band='РАБОЧЕЕ СОГЛАСОВАНИЕ'
+    elif shown >= 43: band='СМЕШАННО'
     else: band='СЛАБОЕ СОГЛАСОВАНИЕ'
     return {'ready':True,'score':round(score,1),'band':band,
             'components':{k:round(100*v,1) for k,v in parts},

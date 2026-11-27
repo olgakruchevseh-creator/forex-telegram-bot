@@ -92,6 +92,12 @@ def is_information_card(text: str) -> bool:
             and any("· КОНТЕКСТ · НЕ ТОРГОВЫЙ СИГНАЛ" in ln
                     for ln in upper.splitlines()[:4])):
         return True
+    # Этап 30B П2: a junior pattern whose target lies beyond the cancellation
+    # of an ACTIVE senior figure is an observation until the senior TF closes.
+    if (getattr(cfg, "STAGE30B_PATTERN_BREAK_AS_INFO", True)
+            and "🧩 ПАТТЕРН ПОДТВЕРЖДЁН" in (text or "")
+            and re.search(r"(?m)^Роль: ВОЗМОЖНЫЙ СЛОМ\b", text or "")):
+        return True
     if getattr(cfg, "STAGE28_ZIGZAG_PULLBACK_INFO_ONLY", True):
         import re as _re
         header = "\n".join((text or "").splitlines()[:4]).upper()

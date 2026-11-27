@@ -190,6 +190,24 @@ def _scale_route(route: dict) -> dict:
 
 def _route_with_next_pivot(route: dict, pivot: dict | None) -> dict:
     """Использует Pivot как цель/ограничитель, но никогда как veto сигнала."""
+    result = _route_with_next_pivot_raw(route, pivot)
+    cap = result.get("senior_cap") if isinstance(result, dict) else None
+    if cap and getattr(cfg, "STAGE30B_NAVIGATOR_PULLBACK_CAP", True):
+        # Stage30B П3: Next Pivot may shorten a pullback, never extend it past
+        # the senior figure's limit.
+        direction = 1 if result.get("side") == "LONG" else -1
+        kept = [dict(t) for t in (result.get("targets") or [])
+                if (float(cap) - float(t["price"])) * direction >= -1e-9]
+        if not kept:
+            original = [dict(t) for t in (route.get("targets") or [])]
+            kept = original[:1] or [{"price": float(cap), "tf": "предел отката"}]
+        result = dict(result)
+        result["targets"] = kept[:1]
+        result["target"], result["target_tf"] = kept[0]["price"], kept[0]["tf"]
+    return result
+
+
+def _route_with_next_pivot_raw(route: dict, pivot: dict | None) -> dict:
     if not pivot or pivot.get("side") != route.get("side"):
         return route
     current = float(route.get("current") or 0)
@@ -484,6 +502,26 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         if not any(abs(item["price"] - float(old["price"])) <= tolerance for old in targets):
             targets.append(item)
     targets.sort(key=lambda item: abs(float(item["price"]) - anchor))
+    senior_cap = 0.0
+    if getattr(cfg, "STAGE30B_NAVIGATOR_PULLBACK_CAP", True):
+        senior_cap = _float_line(source_text, "Предел отката")
+        if senior_cap > 0:
+            role = re.search(r"^Роль: ОТКАТ внутри (W1|D1|H4|H1)\b", source_text or "", re.M)
+            senior_tf = role.group(1) if role else "старшей фигуры"
+            if (senior_cap - anchor) * direction <= 0:
+                # The limit is already behind the entry: nothing is left of
+                # this pullback. Do not invent a target beyond the senior level.
+                log.info("NAVIGATOR_PULLBACK_CAP_BEHIND pair=%s side=%s anchor=%.5f cap=%.5f",
+                         symbol, side, anchor, senior_cap)
+                return None
+            if abs(senior_cap - anchor) < min_target_distance:
+                log.info("NAVIGATOR_PULLBACK_TOO_SHORT pair=%s side=%s anchor=%.5f cap=%.5f min=%.5f",
+                         symbol, side, anchor, senior_cap, min_target_distance)
+                return None
+            # П3: no target beyond the senior figure's limit; the limit itself
+            # is the single TR of a PULLBACK route.
+            targets = [{"price": float(senior_cap), "tf": f"предел отката {senior_tf}"}]
+            mode = "PULLBACK"
     if mode == "PULLBACK":
         targets = targets[:1] or targets
     else:
@@ -509,6 +547,7 @@ def _trigger_route(symbol: str, side: str, by_tf: dict, source_text: str) -> dic
         # the actual signal. Time horizon must never point into the past.
         "horizon_base_dt": _source_event_dt(source_text),
         "market_state": shared_state,
+        "senior_cap": float(senior_cap) if senior_cap > 0 else None,
     }
 
 

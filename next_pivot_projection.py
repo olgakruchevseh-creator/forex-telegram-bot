@@ -286,6 +286,21 @@ def analyze_session_symbol(symbol: str, by_tf: dict, session_hours: int = 8, str
                              "recency": 0.0, "confirmed": False},
         }
     result["_strength"] = strength or {}
+    result["zone_passed"] = False
+    if getattr(cfg, "STAGE30A_PIVOT_SIDE_GUARD", True) and result.get("side"):
+        # Stage30A-fix B5: a LONG target of «ВЕРШИНЫ» already below the last
+        # closed H1 (or SHORT «ОСНОВАНИЯ» above it) is a PASSED zone, not a
+        # direction. Inside the zone stays «цена в зоне» as before.
+        current = float(result.get("current") or 0)
+        low, high = float(result["zone_low"]), float(result["zone_high"])
+        passed = (current > high) if result["side"] == "LONG" else (current < low)
+        if passed:
+            log.info("NEXT_PIVOT_ZONE_PASSED symbol=%s side=%s zone=%.5f-%.5f current=%.5f",
+                     symbol, result["side"], low, high, current)
+            result["zone_passed"] = True
+            result["passed_side"] = result["side"]
+            result["side"] = None
+            result["kind"] = None
     try:
         import market_state
         si = 1 if result.get("side") == "LONG" else -1
